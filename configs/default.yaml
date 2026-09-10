@@ -1,0 +1,19 @@
+physics_hz: 500
+control_hz: 20
+horizon: 1000
+image_width: 256
+image_height: 256
+max_joint_step_rad: 0.05
+max_gripper_step: 0.08
+cartesian_translation_scale_m: 0.025
+cartesian_rotation_scale_rad: 0.10
+ik_damping: 0.05
+ik_iterations: 8
+joint_damping: 0.8
+joint_armature: 0.02
+object_position_noise_m: 0.025
+home:
+  left: [0.0, 0.35, 0.0, -0.65, 0.0, 0.25, 0.0]
+  right: [0.0, -0.35, 0.0, 0.65, 0.0, -0.25, 0.0]
+  grippers: [0.6, 0.6]
+
