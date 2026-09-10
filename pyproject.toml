@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a3-dual-arm-sim"
+version = "0.1.0"
+description = "Policy-neutral MuJoCo sandbox and LeRobot recorder for the A3 dual-arm robot"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "gymnasium>=1.0,<2",
+  "mujoco>=3.3,<4",
+  "numpy>=2,<3",
+  "PyYAML>=6,<7",
+  "scipy>=1.11,<2",
+]
+
+[project.optional-dependencies]
+dataset = ["lerobot>=0.4,<0.6"]
+train = ["lerobot[smolvla,training]>=0.5,<0.6"]
+dev = ["pytest>=8,<10", "ruff>=0.12,<1"]
+
+[project.scripts]
+a3-sim = "a3_dual_arm_sim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
