@@ -3,6 +3,11 @@ control_hz: 20
 horizon: 1000
 image_width: 256
 image_height: 256
+# Set either to false to skip that per-light render pass. Software rasterizers
+# spend most of their frame time in shadow and reflection maps, so disabling
+# them is the single largest available speed-up when no GPU is present.
+render_shadows: true
+render_reflections: true
 max_joint_step_rad: 0.05
 max_gripper_step: 0.08
 cartesian_translation_scale_m: 0.025

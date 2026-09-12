@@ -90,6 +90,13 @@ write a dataset containing black camera streams. Manual keyboard collection is t
 exception to the viewer-off rule: `teleop --record ...` keeps both the Human Viewer and Policy RGB
 on because keyboard input comes from the viewer.
 
+On a machine without a GPU the offscreen cameras dominate frame time: MuJoCo regenerates one
+shadow map per light for every camera, and that cost does not depend on the camera resolution. Pass
+`--fast-render` to `run`, `teleop`, or `collect-grasp` to skip the shadow and reflection passes,
+which is roughly four times faster while keeping geometry, materials, and colours intact. The same
+switch is available persistently through `render_shadows` and `render_reflections` in
+`configs/default.yaml`.
+
 On the current Python 3.13/MuJoCo/GLFW combination, a process that has owned both the interactive
 viewer and offscreen camera renderer can otherwise segfault during interpreter shutdown even after
 both contexts were explicitly closed. Interactive CLI commands therefore flush/close all project

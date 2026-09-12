@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -349,7 +350,32 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 width=self.config.image_width,
             )
         self._renderer.update_scene(self.data, camera=self._camera_ids[name])
+        self._apply_render_flags(self._renderer.scene)
         return np.ascontiguousarray(self._renderer.render(), dtype=np.uint8)
+
+    def _apply_render_flags(self, scene: Any) -> None:
+        """Force the configured light passes on every frame.
+
+        The renderer reuses one persistent scene, so the flags are re-applied
+        here rather than once at construction to stay correct regardless of how
+        ``update_scene`` leaves them.
+        """
+        scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = int(self.config.render_shadows)
+        scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = int(
+            self.config.render_reflections
+        )
+
+    def use_fast_render(self) -> None:
+        """Drop the per-light shadow and reflection passes for speed.
+
+        Software rasterizers spend most of their frame time generating shadow
+        and reflection maps, whose cost does not depend on camera resolution.
+        Disabling both keeps geometry, materials, and colours intact at roughly
+        four times the frame rate.
+        """
+        self.config = replace(
+            self.config, render_shadows=False, render_reflections=False
+        )
 
     def _ensure_viewer(self) -> None:
         if self._viewer is None:

@@ -15,7 +15,7 @@ from .cookie_transfer import A3CookieTransferEnv
 from .env import A3DualArmEnv
 from .grasp import A3GraspEnv
 from .model import SceneName, build_model, write_generated_xml
-from .policy import HoldPolicy, load_policy
+from .policy import HoldPolicy, load_policy, policy_requires_env
 from .recording import LeRobotV3Recorder
 from .runner import EpisodeRunner
 from .teleop import KeyboardTeleopPolicy
@@ -99,15 +99,29 @@ def _smoke(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
-    policy = load_policy(args.policy)
     render_mode = "human" if args.render else None
-    env = _make_env(
-        args.scene,
-        args.config,
-        action_mode=policy.action_mode,
-        render_mode=render_mode,
-        render_cameras=args.camera_render,
-    )
+    if policy_requires_env(args.policy):
+        # Privileged experts plan against live simulator state, so the
+        # environment has to exist before the policy is constructed.
+        env = _make_env(
+            args.scene,
+            args.config,
+            action_mode="joint_position",
+            render_mode=render_mode,
+            render_cameras=args.camera_render,
+            fast_render=args.fast_render,
+        )
+        policy = load_policy(args.policy, env=env)
+    else:
+        policy = load_policy(args.policy)
+        env = _make_env(
+            args.scene,
+            args.config,
+            action_mode=policy.action_mode,
+            render_mode=render_mode,
+            render_cameras=args.camera_render,
+            fast_render=args.fast_render,
+        )
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
         env,
@@ -136,6 +150,7 @@ def _teleop(args: argparse.Namespace) -> int:
         action_mode="cartesian_delta",
         render_mode="human",
         render_cameras=args.camera_render,
+        fast_render=args.fast_render,
     )
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
@@ -169,11 +184,19 @@ def _teleop(args: argparse.Namespace) -> int:
 def _make_env(
     scene: SceneName,
     config: Path | None,
+    *,
+    fast_render: bool = False,
     **kwargs: Any,
 ) -> A3DualArmEnv:
     if scene == "cookie_transfer":
-        return A3CookieTransferEnv(config, **kwargs)
-    return A3DualArmEnv(config, scene=scene, **kwargs)
+        env: A3DualArmEnv = A3CookieTransferEnv(config, **kwargs)
+    else:
+        env = A3DualArmEnv(config, scene=scene, **kwargs)
+    if fast_render:
+        # Applied after construction so every scene keeps its own defaults;
+        # cookie_transfer, for example, supplies its own horizon.
+        env.use_fast_render()
+    return env
 
 
 def _default_task(scene: SceneName) -> str:
@@ -297,6 +320,7 @@ def _collect_grasp(args: argparse.Namespace) -> int:
         start_seed=args.seed,
         max_attempts=args.max_attempts,
         config=args.config,
+        fast_render=args.fast_render,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -341,6 +365,14 @@ def _add_camera_rendering(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_fast_render(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--fast-render",
+        action="store_true",
+        help="Skip shadow and reflection passes; much faster without a GPU",
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="a3-sim", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -364,6 +396,7 @@ def parser() -> argparse.ArgumentParser:
     _add_common(run)
     _add_recording(run)
     _add_camera_rendering(run)
+    _add_fast_render(run)
     run.add_argument(
         "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
     )
@@ -377,6 +410,7 @@ def parser() -> argparse.ArgumentParser:
     _add_common(teleop)
     _add_recording(teleop)
     _add_camera_rendering(teleop)
+    _add_fast_render(teleop)
     teleop.add_argument(
         "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
     )
@@ -400,6 +434,7 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--repo-id", default="local/a3-grasp")
     collect.add_argument("--episodes", type=int, default=10)
     collect.add_argument("--max-attempts", type=int, default=None)
+    _add_fast_render(collect)
     collect.set_defaults(function=_collect_grasp)
 
     train = commands.add_parser(

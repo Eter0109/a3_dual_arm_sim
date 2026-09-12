@@ -21,6 +21,7 @@ def collect_grasp_dataset(
     max_attempts: int | None = None,
     config: str | Path | None = None,
     render_cameras: bool = True,
+    fast_render: bool = False,
 ) -> dict[str, Any]:
     if episodes < 1:
         raise ValueError("episodes must be positive")
@@ -29,6 +30,8 @@ def collect_grasp_dataset(
         raise ValueError("max_attempts cannot be smaller than episodes")
     destination = Path(root)
     env = A3GraspEnv(config, render_cameras=render_cameras)
+    if fast_render:
+        env.use_fast_render()
     expert = A3GraspExpert(env)
     recorder = LeRobotV3Recorder(
         destination,

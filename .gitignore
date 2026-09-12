@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 .runtime/
+logs/
 outputs/
 datasets/
 MUJOCO_LOG.TXT

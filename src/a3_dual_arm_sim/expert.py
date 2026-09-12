@@ -776,3 +776,9 @@ class A3CookieTransferExpert:
 
     def close(self) -> None:
         return None
+
+
+def make_cookie_transfer_expert(env: A3CookieTransferEnv) -> A3CookieTransferExpert:
+    """CLI factory: ``--policy a3_dual_arm_sim.expert:make_cookie_transfer_expert``."""
+
+    return A3CookieTransferExpert(env)

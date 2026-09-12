@@ -136,3 +136,21 @@ def test_emergency_stop_terminates_without_applying_requested_motion() -> None:
         np.testing.assert_allclose(info["applied_action"], before)
     finally:
         env.close()
+
+
+def test_fast_render_skips_light_passes_without_blanking_images() -> None:
+    env = A3DualArmEnv()
+    try:
+        assert env.config.render_shadows and env.config.render_reflections
+        env.use_fast_render()
+        assert not env.config.render_shadows and not env.config.render_reflections
+        observation, _ = env.reset(seed=4)
+        scene = env._renderer.scene
+        assert scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] == 0
+        assert scene.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] == 0
+        image = observation[FRONT_IMAGE]
+        assert image.shape == (256, 256, 3)
+        assert image.dtype == np.uint8
+        assert int(image.max()) > 0
+    finally:
+        env.close()

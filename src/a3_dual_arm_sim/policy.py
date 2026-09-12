@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -20,14 +21,38 @@ class Policy(Protocol):
     def close(self) -> None: ...
 
 
-def load_policy(spec: str) -> Policy:
-    """Load a zero-argument policy factory from ``module:factory``."""
-
+def _resolve_factory(spec: str) -> Any:
     if ":" not in spec:
         raise ValueError("policy must use module:factory syntax")
     module_name, factory_name = spec.rsplit(":", 1)
-    factory = getattr(importlib.import_module(module_name), factory_name)
-    policy = factory()
+    return getattr(importlib.import_module(module_name), factory_name)
+
+
+def _accepts_env(factory: Any) -> bool:
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return False
+    return "env" in parameters
+
+
+def policy_requires_env(spec: str) -> bool:
+    """Return whether ``spec``'s factory needs the live environment to construct."""
+
+    return _accepts_env(_resolve_factory(spec))
+
+
+def load_policy(spec: str, env: Any = None) -> Policy:
+    """Load a policy factory from ``module:factory``.
+
+    Factories declared with an ``env`` parameter receive the live environment.
+    Privileged experts need it because they solve inverse kinematics against
+    current simulator state while planning; every other policy is called with
+    no arguments.
+    """
+
+    factory = _resolve_factory(spec)
+    policy = factory(env) if env is not None and _accepts_env(factory) else factory()
     if not isinstance(policy, Policy):
         raise TypeError(f"{spec} did not create an A3 policy plugin")
     return policy
