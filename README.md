@@ -49,6 +49,46 @@ MUJOCO_GL=egl a3-sim smoke --scene cookie_transfer --steps 1000
 Use `MUJOCO_GL=egl` for headless execution. Do not set it when your platform requires a different
 interactive OpenGL backend.
 
+The editable install includes Pillow, Matplotlib, and OpenCV for camera inspection and future live
+viewers. Save a labeled snapshot of all three policy cameras, or add `--show` to open it interactively:
+
+```bash
+MUJOCO_GL=egl python examples/preview_cameras.py
+MUJOCO_GL=egl python examples/preview_cameras.py --show
+```
+
+The output directory contains the three original `256x256` frames plus `all_cameras.png`.
+
+## Rendering modes
+
+Use viewer-only mode while checking teleoperation. It opens a dedicated A3 control panel beside
+MuJoCo's display-only Human Viewer, skips all three Policy RGB render passes, and does not record a
+dataset:
+
+```bash
+unset MUJOCO_GL
+a3-sim teleop --scene cookie_transfer --no-camera-render --steps 1000
+```
+
+The observation keys and shapes remain unchanged in this mode, but the three images are black. This
+keeps state-only policies and the runner contract stable while avoiding the expensive offscreen GL
+work. `--no-camera-render` is available on both `run` and `teleop`.
+
+Use headless capture/policy mode when images are required. Leave camera rendering enabled (the
+default), keep the Human Viewer off, and select EGL before the process starts:
+
+```bash
+MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
+  --policy your_package.your_policy:make_policy \
+  --record outputs/datasets/a3_cookie_policy \
+  --repo-id local/a3-cookie-policy --steps 1000
+```
+
+The CLI rejects `--no-camera-render` together with `--record` so an accidental debug launch cannot
+write a dataset containing black camera streams. Manual keyboard collection is the necessary
+exception to the viewer-off rule: `teleop --record ...` keeps both the Human Viewer and Policy RGB
+on because keyboard input comes from the viewer.
+
 On the current Python 3.13/MuJoCo/GLFW combination, a process that has owned both the interactive
 viewer and offscreen camera renderer can otherwise segfault during interpreter shutdown even after
 both contexts were explicitly closed. Interactive CLI commands therefore flush/close all project
@@ -150,9 +190,25 @@ MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
   --repo-id local/a3-cookie-policy --steps 1000
 ```
 
-The current built-in `A3GraspExpert` remains scoped to the single-cube validation task. It is not
-silently relabeled as a cookie-transfer expert; cookie demonstrations should currently come from
-teleoperation or a dedicated policy plugin until a separately validated packing expert is added.
+`A3CookieTransferExpert` is a privileged, feedback-driven state machine rather than a VLA. It
+replans one Cookie at a time, verifies grasp/lift/release/slot outcomes from simulator truth, and
+retries failed phases. These privileged checks are Expert-only and are not added to policy
+observations.
+
+Run one visible demonstration or a headless evaluation report with:
+
+```bash
+python examples/run_cookie_transfer.py --render
+python examples/evaluate_cookie_transfer.py --seeds 0-19 \
+  --output artifacts/cookie_transfer_dev.json
+python examples/evaluate_cookie_transfer.py --seeds 100-119 \
+  --output artifacts/cookie_transfer_validation.json
+```
+
+The JSON report records success, verified grasp/lift, transfer drops, completed Cookies, failed
+Cookie and phase, failure reason, maximum left-gripper touch force, steps, final source/target
+counts, slot occupancy, and retries. With the current zero pose-noise configuration, different
+seeds intentionally share the same layout; seed sweeps become meaningful after noise is enabled.
 
 ## Grasp expert and SmolVLA
 
@@ -218,14 +274,21 @@ a3-sim teleop --record datasets/a3_manual --repo-id local/a3-manual \
   --task "manual tabletop demonstration"
 ```
 
+Teleoperation opens two windows. Keep keyboard focus on **A3 Teleoperation Control**; use the MuJoCo
+Viewer only to watch the robot or adjust the viewing camera with the mouse. This prevents movement
+keys from activating MuJoCo's built-in wireframe, joint, geometry-group, and pause shortcuts. The
+control panel also provides press-and-hold buttons, arm selection, a speed slider, gripper controls,
+recording status, normal/discard exits, and a red emergency-stop button.
+
 - `1`, `2`, `3`: select left, right, or both arms
-- `W/S`, `A/D`, `R/F`: Cartesian translation
-- `I/K`, `J/L`, `U/O`: Cartesian rotation
+- `W/S`, `A/D`, `R/F`: world-frame `+X/-X`, `+Y/-Y`, `+Z/-Z` translation
+- `I/K`, `J/L`, `U/O`: world-frame `+Rx/-Rx`, `+Ry/-Ry`, `+Rz/-Rz` rotation
 - `[` / `]`: close / open gripper
 - `P`: pause/resume recording; `Space`: emergency stop
 - `Q`: save and quit; `X`: discard and quit
 
-The mouse keeps MuJoCo's standard orbit, pan, and zoom behavior for inspecting the scene.
+Keyboard and panel buttons keep moving while held and stop on release. The mouse keeps MuJoCo's
+standard orbit, pan, and zoom behavior for inspecting the scene.
 
 Episode metadata is stored in `a3_episode_metadata.jsonl`, including source controller, source
 action mode, canonical stored action mode, seed, task, frame count, and optional success label.

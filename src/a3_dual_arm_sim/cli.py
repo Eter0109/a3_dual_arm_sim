@@ -19,6 +19,7 @@ from .policy import HoldPolicy, load_policy
 from .recording import LeRobotV3Recorder
 from .runner import EpisodeRunner
 from .teleop import KeyboardTeleopPolicy
+from .teleop_panel import run_teleop_control_panel
 from .training import default_base_model, train_smolvla
 
 
@@ -33,6 +34,16 @@ def _recorder(args: argparse.Namespace, env: A3DualArmEnv) -> LeRobotV3Recorder 
         image_width=env.config.image_width,
         use_videos=args.videos,
     )
+
+
+def _validate_camera_recording(args: argparse.Namespace) -> None:
+    if getattr(args, "record", None) is not None and not getattr(
+        args, "camera_render", True
+    ):
+        raise ValueError(
+            "--no-camera-render cannot be combined with --record because it would "
+            "save black policy-camera frames"
+        )
 
 
 def _inspect(args: argparse.Namespace) -> int:
@@ -95,6 +106,7 @@ def _run(args: argparse.Namespace) -> int:
         args.config,
         action_mode=policy.action_mode,
         render_mode=render_mode,
+        render_cameras=args.camera_render,
     )
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
@@ -113,14 +125,18 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _teleop(args: argparse.Namespace) -> int:
-    policy = KeyboardTeleopPolicy()
+    recording_available = args.record is not None
+    policy = KeyboardTeleopPolicy(
+        recording=recording_available,
+        recording_available=recording_available,
+    )
     env = _make_env(
         args.scene,
         args.config,
         action_mode="cartesian_delta",
         render_mode="human",
+        render_cameras=args.camera_render,
     )
-    env.set_key_callback(policy.handle_key)
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
         env,
@@ -129,12 +145,21 @@ def _teleop(args: argparse.Namespace) -> int:
         recorder=recorder,
         realtime=True,
     )
+    mode = (
+        "interactive debug: Human Viewer on, Policy RGB off, recording off"
+        if not args.camera_render
+        else "teleoperation capture: Human Viewer and Policy RGB on"
+    )
+    print(f"Mode: {mode}")
     print(
-        "Teleop: 1/2/3 select left/right/both; WASDRF translate; IJKLUO rotate; "
-        "[/] gripper; P pause recording; Space emergency stop; Q save/quit; X discard/quit."
+        "Use the separate A3 control panel for keyboard/buttons. Keep focus on that "
+        "panel; the MuJoCo Viewer is display-only."
     )
     try:
-        result = runner.run(seed=args.seed, max_steps=args.steps)
+        result = run_teleop_control_panel(
+            policy,
+            lambda: runner.run(seed=args.seed, max_steps=args.steps),
+        )
         print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
         return 0 if not result.terminated else 1
     finally:
@@ -304,6 +329,18 @@ def _add_recording(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--videos", action="store_true", help="Encode camera streams as video")
 
 
+def _add_camera_rendering(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--camera-render",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Render the three Policy RGB observations; use --no-camera-render "
+            "for responsive viewer-only debugging"
+        ),
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="a3-sim", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -326,6 +363,7 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="Run a replaceable Python policy plugin")
     _add_common(run)
     _add_recording(run)
+    _add_camera_rendering(run)
     run.add_argument(
         "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
     )
@@ -338,6 +376,7 @@ def parser() -> argparse.ArgumentParser:
     teleop = commands.add_parser("teleop", help="Control both arms with the keyboard")
     _add_common(teleop)
     _add_recording(teleop)
+    _add_camera_rendering(teleop)
     teleop.add_argument(
         "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
     )
@@ -380,7 +419,12 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = parser().parse_args()
+    argument_parser = parser()
+    args = argument_parser.parse_args()
+    try:
+        _validate_camera_recording(args)
+    except ValueError as exc:
+        argument_parser.error(str(exc))
     exit_code = int(args.function(args))
     uses_human_viewer = args.command == "teleop" or bool(
         getattr(args, "render", False)

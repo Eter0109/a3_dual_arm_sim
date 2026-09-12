@@ -62,6 +62,8 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             raise ValueError(f"unsupported render mode: {render_mode}")
         self.action_mode = action_mode
         self.render_mode = render_mode
+        # Keep the observation schema fixed in fast debug mode: disabled policy
+        # cameras produce black frames without constructing an offscreen GL context.
         self.render_cameras = render_cameras
         self.scene = scene
         bundle: ModelBundle = build_model(self.config, scene=scene)
@@ -182,6 +184,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             "seed": seed,
             "action_mode": self.action_mode,
             "scene": self.scene,
+            "policy_camera_rendering": self.render_cameras,
         }
 
     def _randomize_objects(self, *, enabled: bool) -> None:

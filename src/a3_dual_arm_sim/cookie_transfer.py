@@ -10,17 +10,6 @@ import numpy as np
 from .config import SimConfig
 from .contracts import ARM_JOINTS, ActionMode
 from .env import A3DualArmEnv
-from .model import (
-    BIN_WALL_THICKNESS,
-    COOKIE_HALF_SIZE,
-    COOKIE_SOURCE_POSITIONS,
-    SOURCE_BIN_CENTER,
-    SOURCE_BIN_HALF_SIZE,
-    SOURCE_BIN_WALL_HEIGHT,
-    TARGET_BIN_CENTER,
-    TARGET_BIN_HALF_SIZE,
-    TARGET_BIN_WALL_HEIGHT,
-)
 
 
 @dataclass(frozen=True)
@@ -36,10 +25,6 @@ class CookieTransferTaskConfig:
     terminate_on_success: bool = True
 
     def __post_init__(self) -> None:
-        if self.cookie_count != len(COOKIE_SOURCE_POSITIONS):
-            raise ValueError(
-                f"cookie_count must match the {len(COOKIE_SOURCE_POSITIONS)} model bodies"
-            )
         if self.required_cookies != 10:
             raise ValueError("the 2x5 target contract requires exactly 10 cookies")
 
@@ -47,28 +32,6 @@ class CookieTransferTaskConfig:
 class A3CookieTransferEnv(A3DualArmEnv):
     """Video-inspired task: transfer packaged cookies from a large bin to a small bin."""
 
-    SOURCE_POSITIONS = COOKIE_SOURCE_POSITIONS
-    SOURCE_CENTER = np.asarray(SOURCE_BIN_CENTER, dtype=np.float64)
-    SOURCE_INNER_HALF_SIZE = (
-        np.asarray(SOURCE_BIN_HALF_SIZE, dtype=np.float64) - BIN_WALL_THICKNESS
-    )
-    TARGET_CENTER = np.asarray(TARGET_BIN_CENTER, dtype=np.float64)
-    TARGET_INNER_HALF_SIZE = (
-        np.asarray(TARGET_BIN_HALF_SIZE, dtype=np.float64) - BIN_WALL_THICKNESS
-    )
-    COOKIE_HALF_SIZE = np.asarray(COOKIE_HALF_SIZE, dtype=np.float64)
-    TARGET_SLOTS_LOCAL = (
-        (-0.025, -0.060),
-        (+0.028, -0.060),
-        (-0.025, -0.041),
-        (+0.028, -0.041),
-        (-0.025, -0.022),
-        (+0.028, -0.022),
-        (-0.025, -0.003),
-        (+0.028, -0.003),
-        (-0.025, +0.035),
-        (+0.028, +0.035),
-    )
     TARGET_SLOT_CENTERS = np.asarray(
         [
             (0.0911, 0.1816),
@@ -84,21 +47,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
         ],
         dtype=np.float64,
     )
-    TARGET_SLOT_TOLERANCE = np.asarray((0.020, 0.0095), dtype=np.float64)
     CONTACT_CONTAINMENT_TOLERANCE_M = 0.004
     WALL_CONTACT_TOLERANCE_M = 0.026
     TARGET_FLOOR_TOP_Z = 0.775
-    SOURCE_WALL_TOP_Z = 0.75 + SOURCE_BIN_WALL_HEIGHT
-    TARGET_WALL_TOP_Z = 0.035
-    DEPLOYMENT_HOME = np.asarray(
-        [
-            0.971886, 1.102756, -0.640447, -0.77668, -0.798451, 0.05216, -1.5699,
-            0.28,
-            -1.805, -1.499, 1.543, 0.54, -2.247, -0.058, 0.041,
-            0.6,
-        ],
-        dtype=np.float64,
-    )
 
     def __init__(
         self,
@@ -119,6 +70,40 @@ class A3CookieTransferEnv(A3DualArmEnv):
             render_cameras=render_cameras,
             scene="cookie_transfer",
         )
+        scene_config = self.config.cookie_transfer
+        if self.task_config.cookie_count != len(scene_config.cookie_source_positions_m):
+            raise ValueError(
+                "task cookie_count must match configured cookie source positions"
+            )
+        self.SOURCE_POSITIONS = scene_config.cookie_source_positions_m
+        self.SOURCE_CENTER = np.asarray(
+            scene_config.source_bin_center_m, dtype=np.float64
+        )
+        self.SOURCE_INNER_HALF_SIZE = (
+            np.asarray(scene_config.source_bin_half_size_m, dtype=np.float64)
+            - scene_config.bin_wall_thickness_m
+        )
+        self.TARGET_CENTER = np.zeros(2, dtype=np.float64)
+        self.TARGET_INNER_HALF_SIZE = (
+            np.asarray(scene_config.target_bin_half_size_m, dtype=np.float64)
+            - scene_config.bin_wall_thickness_m
+        )
+        self.COOKIE_HALF_SIZE = np.asarray(
+            scene_config.cookie_half_size_m, dtype=np.float64
+        )
+        self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
+        self.TARGET_SLOT_TOLERANCE = np.asarray(
+            scene_config.target_slot_tolerance_m, dtype=np.float64
+        )
+        self.SOURCE_WALL_TOP_Z = (
+            scene_config.source_wall_base_z_m + scene_config.source_bin_wall_height_m
+        )
+        self.TARGET_WALL_HEIGHT = scene_config.target_bin_wall_height_m
+        self.SOURCE_FLOOR_TOP_Z = scene_config.source_floor_z_m
+        self.COOKIE_RESET_Z = scene_config.cookie_reset_z_m
+        self.DEPLOYMENT_HOME = np.asarray(
+            scene_config.deployment_home, dtype=np.float64
+        )
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
         self._cookie_bodies = tuple(
             self._id(mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}")
@@ -132,6 +117,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_GEOM, f"cookie_{index}_geom")
             for index in range(self.task_config.cookie_count)
         )
+        self._left_finger_geoms = tuple(
+            self._id(mujoco.mjtObj.mjOBJ_GEOM, f"L_finger_{finger}_geom")
+            for finger in ("inner", "outer")
+        )
         self._success_hold_count = 0
         self._source_initially_filled = False
 
@@ -144,6 +133,78 @@ class A3CookieTransferEnv(A3DualArmEnv):
     @property
     def success_hold_count(self) -> int:
         return self._success_hold_count
+
+    def privileged_cookie_position(self, index: int) -> np.ndarray:
+        """Return simulator-truth position for expert control, never policy input."""
+        return self.data.xpos[self._cookie_bodies[index]].copy()
+
+    def privileged_cookie_target_position(self, index: int) -> np.ndarray:
+        """Return Cookie position in the moving target-bin frame."""
+        target_position = self.data.xpos[self._target_bin_body]
+        target_rotation = self.data.xmat[self._target_bin_body].reshape(3, 3)
+        return target_rotation.T @ (
+            self.data.xpos[self._cookie_bodies[index]] - target_position
+        )
+
+    def privileged_target_slot_world(self, slot_index: int, z: float) -> np.ndarray:
+        """Convert a configured target slot into a simulator-truth world point."""
+        target_position = self.data.xpos[self._target_bin_body]
+        target_rotation = self.data.xmat[self._target_bin_body].reshape(3, 3)
+        slot_xy = self.TARGET_SLOTS_LOCAL[slot_index]
+        return target_position + target_rotation @ np.asarray(
+            [slot_xy[0], slot_xy[1], z], dtype=np.float64
+        )
+
+    def privileged_left_finger_contacts(self, index: int) -> tuple[bool, bool]:
+        """Report target-Cookie contact for each left finger from MuJoCo contacts."""
+        cookie_geom = self._cookie_geoms[index]
+        contacts = [False, False]
+        for contact_index in range(self.data.ncon):
+            contact = self.data.contact[contact_index]
+            pair = {int(contact.geom1), int(contact.geom2)}
+            for finger_index, finger_geom in enumerate(self._left_finger_geoms):
+                if pair == {finger_geom, cookie_geom}:
+                    contacts[finger_index] = True
+        return contacts[0], contacts[1]
+
+    def privileged_left_touch_values(self) -> tuple[float, float]:
+        """Return left fingertip touch signals for expert-only grasp verification."""
+        return (
+            float(self._sensor("L_finger_inner_touch_sensor")[0]),
+            float(self._sensor("L_finger_outer_touch_sensor")[0]),
+        )
+
+    def privileged_cookie_in_source(self, index: int) -> bool:
+        return self._cookie_inside_source(index)
+
+    def privileged_cookie_in_target(self, index: int) -> bool:
+        return self._cookie_inside_target(index)
+
+    def privileged_cookie_in_target_region(self, index: int) -> bool:
+        """Check target-bin geometry without requiring the Cookie to be settled."""
+        local_position = self.privileged_cookie_target_position(index)
+        return bool(
+            abs(local_position[0])
+            <= self.TARGET_INNER_HALF_SIZE[0] + self.CONTACT_CONTAINMENT_TOLERANCE_M
+            and abs(local_position[1])
+            <= self.TARGET_INNER_HALF_SIZE[1] + self.CONTACT_CONTAINMENT_TOLERANCE_M
+            and -0.005 <= local_position[2]
+            <= self.TARGET_WALL_HEIGHT
+            + self.CONTACT_CONTAINMENT_TOLERANCE_M
+            + 0.035
+        )
+
+    def privileged_cookie_in_slot(self, index: int, slot_index: int) -> bool:
+        if not self._cookie_inside_target(index):
+            return False
+        local_position = self.privileged_cookie_target_position(index)
+        target_xy = np.asarray(self.TARGET_SLOTS_LOCAL[slot_index], dtype=np.float64)
+        return bool(
+            np.all(
+                np.abs(local_position[:2] - target_xy)
+                <= self.TARGET_SLOT_TOLERANCE
+            )
+        )
 
     def reset(
         self,
@@ -185,7 +246,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
             else:
                 dx = dy = yaw = 0.0
             quaternion = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
-            self.set_cookie_pose(index, (base_x + dx, base_y + dy, 0.791), quaternion)
+            self.set_cookie_pose(
+                index, (base_x + dx, base_y + dy, self.COOKIE_RESET_Z), quaternion
+            )
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
         self.data.time = 0.0
@@ -194,13 +257,12 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._cookie_inside_source(index)
             for index in range(self.task_config.cookie_count)
         )
-        self._source_initially_filled = (
-            all(source_mask)
-            and self._collection_touches_all_walls(
-                source_mask,
-                self.SOURCE_CENTER,
-                self.SOURCE_INNER_HALF_SIZE,
-            )
+        self._source_initially_filled = all(
+            source_mask
+        ) and self._collection_touches_all_walls(
+            source_mask,
+            self.SOURCE_CENTER,
+            self.SOURCE_INNER_HALF_SIZE,
         )
         observation = self._observation()
         info.update(
@@ -214,8 +276,6 @@ class A3CookieTransferEnv(A3DualArmEnv):
             source_initially_filled=self._source_initially_filled,
         )
         return observation, info
-
-    SOURCE_FLOOR_TOP_Z = 0.753
 
     def set_cookie_pose(
         self,
@@ -255,7 +315,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
         velocity = self.data.qvel[dof_address : dof_address + 6].copy()
         if relative_to_target and hasattr(self, "_target_bin_body"):
             tb_cvel = self.data.cvel[self._target_bin_body]
-            r = self.data.xpos[self._cookie_bodies[index]] - self.data.xpos[self._target_bin_body]
+            r = (
+                self.data.xpos[self._cookie_bodies[index]]
+                - self.data.xpos[self._target_bin_body]
+            )
             v_expected = tb_cvel[3:] + np.cross(tb_cvel[:3], r)
             rel_v = velocity[:3] - v_expected
             rel_w = velocity[3:] - tb_cvel[:3]
@@ -318,12 +381,15 @@ class A3CookieTransferEnv(A3DualArmEnv):
         r_rel = tb_mat.T @ c_mat
 
         footprint_inside = bool(
-            abs(p_rel[0]) <= self.TARGET_INNER_HALF_SIZE[0] + self.CONTACT_CONTAINMENT_TOLERANCE_M
-            and abs(p_rel[1]) <= self.TARGET_INNER_HALF_SIZE[1] + self.CONTACT_CONTAINMENT_TOLERANCE_M
+            abs(p_rel[0])
+            <= self.TARGET_INNER_HALF_SIZE[0] + self.CONTACT_CONTAINMENT_TOLERANCE_M
+            and abs(p_rel[1])
+            <= self.TARGET_INNER_HALF_SIZE[1] + self.CONTACT_CONTAINMENT_TOLERANCE_M
         )
         vertically_inside = bool(
             p_rel[2] >= -0.005
-            and p_rel[2] <= TARGET_BIN_WALL_HEIGHT + self.CONTACT_CONTAINMENT_TOLERANCE_M + 0.035
+            and p_rel[2]
+            <= self.TARGET_WALL_HEIGHT + self.CONTACT_CONTAINMENT_TOLERANCE_M + 0.035
         )
         upright = bool(
             abs(float(r_rel[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
@@ -381,7 +447,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
                     continue
                 c_pos = self.data.xpos[self._cookie_bodies[index]]
                 p_rel = tb_mat.T @ (c_pos - tb_pos)
-                r_rel = tb_mat.T @ self.data.geom_xmat[self._cookie_geoms[index]].reshape(3, 3)
+                r_rel = tb_mat.T @ self.data.geom_xmat[
+                    self._cookie_geoms[index]
+                ].reshape(3, 3)
                 half_extent = (np.abs(r_rel) @ self.COOKIE_HALF_SIZE)[:2]
                 edges.append((p_rel[:2] - half_extent, p_rel[:2] + half_extent))
             inner_lower = -inner_half_size
@@ -429,7 +497,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         exact_fill = (
             target_count == self.task_config.required_cookies
-            and source_count == self.task_config.cookie_count - self.task_config.required_cookies
+            and source_count
+            == self.task_config.cookie_count - self.task_config.required_cookies
             and all(index >= 0 for index in occupancy)
             and target_touches_all_walls
         )
