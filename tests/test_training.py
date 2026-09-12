@@ -45,7 +45,26 @@ def test_training_dataset_audit_rejects_old_success_contract(tmp_path: Path) -> 
     (root / "collection_summary.json").write_text(
         json.dumps({"schema_version": 1, "task": "a3_grasp"}) + "\n"
     )
-    with pytest.raises(ValueError, match="obsolete transient-lift"):
+    with pytest.raises(ValueError, match="obsolete success contract"):
+        audit_training_dataset(root, repo_id="local/test")
+
+
+def test_training_dataset_audit_accepts_cookie_transfer(tmp_path: Path) -> None:
+    root = _dataset(tmp_path / "cookie")
+    (root / "collection_summary.json").write_text(
+        json.dumps({"schema_version": 2, "task": "a3_cookie_transfer"}) + "\n"
+    )
+    summary = audit_training_dataset(root, repo_id="local/test")
+    assert summary["task"] == "a3_cookie_transfer"
+    assert summary["success_contract"] == "exact_2x5_fill_touching_all_walls_upright_1s"
+
+
+def test_training_dataset_audit_rejects_an_unknown_task(tmp_path: Path) -> None:
+    root = _dataset(tmp_path / "other")
+    (root / "collection_summary.json").write_text(
+        json.dumps({"schema_version": 2, "task": "a3_lift"}) + "\n"
+    )
+    with pytest.raises(ValueError, match="supported tasks"):
         audit_training_dataset(root, repo_id="local/test")
 
 

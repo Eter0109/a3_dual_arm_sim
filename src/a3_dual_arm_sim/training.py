@@ -15,6 +15,14 @@ CAMERA_KEYS = (
 )
 
 
+#: Tasks whose datasets this auditor accepts, mapped to the success contract the
+#: collection code was expected to enforce.
+SUPPORTED_TASKS = {
+    "a3_grasp": "dual_contact_centered_clear_lifted_low_motion_1s",
+    "a3_cookie_transfer": "exact_2x5_fill_touching_all_walls_upright_1s",
+}
+
+
 def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     """Fail fast on the parts of the LeRobot v3 contract used by SmolVLA."""
     root = root.expanduser().resolve()
@@ -26,17 +34,20 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     if not metadata_path.is_file():
         raise FileNotFoundError(f"Missing A3 episode metadata: {metadata_path}")
     if not collection_summary_path.is_file():
-        raise FileNotFoundError(f"Missing grasp collection summary: {collection_summary_path}")
+        raise FileNotFoundError(f"Missing collection summary: {collection_summary_path}")
 
     info = json.loads(info_path.read_text(encoding="utf-8"))
     collection_summary = json.loads(collection_summary_path.read_text(encoding="utf-8"))
     if collection_summary.get("schema_version", 0) < 2:
         raise ValueError(
-            "Dataset uses the obsolete transient-lift success contract; recollect it with the "
-            "current stable-grasp expert"
+            "Dataset uses an obsolete success contract; recollect it with the current expert"
         )
-    if collection_summary.get("task") != "a3_grasp":
-        raise ValueError("Dataset collection summary is not for the A3 grasp task")
+    task = collection_summary.get("task")
+    if task not in SUPPORTED_TASKS:
+        raise ValueError(
+            f"Dataset collection summary is for {task!r}; supported tasks are "
+            f"{sorted(SUPPORTED_TASKS)}"
+        )
     if info.get("codebase_version") != "v3.0":
         raise ValueError("SmolVLA training requires a LeRobot v3.0 dataset")
     features = info.get("features", {})
@@ -63,6 +74,8 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     return {
         "root": str(root),
         "repo_id": repo_id,
+        "task": task,
+        "success_contract": SUPPORTED_TASKS[task],
         "episodes": len(episodes),
         "frames": int(info["total_frames"]),
         "tasks": int(info["total_tasks"]),

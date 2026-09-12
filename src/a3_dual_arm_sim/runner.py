@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from .contracts import EpisodeContext
@@ -18,6 +19,9 @@ class EpisodeResult:
     safety_reason: str | None
     success: bool = False
     discarded: bool = False
+    #: Final environment info mapping. Task-specific metrics live here rather
+    #: than as fields, so every task can be summarised without changing this type.
+    final_info: Mapping[str, Any] = field(default_factory=dict)
 
 
 class EpisodeRunner:
@@ -97,6 +101,7 @@ class EpisodeRunner:
             safety_reason=info.get("safety_reason"),
             success=success,
             discarded=discarded,
+            final_info=dict(info),
         )
 
     def close(self) -> None:

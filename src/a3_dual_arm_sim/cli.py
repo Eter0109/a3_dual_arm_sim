@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .collection import collect_grasp_dataset
+from .collection import collect_cookie_dataset, collect_grasp_dataset
 from .config import load_config
 from .cookie_transfer import A3CookieTransferEnv
 from .env import A3DualArmEnv
@@ -326,6 +326,25 @@ def _collect_grasp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_cookie(args: argparse.Namespace) -> int:
+    summary = collect_cookie_dataset(
+        args.root,
+        repo_id=args.repo_id,
+        episodes=args.episodes,
+        start_seed=args.seed,
+        max_attempts=args.max_attempts,
+        position_noise_m=args.position_noise,
+        yaw_noise_rad=args.yaw_noise,
+        hold_steps=args.hold_steps,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+        config=args.config,
+        fast_render=args.fast_render,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _train_smolvla(args: argparse.Namespace) -> int:
     summary = train_smolvla(
         dataset_root=args.root,
@@ -436,6 +455,48 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--max-attempts", type=int, default=None)
     _add_fast_render(collect)
     collect.set_defaults(function=_collect_grasp)
+
+    collect_cookie = commands.add_parser(
+        "collect-cookie",
+        help="Collect successful A3 cookie-transfer expert episodes",
+    )
+    _add_common(collect_cookie)
+    collect_cookie.add_argument("--root", type=Path, required=True)
+    collect_cookie.add_argument("--repo-id", default="local/a3-cookie")
+    collect_cookie.add_argument("--episodes", type=int, default=10)
+    collect_cookie.add_argument("--max-attempts", type=int, default=None)
+    collect_cookie.add_argument(
+        "--position-noise",
+        type=float,
+        default=0.002,
+        help="Per-cookie XY jitter in metres; the only source of scene variation",
+    )
+    collect_cookie.add_argument(
+        "--yaw-noise",
+        type=float,
+        default=0.05,
+        help="Per-cookie yaw jitter in radians",
+    )
+    collect_cookie.add_argument(
+        "--hold-steps",
+        type=int,
+        default=40,
+        help="Steps to keep recording after the expert finishes its last placement",
+    )
+    collect_cookie.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Index of this shard when several processes collect in parallel",
+    )
+    collect_cookie.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="Total number of shards; seeds are interleaved across them",
+    )
+    _add_fast_render(collect_cookie)
+    collect_cookie.set_defaults(function=_collect_cookie)
 
     train = commands.add_parser(
         "train-smolvla", help="Fine-tune SmolVLA on a validated A3 grasp dataset"
