@@ -59,16 +59,24 @@ class MemoryRecorder:
         return None
 
 
-def lerobot_features(height: int, width: int) -> dict[str, Any]:
+def lerobot_features(
+    height: int, width: int, *, use_videos: bool = False
+) -> dict[str, Any]:
+    """Describe one canonical A3 frame to LeRobot.
+
+    LeRobot selects video storage from the feature ``dtype`` rather than from the
+    ``use_videos`` writer flag, so the camera keys must be declared as ``video``
+    for episodes to be encoded into mp4 files instead of PNG rows.
+    """
     image = {
-        "dtype": "image",
+        "dtype": "video" if use_videos else "image",
         "shape": (height, width, 3),
         "names": ["height", "width", "channels"],
     }
     return {
-        FRONT_IMAGE: image,
-        LEFT_WRIST_IMAGE: image.copy(),
-        RIGHT_WRIST_IMAGE: image.copy(),
+        FRONT_IMAGE: dict(image),
+        LEFT_WRIST_IMAGE: dict(image),
+        RIGHT_WRIST_IMAGE: dict(image),
         STATE: {"dtype": "float32", "shape": (16,), "names": [f"state_{i}" for i in range(16)]},
         VELOCITY: {"dtype": "float32", "shape": (16,), "names": [f"velocity_{i}" for i in range(16)]},
         EEF_POSE: {"dtype": "float32", "shape": (14,), "names": [f"eef_pose_{i}" for i in range(14)]},
@@ -105,7 +113,7 @@ class LeRobotV3Recorder:
             fps=fps,
             root=self.root,
             robot_type="A3_dual_arm",
-            features=lerobot_features(image_height, image_width),
+            features=lerobot_features(image_height, image_width, use_videos=use_videos),
             use_videos=use_videos,
             image_writer_threads=3,
         )
