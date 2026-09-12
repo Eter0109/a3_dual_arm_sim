@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import mujoco
 import numpy as np
@@ -31,7 +33,9 @@ def test_model_compiles_with_all_source_arm_joints_and_sensors() -> None:
     assert bundle.model.nsensor == 8
     assert bundle.model.nsensordata == 16
     for joint in bundle.source_joints:
-        joint_id = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
+        joint_id = mujoco.mj_name2id(
+            bundle.model, mujoco.mjtObj.mjOBJ_JOINT, joint.name
+        )
         assert joint_id >= 0
         assert tuple(bundle.model.jnt_range[joint_id]) == joint.limits
 
@@ -74,3 +78,22 @@ def test_generated_xml_is_portable_from_models_directory(tmp_path: Path) -> None
     write_generated_xml(destination, load_config())
     model = mujoco.MjModel.from_xml_path(str(destination))
     assert model.nu == 18
+
+
+def test_cookie_scene_and_camera_values_come_from_config() -> None:
+    base = load_config()
+    config = replace(
+        base,
+        cameras=replace(base.cameras, front_fovy_deg=61.0),
+        cookie_transfer=replace(base.cookie_transfer, cookie_mass_kg=0.041),
+    )
+    root = ET.fromstring(build_model(config, scene="cookie_transfer").xml)
+
+    front = root.find("./worldbody/camera[@name='front']")
+    cookie = root.find("./worldbody/body[@name='cookie_0']/geom[@name='cookie_0_geom']")
+
+    assert front is not None and front.attrib["fovy"] == "61"
+    assert cookie is not None and cookie.attrib["mass"] == "0.041"
+    assert cookie.attrib["size"] == "0.025 0.0095 0.025"
+    assert base.cameras.calibration_status == "prototype_estimate"
+    assert base.cookie_transfer.calibration_status == "prototype_estimate"

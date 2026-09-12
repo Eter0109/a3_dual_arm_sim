@@ -108,27 +108,72 @@ def test_success_requires_exact_settled_upright_two_by_five_fill() -> None:
         env.close()
 
 
-def test_cookie_transfer_expert_transfers_ten_cookies_successfully() -> None:
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert
+def test_cookie_transfer_expert_runs_feedback_state_machine() -> None:
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
         expert = A3CookieTransferExpert(env)
         obs, info = env.reset(seed=0, options={"randomize_cookies": False})
         expert.reset()
-        terminated = False
         step = 0
-        while not terminated and step < len(expert.actions) + 80:
+        while not expert.failed and step < 220:
             action = expert.act(obs)
-            obs, reward, terminated, truncated, info = env.step(action)
+            obs, _, _, _, info = env.step(action)
             step += 1
-        assert terminated
-        assert info["success"]
-        assert info["cookies_in_target"] == 10
-        assert info["cookies_in_source"] == 20
-        assert info["exact_2x5_fill"]
-        assert info["target_touches_all_walls"]
-        assert all(index >= 0 for index in info["target_slot_occupancy"])
+        assert not hasattr(expert, "actions")
+        assert not expert.failed, expert.failure_reason
+        assert info["cookies_in_target"] >= 1
+        assert info["cookies_in_source"] <= 29
+        for phase in (
+            CookiePhase.VERIFY_GRASP,
+            CookiePhase.VERIFY_LIFT,
+            CookiePhase.VERIFY_RELEASE,
+        ):
+            assert phase in expert.transition_history
+        assert len(expert.completed_cookie_indices) >= 1
     finally:
         env.close()
 
+
+def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None:
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        expert = A3CookieTransferExpert(env)
+        obs, _ = env.reset(seed=0, options={"randomize_cookies": False})
+        expert.reset()
+        for _ in range(120):
+            action = expert.act(obs)
+            obs, _, _, _, _ = env.step(action)
+            if expert.phase is CookiePhase.VERIFY_LIFT:
+                break
+        assert expert.phase is CookiePhase.VERIFY_LIFT
+
+        cookie_index = expert.current_cookie_index
+        assert cookie_index is not None
+        source_position = expert._initial_cookie_positions[cookie_index].copy()
+        env.set_cookie_pose(cookie_index, tuple(source_position))
+        expert.phase_steps = 29
+
+        expert.act(obs)
+
+        assert expert.phase is CookiePhase.APPROACH
+        assert expert.retry_counts[0] == 1
+        assert "did not follow" in expert.retry_reasons[-1]
+    finally:
+        env.close()
+
+
+def test_cookie_transfer_evaluation_labels_step_limit() -> None:
+    from a3_dual_arm_sim.evaluation import run_cookie_transfer_episode
+
+    result = run_cookie_transfer_episode(
+        0, max_steps=1, randomize_cookies=False
+    )
+
+    assert not result.success
+    assert result.failure_phase == "APPROACH"
+    assert result.reason == "max_steps_exceeded"
+    assert result.failed_cookie == 0

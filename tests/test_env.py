@@ -52,6 +52,23 @@ def test_joint_action_is_clipped_to_rate_and_joint_limits() -> None:
         env.close()
 
 
+def test_disabled_policy_cameras_return_black_frames_without_renderer() -> None:
+    env = A3DualArmEnv(render_cameras=False)
+    try:
+        observation, info = env.reset(seed=0)
+        assert not info["policy_camera_rendering"]
+        assert env._renderer is None
+        for key in (FRONT_IMAGE, LEFT_WRIST_IMAGE, RIGHT_WRIST_IMAGE):
+            assert observation[key].shape == (256, 256, 3)
+            assert observation[key].dtype == np.uint8
+            assert not np.any(observation[key])
+        observation, _, _, _, _ = env.step(env.current_joint_action)
+        assert env._renderer is None
+        assert not np.any(observation[FRONT_IMAGE])
+    finally:
+        env.close()
+
+
 def test_cartesian_adapter_changes_selected_arm_and_stays_finite() -> None:
     env = A3DualArmEnv(action_mode="cartesian_delta", render_cameras=False)
     try:
