@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .checkpoint import checkpoint_embeds_vlm
+from .statistics import DEFAULT_STD_FLOOR, floor_normalization_std
+
 CAMERA_KEYS = (
     "observation.images.front",
     "observation.images.left_wrist",
@@ -85,6 +88,20 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     }
 
 
+def repair_normalization_stats(dataset_root: Path, *, floor: float) -> dict[str, Any]:
+    """Floor degenerate ``std`` values before training reads them.
+
+    A dimension that never changes has zero variance, but dataset aggregation
+    leaves a spurious tiny ``std`` behind. Since the normaliser divides by
+    ``std + eps``, that artifact turns rounding noise into normalised values in
+    the hundreds and the loss starts three orders of magnitude too high. Only
+    the constant dimensions are touched, because real motion in this project is
+    far above the floor.
+    """
+
+    return floor_normalization_std(dataset_root, floor=floor, apply=True)
+
+
 def default_base_model() -> Path:
     return (
         Path(__file__).resolve().parents[3]
@@ -97,8 +114,13 @@ def default_base_model() -> Path:
 
 
 def _local_hub_snapshot(repo_id: str) -> Path | None:
+    # Honour HF_HOME, which is how the project pins its cache; HF_HUB_CACHE
+    # overrides it when set explicitly.
     cache_root = Path(
-        os.environ.get("HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+        os.environ.get(
+            "HF_HUB_CACHE",
+            Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub",
+        )
     )
     repository = cache_root / f"models--{repo_id.replace('/', '--')}"
     main_ref = repository / "refs" / "main"
@@ -133,6 +155,10 @@ def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: st
     config["use_amp"] = device == "cuda"
     config["push_to_hub"] = False
     config["repo_id"] = None
+    # The base checkpoint already carries the VLM tower, so asking LeRobot to
+    # fetch SmolVLM2 again would either waste 2 GB or fail on an offline host.
+    if config.get("load_vlm_weights") and checkpoint_embeds_vlm(base_model):
+        config["load_vlm_weights"] = False
     vlm_model_name = config.get("vlm_model_name")
     cached_vlm = _local_hub_snapshot(vlm_model_name) if vlm_model_name else None
     if cached_vlm is not None:
@@ -171,9 +197,13 @@ def build_train_command(
     steps: int,
     batch_size: int,
     seed: int,
+    job_name: str = "a3_smolvla",
+    save_freq: int = 2000,
 ) -> list[str]:
     if steps <= 0 or batch_size <= 0:
         raise ValueError("steps and batch_size must be positive")
+    if save_freq < 0:
+        raise ValueError("save_freq must not be negative")
     return [
         sys.executable,
         "-m",
@@ -183,16 +213,17 @@ def build_train_command(
         "--dataset.video_backend=pyav",
         f"--policy.path={policy_source.expanduser().resolve()}",
         f"--output_dir={output_dir.expanduser().resolve()}",
-        "--job_name=a3_grasp_smolvla",
+        f"--job_name={job_name}",
         f"--seed={seed}",
         "--num_workers=0",
         f"--batch_size={batch_size}",
         f"--steps={steps}",
-        "--env_eval_freq=0",
-        "--eval_steps=0",
+        # No environment evaluation: the GPU worker cannot run MuJoCo, and the
+        # closed-loop check happens separately on a machine that can.
+        "--eval_freq=0",
         "--log_freq=1",
         "--save_checkpoint=true",
-        "--save_freq=0",
+        f"--save_freq={save_freq}",
         "--wandb.enable=false",
     ]
 
@@ -208,6 +239,9 @@ def train_smolvla(
     seed: int,
     device: str,
     dry_run: bool = False,
+    job_name: str = "a3_smolvla",
+    save_freq: int = 2000,
+    std_floor: float = DEFAULT_STD_FLOOR,
 ) -> dict[str, Any]:
     audit = audit_training_dataset(dataset_root, repo_id=repo_id)
     if device not in {"cpu", "cuda"}:
@@ -215,6 +249,16 @@ def train_smolvla(
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists():
         raise FileExistsError(f"Training output already exists: {output_dir}")
+    # A constant action dimension has zero variance, but aggregation leaves a
+    # spurious tiny std that the normaliser then divides by, inflating rounding
+    # noise into normalised values of several hundred.
+    stats_report = floor_normalization_std(dataset_root, floor=std_floor, apply=True)
+    if stats_report["degenerate_dimensions"]:
+        print(
+            f"normalization stats repaired: {stats_report['degenerate_dimensions']} "
+            f"raised to std={stats_report['floor']}",
+            flush=True,
+        )
     policy_source = prepare_a3_smolvla_source(
         base_model,
         output_dir.parent / ".a3_smolvla_source",
@@ -228,10 +272,16 @@ def train_smolvla(
         steps=steps,
         batch_size=batch_size,
         seed=seed,
+        job_name=job_name,
+        save_freq=save_freq,
     )
-    result = {**audit, "device": device, "output_dir": str(output_dir), "command": command}
-    if dry_run:
-        return result
+    result = {
+        **audit,
+        "device": device,
+        "output_dir": str(output_dir),
+        "stats_repaired": stats_report["degenerate_dimensions"],
+        "command": command,
+    }
 
     env = os.environ.copy()
     env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"})

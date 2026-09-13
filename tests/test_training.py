@@ -107,5 +107,24 @@ def test_train_command_is_local_reproducible_smoke(tmp_path: Path) -> None:
     joined = " ".join(command)
     assert "--steps=1" in joined
     assert "--dataset.video_backend=pyav" in joined
-    assert "--env_eval_freq=0" in joined
+    # Environment evaluation is off: the GPU worker cannot run MuJoCo.
+    assert "--eval_freq=0" in joined
     assert "--wandb.enable=false" in joined
+
+
+def test_train_command_honours_job_name_and_save_frequency(tmp_path: Path) -> None:
+    command = build_train_command(
+        dataset_root=tmp_path / "data",
+        repo_id="local/a3",
+        policy_source=tmp_path / "policy",
+        output_dir=tmp_path / "out",
+        steps=100,
+        batch_size=1,
+        seed=7,
+        job_name="a3_cookie_smolvla",
+        save_freq=25,
+    )
+    joined = " ".join(command)
+    assert "--job_name=a3_cookie_smolvla" in joined
+    # A checkpoint every 25 steps, so an interrupted run keeps usable weights.
+    assert "--save_freq=25" in joined

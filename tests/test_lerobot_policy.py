@@ -162,7 +162,7 @@ def test_embedded_vlm_detection_reads_the_weight_header(
 ) -> None:
     torch = pytest.importorskip("torch")
     safetensors_torch = pytest.importorskip("safetensors.torch")
-    from a3_dual_arm_sim.lerobot_policy import _checkpoint_embeds_vlm
+    from a3_dual_arm_sim.checkpoint import checkpoint_embeds_vlm
 
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -171,10 +171,10 @@ def test_embedded_vlm_detection_reads_the_weight_header(
     }
     safetensors_torch.save_file(tensors, checkpoint / "model.safetensors")
 
-    assert _checkpoint_embeds_vlm(checkpoint) is expected
+    assert checkpoint_embeds_vlm(checkpoint) is expected
 
 
 def test_embedded_vlm_detection_handles_a_missing_weight_file(tmp_path) -> None:
-    from a3_dual_arm_sim.lerobot_policy import _checkpoint_embeds_vlm
+    from a3_dual_arm_sim.checkpoint import checkpoint_embeds_vlm
 
-    assert _checkpoint_embeds_vlm(tmp_path / "absent") is False
+    assert checkpoint_embeds_vlm(tmp_path / "absent") is False

@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from .checkpoint import checkpoint_embeds_vlm
 from .contracts import (
     EEF_POSE,
     FORCE,
@@ -74,30 +75,16 @@ class PolicyRuntimeConfig:
     n_action_steps: int | None = None
     #: Maps an A3 observation key to the name a checkpoint expects.
     rename_map: dict[str, str] = field(default_factory=dict)
-    #: ``None`` keeps the checkpoint's own setting; see ``_checkpoint_embeds_vlm``.
+    #: ``None`` keeps the checkpoint's own setting; see ``checkpoint_embeds_vlm``.
     load_vlm_weights: bool | None = None
 
 
-def _checkpoint_embeds_vlm(checkpoint: Path) -> bool:
-    """True when the checkpoint's weights already contain the vision-language model.
+def _resolve_device(requested: str) -> str:
+    if requested != "auto":
+        return requested
+    import torch
 
-    ``lerobot/smolvla_base`` ships the full 450M parameters yet still sets
-    ``load_vlm_weights=True``, which sends LeRobot after SmolVLM2's separate 2 GB
-    of weights and fails outright on an offline worker. Reading the safetensors
-    header settles it without loading any tensor data.
-    """
-
-    weights = checkpoint / "model.safetensors"
-    if not weights.is_file():
-        return False
-    try:
-        from safetensors import safe_open
-    except ImportError:  # pragma: no cover - safetensors ships with lerobot
-        return False
-    with safe_open(weights, framework="pt") as handle:
-        # The handle exposes keys() but is not iterable, so materialise them.
-        keys = list(handle.keys())
-    return any(key.startswith("model.vlm_with_expert.vlm") for key in keys)
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def translated_keys(declared: Iterable[str], rename_map: Mapping[str, str]) -> tuple[str, ...]:
@@ -186,7 +173,7 @@ class LeRobotPolicyAdapter:
         if config.n_action_steps is not None:
             policy_config.n_action_steps = config.n_action_steps
         if config.load_vlm_weights is None:
-            if _checkpoint_embeds_vlm(checkpoint):
+            if checkpoint_embeds_vlm(checkpoint):
                 policy_config.load_vlm_weights = False
         else:
             policy_config.load_vlm_weights = config.load_vlm_weights

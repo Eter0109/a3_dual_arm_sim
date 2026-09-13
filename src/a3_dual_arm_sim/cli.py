@@ -356,6 +356,8 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         seed=args.seed,
         device=args.device,
         dry_run=args.dry_run,
+        job_name=args.job_name,
+        save_freq=args.save_freq,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -509,6 +511,13 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--batch-size", type=int, default=4)
     train.add_argument("--seed", type=int, default=1000)
     train.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    train.add_argument("--job-name", default="a3_smolvla")
+    train.add_argument(
+        "--save-freq",
+        type=int,
+        default=2000,
+        help="Steps between checkpoints; 0 saves only at the end",
+    )
     train.add_argument("--dry-run", action="store_true")
     train.set_defaults(function=_train_smolvla)
     return root
