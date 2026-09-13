@@ -32,6 +32,12 @@ robot-to-table and robot-to-object contacts remain active.
 Python 3.10+ and MuJoCo 3.3+ are supported. LeRobot is optional unless recording, replaying,
 or training.
 
+MuJoCo is pinned to the `3.3` series rather than left open-ended. The grasp is marginal by
+construction - the parallel gripper opens to 69.7 mm against a 70 mm cube - so contact solving
+decides whether a lift succeeds, and a newer `3.x` release changes that solve enough to break it (the
+cube is pushed ~3.7 cm during finger closure and slips out on lift). That failure is silent: it does
+not raise, it just makes every collected demonstration wrong. `3.3.7` is the verified version.
+
 ```bash
 
 cd a3_dual_arm_sim/
@@ -157,6 +163,36 @@ a3-sim replay --root datasets/a3_scripted --repo-id local/a3-scripted --episode 
 The adapter boundary is also used by the included SmolVLA wrapper; another VLA can implement the
 same four methods without changing the environment, runner, or recorder.
 
+## Unified policy interface
+
+`a3_dual_arm_sim/lerobot_policy.py` runs **any** LeRobot checkpoint - all sixteen registered types
+(`act`, `diffusion`, `pi0`, `pi05`, `smolvla`, `vqbet`, `wall_x`, …) - through one adapter, so
+switching model is configuration rather than code. LeRobot already provides the shared factory
+(`make_policy`) and a checkpoint carries its own normalisation, so the only A3-specific work is
+projecting an observation onto the keys a checkpoint declares and adapting the returned action back
+to the A3 contract.
+
+```bash
+export A3_POLICY_CHECKPOINT="$PWD/outputs/training/cookie_smolvla/checkpoints/last/pretrained_model"
+export A3_POLICY_DATASET_ROOT="$PWD/outputs/datasets/a3_cookie_overnight"
+export A3_POLICY_REPO_ID="local/a3-cookie-overnight"
+# Optional: A3_POLICY_TYPE, A3_POLICY_DEVICE, A3_POLICY_DTYPE,
+# A3_POLICY_N_ACTION_STEPS, A3_POLICY_RENAME_MAP, A3_POLICY_LOAD_VLM_WEIGHTS
+MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
+  --policy a3_dual_arm_sim.lerobot_policy:make_policy \
+  --task "transfer exactly ten upright square cookie blocks into the 2x5 box" --steps 800
+```
+
+Two things the adapter does because LeRobot does not. It **validates the checkpoint's declared
+observation keys**, since LeRobot accepts a missing camera silently: dropping a declared camera still
+returns a valid-shaped action, emits no warning, and quietly degrades the rollout. And it **clears
+`load_vlm_weights`** for checkpoints that already embed the VLM, because `lerobot/smolvla_base` stores
+all 450 M parameters yet still asks for SmolVLM2's separate 2 GB of weights, which fails outright on an
+offline worker.
+
+`docs/policy-interface.md` records the measured LeRobot behaviours this design rests on, the interface
+sketch, and the migration path. Read it before extending the adapter.
+
 ## Cookie transfer scene
 
 `A3CookieTransferEnv` is a separate task variant based on the supplied deployment photograph and
@@ -268,12 +304,124 @@ MUJOCO_GL=egl a3-sim run \
   --task "pick up the red cube" --steps 300
 ```
 
+`smolvla_policy.py` is the original SmolVLA-only wrapper, kept because the grasp workflow above and
+existing checkpoints reference it. New work should use the unified adapter in `lerobot_policy.py`,
+which covers this same checkpoint and fifteen other policy types without any per-model code.
+
 The one-step smoke proves loading, preprocessing, forward/backward, optimizer update, and checkpoint
 serialization only. It is not evidence that the model learned the task. A meaningful run needs many
 diverse successful demonstrations, held-out seeds, full training, and closed-loop success evaluation.
 On the current host PyTorch reports no usable CUDA driver, so long CPU training is intentionally not
 presented as the recommended workflow. TorchCodec may also warn on this installation; the recorder
 and trainer explicitly use the available PyAV image path.
+
+## Cookie-transfer VLA pipeline
+
+The cookie task has a complete collect → merge → train → evaluate → record loop under `scripts/`.
+These are standalone scripts rather than CLI subcommands because the later stages run on a Slurm GPU
+node, where MuJoCo cannot be imported at all - see the package docstring for why.
+
+### 1. Collect demonstrations in parallel shards
+
+```bash
+# Default: 8 shards x 6 episodes, one dataset per shard.
+bash scripts/collect_cookie_nightly.sh
+
+# A second batch while the first still runs (separate output tree, separate seeds).
+bash scripts/collect_cookie_batch.sh a3_cookie_overnight_b 8 6 480
+```
+
+Each shard must own its output directory: LeRobot writes one parquet file and one video set per
+dataset, so concurrent writers cannot share a root. Seeds are interleaved across shards
+(`shard_index + attempt * shard_count`), so the union of shards is still one clean seed sweep. The
+underlying command is `a3-sim collect-cookie`, which also takes `--position-noise`, `--yaw-noise`,
+`--hold-steps`, and `--fast-render`.
+
+### 2. Merge the shards into one training dataset
+
+```bash
+python scripts/merge_cookie_shards.py \
+  --shards outputs/datasets/a3_cookie_overnight/shard_* \
+  --repo-id local/a3-cookie-overnight-merged \
+  --output outputs/datasets/a3_cookie_overnight_merged
+```
+
+Wraps LeRobot's `aggregate_datasets`, then renumbers `episode_index` sequentially and re-emits a
+single `a3_episode_metadata.jsonl` and `collection_summary.json` for the whole run; per-shard records
+keep a `source_shard` field.
+
+### 3. Train
+
+```bash
+# Inspect the exact command and feature contract without starting training.
+a3-sim train-smolvla \
+  --root outputs/datasets/a3_cookie_overnight_merged \
+  --repo-id local/a3-cookie-overnight-merged \
+  --output outputs/training/cookie_smolvla --dry-run
+
+# Formal GPU run: steps, then batch size.
+sbatch scripts/train_cookie_smolvla.sh 20000 4
+```
+
+Training first floors the normalisation statistics. The right arm holds the target bin and never moves
+in this dataset, and LeRobot's cross-shard aggregation leaves a spurious ~1e-10 standard deviation
+there; because the normaliser divides by `std + 1e-8`, that turns float32 rounding noise into
+normalised values in the hundreds and the loss starts near 3e3 instead of single digits. See
+`statistics.py` for the reasoning; `train_smolvla(..., std_floor=...)` changes the floor, and
+`degenerate_dimensions()` reports which dimensions triggered it before anything is written.
+
+### 4. Evaluate closed loop
+
+```bash
+python scripts/evaluate_cookie_policy.py \
+  --checkpoint outputs/training/cookie_smolvla/checkpoints/last/pretrained_model \
+  --episodes 5 --first-seed 0 --output outputs/eval/cookie.json
+```
+
+Reports the task's own success criterion plus the peak fill and how often a placed cookie was knocked
+back out. Read the spread across episodes rather than one number: inference is stochastic, and the
+same seed and scene produced peaks of 6, 1 and 1 cookies in three measured runs.
+
+### 5. Record a rollout and chart it
+
+```bash
+# Whole episode by default; --steps N stops earlier, --view-size 0 drops the scene view.
+python scripts/render_cookie_policy_video.py \
+  --checkpoint outputs/training/cookie_smolvla/checkpoints/last/pretrained_model \
+  --output outputs/videos/rollout.mp4
+
+# The scripted expert through the same code path, as a reference.
+python scripts/render_cookie_policy_video.py --expert --output outputs/videos/expert.mp4
+
+# Chart the phase trace the renderer logged.
+python scripts/plot_rollout_trace.py logs/render_video.log --output outputs/videos/trace.png
+```
+
+The video composites a `480x480` render of the scene camera with the three policy cameras as labelled
+insets, because the policy cameras are pinned to their 256x256 training resolution and are too small
+to judge what the arm is doing. It overlays the policy's identity, the cookie counts, and the phase
+index - the demonstrated frame the arm's joint state currently matches. Phase is what makes a
+125-second recording legible: it advances 1:1 while the policy is doing well, and jumps backwards once
+it starts replaying an earlier cycle. The chart plots that trace against its diagonal reference. Both
+need only Pillow and PyAV; the `ffmpeg` binary is not required.
+
+## Known limitations
+
+- **Demonstration diversity is the binding constraint.** `A3CookieTransferEnv.reset` writes
+  `DEPLOYMENT_HOME` into `qpos` on every episode, so all collected episodes begin from an identical
+  arm pose, and the only variation is a few millimetres of cookie placement - roughly one pixel at
+  `256x256`. The demonstrations are therefore visually near-identical, and a policy can minimise loss
+  by memorising one joint trajectory. Measured rollouts show exactly that: it tracks the demonstration
+  for the first two or three cookies and then diverges without recovering. Improving this needs a
+  randomised initial pose and enough placement noise for the cameras to see it, not more tuning.
+- **One episode is not a measurement.** SmolVLA's flow-matching sampler restarts from fresh noise at
+  every re-plan, so identical seeds give materially different episodes.
+- **A partial policy runs to the horizon.** `terminate_on_success` fires only when the exact fill holds
+  for a full second, so a weak policy runs all 2500 steps (about 20 minutes on CPU). Judge such a run
+  by the peak fill it reached, not by its final count.
+- **The normalisation floor repairs a symptom.** Flooring `std` makes training well-behaved on a
+  dataset with constant dimensions, but a constant dimension is itself a data problem: the right arm
+  should eventually be doing something.
 
 ## Keyboard teleoperation
 
