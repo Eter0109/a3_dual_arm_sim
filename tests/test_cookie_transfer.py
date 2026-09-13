@@ -12,12 +12,7 @@ def test_cookie_scene_has_central_stand_bins_and_thirty_upright_cookies() -> Non
         for name in ("stand_mast", "source_bin_floor", "target_bin_floor"):
             assert mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, name) >= 0
         for index in range(30):
-            assert (
-                mujoco.mj_name2id(
-                    env.model, mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}"
-                )
-                >= 0
-            )
+            assert mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}") >= 0
         # Adjacent walls overlap at every corner, rather than merely meeting edge-to-edge.
         for bin_name in ("source_bin", "target_bin"):
             front = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, f"{bin_name}_front_wall")
@@ -47,15 +42,9 @@ def test_cookie_scene_has_central_stand_bins_and_thirty_upright_cookies() -> Non
             np.testing.assert_allclose(
                 env.model.geom_rgba[front_visual], env.model.geom_rgba[left_visual]
             )
-        collision = mujoco.mj_name2id(
-            env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_geom"
-        )
-        first_visual = mujoco.mj_name2id(
-            env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_visual"
-        )
-        second_visual = mujoco.mj_name2id(
-            env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_1_visual"
-        )
+        collision = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_geom")
+        first_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_visual")
+        second_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_1_visual")
         assert np.all(env.model.geom_size[first_visual] < env.model.geom_size[collision])
         assert not np.allclose(
             env.model.geom_rgba[first_visual], env.model.geom_rgba[second_visual]
@@ -117,7 +106,7 @@ def test_cookie_transfer_expert_runs_feedback_state_machine() -> None:
         obs, info = env.reset(seed=0, options={"randomize_cookies": False})
         expert.reset()
         step = 0
-        while not expert.failed and step < 220:
+        while not expert.failed and not expert.completed_cookie_indices and step < 700:
             action = expert.act(obs)
             obs, _, _, _, info = env.step(action)
             step += 1
@@ -144,7 +133,7 @@ def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None
         expert = A3CookieTransferExpert(env)
         obs, _ = env.reset(seed=0, options={"randomize_cookies": False})
         expert.reset()
-        for _ in range(120):
+        for _ in range(700):
             action = expert.act(obs)
             obs, _, _, _, _ = env.step(action)
             if expert.phase is CookiePhase.VERIFY_LIFT:
@@ -160,7 +149,7 @@ def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None
         expert.act(obs)
 
         assert expert.phase is CookiePhase.APPROACH
-        assert expert.retry_counts[0] == 1
+        assert expert.retry_counts[expert.target_slot_index] == 1
         assert "did not follow" in expert.retry_reasons[-1]
     finally:
         env.close()
@@ -169,11 +158,124 @@ def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None
 def test_cookie_transfer_evaluation_labels_step_limit() -> None:
     from a3_dual_arm_sim.evaluation import run_cookie_transfer_episode
 
-    result = run_cookie_transfer_episode(
-        0, max_steps=1, randomize_cookies=False
-    )
+    result = run_cookie_transfer_episode(0, max_steps=1, randomize_cookies=False)
 
     assert not result.success
-    assert result.failure_phase == "APPROACH"
+    assert result.failure_phase == "SUPPORT_BOX"
     assert result.reason == "max_steps_exceeded"
-    assert result.failed_cookie == 0
+    assert result.failed_cookie is None
+
+
+def test_idle_cartesian_hold_and_independent_target_bin() -> None:
+    env = A3CookieTransferEnv(action_mode="cartesian_delta", render_cameras=False)
+    try:
+        env.reset(seed=0)
+        target_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "target_bin")
+        position = env.data.xpos[target_id].copy()
+        initial = env.last_applied_action.copy()
+        action = np.zeros(14)
+        action[6] = 2 * initial[7] - 1
+        action[13] = 2 * initial[15] - 1
+        for _ in range(500):
+            _, _, terminated, _, info = env.step(action)
+            assert not terminated
+            np.testing.assert_allclose(info["applied_action"], initial, atol=1e-12)
+        settled = env.current_joint_action.copy()
+        for _ in range(100):
+            env.step(action)
+        np.testing.assert_allclose(env.current_joint_action, settled, atol=0.002)
+        action[7] = 0.2
+        for _ in range(10):
+            env.step(action)
+        assert env.model.body_parentid[target_id] == 0
+        assert env.model.body_dofnum[target_id] == 6
+        np.testing.assert_allclose(env.data.xpos[target_id], position, atol=0.001)
+        np.testing.assert_allclose(env.last_applied_action[:7], initial[:7], atol=1e-12)
+    finally:
+        env.close()
+
+
+def test_vertical_home_and_physical_right_box_support() -> None:
+    from a3_dual_arm_sim.box_support import BoxSupportController
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0)
+        for side in ("L", "R"):
+            tool_axis = env.data.body(f"{side}_robotiq_2f85").xmat.reshape(3, 3)[:, 2]
+            assert tool_axis @ np.array([0.0, 0.0, -1.0]) > np.cos(np.deg2rad(2))
+        support = BoxSupportController(env)
+        for _ in range(700):
+            env.step(support.act())
+            assert support.failed is None
+            if support.ready:
+                break
+        assert support.ready
+        for _ in range(300):
+            env.step(support.act())
+        assert np.all(support.contact_forces() > 0.1)
+        assert env.data.body("target_bin").xpos[2] > support.initial_height + 0.01
+        tilt = np.arccos(np.clip(env.data.body("target_bin").xmat.reshape(3, 3)[2, 2], -1, 1))
+        assert np.deg2rad(3) < tilt < np.deg2rad(18)
+    finally:
+        env.close()
+
+
+def test_placement_timeout_holds_instead_of_sweeping_loaded_bin(monkeypatch) -> None:
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0)
+        expert = A3CookieTransferExpert(env)
+        expert.reset()
+        monkeypatch.setattr(expert.box_support, "contact_forces", lambda: np.ones(2))
+        monkeypatch.setattr(expert, "_cookie_dropped", lambda: False)
+        expert.phase = CookiePhase.DESCEND_TO_PLACE
+        expert.phase_steps = expert.phase_timeout_steps
+        expert.current_cookie_index = expert.target_slot_index = 0
+        expert._placement_height = 0.042
+        previous = env.last_applied_action.copy()
+        np.testing.assert_array_equal(expert.act(), previous)
+        assert expert.failed
+        assert "placement descent timed out" in expert.failure_reason
+        assert not expert.retry_reasons
+        np.testing.assert_array_equal(expert.act(), previous)
+    finally:
+        env.close()
+
+
+def test_viewer_starts_with_rotatable_front_camera() -> None:
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        camera = mujoco.MjvCamera()
+        env._configure_viewer_camera(camera)
+        assert camera.type == mujoco.mjtCamera.mjCAMERA_FREE
+        assert camera.fixedcamid == -1
+        assert 120 < camera.azimuth < 150
+        assert camera.elevation < 0
+        np.testing.assert_allclose(camera.lookat, env.config.cameras.workspace_target_m)
+    finally:
+        env.close()
+
+
+def test_expert_stops_if_a_previously_packed_cookie_moves(monkeypatch) -> None:
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0)
+        expert = A3CookieTransferExpert(env)
+        expert.reset()
+        monkeypatch.setattr(expert.box_support, "contact_forces", lambda: np.ones(2))
+        expert.phase = CookiePhase.APPROACH
+        expert.completed_cookie_indices = [0]
+        expert._packed_positions = {
+            0: env.privileged_cookie_target_position(0) + np.array([0.01, 0.0, 0.0])
+        }
+        previous = env.last_applied_action.copy()
+        np.testing.assert_array_equal(expert.act(), previous)
+        assert expert.failed
+        assert "packed Cookie 0 disturbed" in expert.failure_reason
+    finally:
+        env.close()
