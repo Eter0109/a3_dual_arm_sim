@@ -88,6 +88,16 @@ def main() -> int:
             steps = 0
             action_delta = 0.0
             previous = None
+            # Record the best fill the episode reached, not only the final count.
+            # This policy keeps acting after the demonstrated trajectory it replays
+            # has ended, and it can knock its own placements back out of the bin, so
+            # a long rollout often ends lower than its own peak. Judging it purely
+            # by the final state hides that. Knocks are counted so a rollout that
+            # places cookies and then destroys them is distinguishable from one that
+            # never places any.
+            peak_in_target = 0
+            knockouts = 0
+            last_target = 0
             while not terminated and not truncated and steps < args.max_steps:
                 action = policy.act(observation, TASK)
                 if previous is not None:
@@ -95,6 +105,11 @@ def main() -> int:
                 previous = action.copy()
                 observation, _, terminated, truncated, info = env.step(action)
                 steps += 1
+                placed = int(info.get("cookies_in_target", 0))
+                peak_in_target = max(peak_in_target, placed)
+                if placed < last_target:
+                    knockouts += 1
+                last_target = placed
 
             state = np.asarray(observation[STATE], dtype=np.float64)
             elapsed = time.perf_counter() - started
@@ -102,6 +117,8 @@ def main() -> int:
                 "seed": seed,
                 "success": bool(info.get("success", False)),
                 "cookies_in_target": int(info.get("cookies_in_target", 0)),
+                "cookies_in_target_peak": peak_in_target,
+                "knockouts": knockouts,
                 "cookies_in_source": int(info.get("cookies_in_source", 0)),
                 "exact_fill": bool(info.get("exact_2x5_fill", False)),
                 "touches_all_walls": bool(info.get("target_touches_all_walls", False)),
@@ -119,9 +136,10 @@ def main() -> int:
             print(
                 f"  ep{index} seed={seed:4d} [{verdict}] "
                 f"in_target={record['cookies_in_target']:2d}/10 "
-                f"in_source={record['cookies_in_source']:2d}/20 "
-                f"steps={steps:4d} joint_travel={record['max_joint_travel_rad']:.2f}rad "
-                f"{elapsed:5.0f}s",
+                f"peak={record['cookies_in_target_peak']:2d}/10 "
+                f"knocked={record['knockouts']:3d} "
+                f"in_source={record['cookies_in_source']:2d}/30 "
+                f"steps={steps:4d} {elapsed:5.0f}s",
                 flush=True,
             )
     finally:
@@ -130,6 +148,7 @@ def main() -> int:
 
     successes = sum(record["success"] for record in results)
     in_target = [record["cookies_in_target"] for record in results]
+    peaks = [record["cookies_in_target_peak"] for record in results]
     summary = {
         "checkpoint": str(args.checkpoint),
         "episodes": len(results),
@@ -140,6 +159,12 @@ def main() -> int:
             "min": int(min(in_target)) if in_target else 0,
             "max": int(max(in_target)) if in_target else 0,
         },
+        "cookies_in_target_peak": {
+            "mean": float(np.mean(peaks)) if peaks else 0.0,
+            "min": int(min(peaks)) if peaks else 0,
+            "max": int(max(peaks)) if peaks else 0,
+        },
+        "total_knockouts": sum(record["knockouts"] for record in results),
         "safety_stops": sum(1 for record in results if record["safety_reason"]),
         "mean_wall_time_s": float(np.mean([record["wall_time_s"] for record in results]))
         if results
@@ -150,8 +175,12 @@ def main() -> int:
     print()
     print("=== summary ===")
     print(f"  success rate     : {successes}/{len(results)} ({summary['success_rate']:.0%})")
-    print(f"  cookies in target: mean={summary['cookies_in_target']['mean']:.1f} "
+    print(f"  cookies in target: final mean={summary['cookies_in_target']['mean']:.1f} "
           f"min={summary['cookies_in_target']['min']} max={summary['cookies_in_target']['max']}")
+    print(f"  peak reached     : mean={summary['cookies_in_target_peak']['mean']:.1f} "
+          f"min={summary['cookies_in_target_peak']['min']} "
+          f"max={summary['cookies_in_target_peak']['max']} of 10")
+    print(f"  cookies knocked out of the bin: {summary['total_knockouts']}")
     print(f"  safety stops     : {summary['safety_stops']}")
     print(f"  mean episode time: {summary['mean_wall_time_s']:.0f}s")
 
