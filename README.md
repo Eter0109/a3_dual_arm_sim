@@ -155,7 +155,8 @@ MUJOCO_GL=egl a3-sim run \
 # Collect a new LeRobot v3 episode (existing non-empty roots are protected)
 MUJOCO_GL=egl a3-sim run \
   --policy a3_dual_arm_sim.examples.custom_policy:make_policy \
-  --record datasets/a3_scripted --repo-id local/a3-scripted --steps 200
+  --record datasets/a3_scripted --repo-id local/a3-scripted \
+  --fast-render --steps 200
 
 a3-sim replay --root datasets/a3_scripted --repo-id local/a3-scripted --episode 0 --render
 ```
@@ -180,8 +181,16 @@ export A3_POLICY_REPO_ID="local/a3-cookie-overnight"
 # A3_POLICY_N_ACTION_STEPS, A3_POLICY_RENAME_MAP, A3_POLICY_LOAD_VLM_WEIGHTS
 MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
   --policy a3_dual_arm_sim.lerobot_policy:make_policy \
-  --task "transfer exactly ten upright square cookie blocks into the 2x5 box" --steps 800
+  --task "transfer exactly ten upright square cookie blocks into the 2x5 box" \
+  --fast-render --steps 800
 ```
+
+`--fast-render` is not optional here. The cookie dataset was collected with it, so a checkpoint
+consuming those images must render the same way: the shadow and reflection passes change the policy
+cameras by 3.6 intensity levels on average but up to 112 of 255 on the pixels near a contact shadow
+(measured by `scripts/measure_render_consistency.py`), which is far outside the training distribution. The rule
+is to match whatever the data was collected with: `scripts/evaluate_cookie_policy.py` and
+`scripts/render_cookie_policy_video.py` call `use_fast_render()` unconditionally for this reason.
 
 Two things the adapter does because LeRobot does not. It **validates the checkpoint's declared
 observation keys**, since LeRobot accepts a missing camera silently: dropping a declared camera still
@@ -231,8 +240,13 @@ MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
   --policy your_package.your_policy:make_policy \
   --task "transfer exactly ten upright square cookie blocks into the 2x5 box" \
   --record outputs/datasets/a3_cookie_policy \
-  --repo-id local/a3-cookie-policy --steps 1000
+  --repo-id local/a3-cookie-policy \
+  --fast-render --steps 1000
 ```
+
+Pass `--fast-render` whenever a policy consumes the camera images, and use the same choice for every
+dataset you record, so a training set is never a mixture of two lighting configurations. Omitting it
+is only safe for policies that never look at the cameras.
 
 `A3CookieTransferExpert` is a privileged, feedback-driven state machine rather than a VLA. It
 replans one Cookie at a time, verifies grasp/lift/release/slot outcomes from simulator truth, and
@@ -269,7 +283,8 @@ Collect only successful demonstrations (failed attempts are discarded):
 ```bash
 MUJOCO_GL=egl a3-sim collect-grasp \
   --root outputs/datasets/a3_grasp_100 \
-  --repo-id local/a3-grasp-100 --episodes 100 --seed 0
+  --repo-id local/a3-grasp-100 --episodes 100 --seed 0 \
+  --fast-render
 ```
 
 Every training launch first rejects non-v3 data, wrong camera/state/action shapes, inconsistent
@@ -301,8 +316,13 @@ export A3_SMOLVLA_REPO_ID="local/a3-grasp-100"
 export A3_SMOLVLA_DEVICE="cuda"
 MUJOCO_GL=egl a3-sim run \
   --policy a3_dual_arm_sim.smolvla_policy:make_policy \
-  --task "pick up the red cube" --steps 300
+  --task "pick up the red cube" \
+  --fast-render --steps 300
 ```
+
+`--fast-render` must match however the grasp dataset above was collected, for the reason given in the
+unified-policy section: the lighting passes move pixels far enough to matter to a vision policy.
+`collect-grasp` and `run` both accept the flag, so record and evaluate with the same choice.
 
 `smolvla_policy.py` is the original SmolVLA-only wrapper, kept because the grasp workflow above and
 existing checkpoints reference it. New work should use the unified adapter in `lerobot_policy.py`,
