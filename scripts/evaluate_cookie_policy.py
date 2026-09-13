@@ -8,6 +8,15 @@ affordable here because LeRobot's action queue means one forward pass covers
 Reports the task's own success criterion (exact 2x5 fill, all four walls, held
 for a second) plus how many cookies actually landed in the bin, so a partial
 policy is distinguishable from a broken one.
+
+Run several episodes and read the spread, not a single number. SmolVLA is a
+flow-matching policy that starts every `select_action` from fresh Gaussian noise,
+so inference is stochastic even for a byte-identical observation. Measured on the
+20000-step cookie checkpoint with a fixed seed and the deterministic scene, three
+episodes peaked at 6, 1 and 1 cookies out of 10: run-to-run variance is larger than
+most effects worth measuring, and one rollout is not evidence. A 2500-step episode
+takes about 20 minutes on this CPU, so budget the whole sweep before drawing a
+conclusion.
 """
 
 from __future__ import annotations
@@ -126,6 +135,12 @@ def main() -> int:
                 "terminated": bool(terminated),
                 "truncated": bool(truncated),
                 "safety_reason": info.get("safety_reason"),
+                # NET displacement per joint, i.e. ``max|x - x0|``, not the path
+                # length travelled. The demonstration is ten near-identical
+                # pick-and-place cycles, so the arm returns to almost the same pose
+                # repeatedly and this number stays small however much work was done.
+                # A low value here does NOT mean the arm barely moved; read the
+                # phase trace (``plot_rollout_trace.py``) for that.
                 "max_joint_travel_rad": float(np.abs(state - home).max()),
                 "max_action_delta_rad": action_delta,
                 "wall_time_s": elapsed,
@@ -175,11 +190,15 @@ def main() -> int:
     print()
     print("=== summary ===")
     print(f"  success rate     : {successes}/{len(results)} ({summary['success_rate']:.0%})")
-    print(f"  cookies in target: final mean={summary['cookies_in_target']['mean']:.1f} "
-          f"min={summary['cookies_in_target']['min']} max={summary['cookies_in_target']['max']}")
-    print(f"  peak reached     : mean={summary['cookies_in_target_peak']['mean']:.1f} "
-          f"min={summary['cookies_in_target_peak']['min']} "
-          f"max={summary['cookies_in_target_peak']['max']} of 10")
+    print(
+        f"  cookies in target: final mean={summary['cookies_in_target']['mean']:.1f} "
+        f"min={summary['cookies_in_target']['min']} max={summary['cookies_in_target']['max']}"
+    )
+    print(
+        f"  peak reached     : mean={summary['cookies_in_target_peak']['mean']:.1f} "
+        f"min={summary['cookies_in_target_peak']['min']} "
+        f"max={summary['cookies_in_target_peak']['max']} of 10"
+    )
     print(f"  cookies knocked out of the bin: {summary['total_knockouts']}")
     print(f"  safety stops     : {summary['safety_stops']}")
     print(f"  mean episode time: {summary['mean_wall_time_s']:.0f}s")

@@ -83,6 +83,19 @@ def collect_cookie_dataset(
     available after the domain-randomisation module was removed, and the scripted
     expert performs slightly *better* with it than with the fully deterministic
     scene, where it tips the last cookie over.
+
+    Know what this does *not* vary, because it bounds what a policy trained on the
+    result can learn. ``A3CookieTransferEnv.reset`` writes ``DEPLOYMENT_HOME`` into
+    ``qpos`` every episode, so the arm's initial pose is byte-identical across all
+    of them, and the only other variation is ``position_noise_m`` /
+    ``yaw_noise_rad``. At the default 2 mm and 256x256, a cookie moves by about one
+    pixel between episodes, so there is almost no visual signal distinguishing one
+    demonstration from another. A policy trained on that can reach a very low
+    loss by memorising one joint trajectory, and measured rollouts confirm it
+    does: they track the demonstration for the first few cookies and then fall
+    apart, because they never learned to correct anything. Treat closed-loop
+    robustness as out of reach until the initial pose and the scene are varied
+    enough for the cameras to see a difference.
     """
 
     if episodes < 1:
@@ -258,6 +271,7 @@ def collect_grasp_dataset(
     )
     if accepted < episodes:
         raise RuntimeError(
-            f"collected only {accepted}/{episodes} successful episodes in {len(results)} attempts"
+            f"collected only {accepted}/{episodes} successful episodes "
+            f"in {len(results)} attempts"
         )
     return summary

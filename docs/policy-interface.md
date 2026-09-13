@@ -120,6 +120,34 @@ Measured against the pinned `lerobot 0.4.4` in `envs/a3_sim` on 2026-09-12.
    weights. The adapter has to clear that flag for such checkpoints; loading
    fails outright on an offline worker otherwise.
 
+10. **`prepare_observation_for_inference` accepts only environment frames.**
+   It is not a generic formatter: it expects uint8 HWC, divides by 255 itself,
+   permutes to CHW, adds the batch axis, and injects top-level `task` and
+   `robot_type`. `LeRobotDataset` frames are *already* float32 CHW in `[0, 1]`, so
+   feeding them through it divides by 255 a second time and swaps the spatial axes,
+   and the tokenizer processor then raises `KeyError: 'task'` unless `task` is set.
+   Offline scoring must assemble its batch by hand; the adapter's use of this
+   function is correct only because the live environment really does emit uint8 HWC.
+
+11. **Inference is stochastic, so a rollout is not reproducible.**
+   Every `select_action` restarts the flow-matching integration from fresh Gaussian
+   noise. Two calls on a byte-identical observation differ by 0.0034 rad per
+   dimension on the cookie 20000-step checkpoint, which is 41% of the expert's
+   mean per-step motion (0.00824 rad). Averaging eight samples did **not** reduce
+   the error against the expert (-2%), so this is bias rather than variance to
+   average away, and it is re-injected at every re-plan. Consequence for
+   evaluation: identical seeds give materially different episodes, and a single
+   rollout carries no information.
+
+12. **An open-loop chunk can be better than a per-step re-plan.**
+   With `chunk_size=50` and `n_action_steps=50`, executing the whole predicted
+   chunk costs one forward pass per 50 steps. Measured error against the
+   demonstrated actions stays nearly flat across the chunk (0.0055 -> 0.0106 rad)
+   while the expert moves 0.233 rad, so the chunk tracks well and the policy's
+   error at step 0 already aligns with `expert[t]` (no time lag). Reducing
+   `n_action_steps` to re-observe more often buys little and costs 50x the compute,
+   so it is not the lever it looks like on a CPU-only host.
+
 ## Design
 
 ### Adapter responsibilities

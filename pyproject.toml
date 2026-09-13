@@ -11,7 +11,14 @@ requires-python = ">=3.10"
 dependencies = [
   "gymnasium>=1.0,<2",
   "matplotlib>=3.8,<4",
-  "mujoco>=3.3,<4",
+  # Pinned to the 3.3 series on purpose. The grasp is marginal by construction:
+  # the parallel gripper opens to 69.7 mm against a 70 mm cube, so contact solving
+  # decides whether a lift succeeds. A newer 3.x release (observed with 3.13.0)
+  # changes that solve enough to break it - the cube gets pushed ~3.7 cm during
+  # finger closure and slips out on lift - which silently invalidates every
+  # demonstration collected on it. 3.3.7 is the verified version; widen this only
+  # after re-running the grasp and cookie expert success checks.
+  "mujoco>=3.3.7,<3.4",
   "numpy>=2,<3",
   "opencv-python>=4.10,<5",
   "Pillow>=10,<13",

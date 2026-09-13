@@ -150,6 +150,13 @@ class LeRobotPolicyAdapter:
             raise FileNotFoundError(f"Dataset has no meta/info.json: {dataset_root}")
 
         self._torch = torch
+        # `prepare_observation_for_inference` is only valid for the environment's
+        # frames: it expects uint8 HWC and itself divides by 255, permutes to CHW,
+        # adds the batch axis, and injects the top-level `task`/`robot_type` keys.
+        # LeRobotDataset frames are ALREADY float32 CHW in [0, 1], so reusing this
+        # function on them double-converts - dividing by 255 twice and swapping the
+        # spatial axes - and the tokenizer processor then fails with KeyError: 'task'
+        # unless `task` is supplied. Offline scoring must build its batch by hand.
         self._prepare_observation = prepare_observation_for_inference
         self._device = torch.device(_resolve_device(config.device))
         self._checkpoint = checkpoint
