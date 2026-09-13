@@ -87,7 +87,7 @@ def _smoke(args: argparse.Namespace) -> int:
         result = runner.run(seed=args.seed, max_steps=args.steps)
         state = env.current_joint_action
         summary = {
-            **result.__dict__,
+            **result.to_dict(),
             "finite_state": bool(np.all(np.isfinite(state))),
             "max_abs_joint_velocity": float(np.max(np.abs(env.data.qvel))),
             "steps_requested": args.steps,
@@ -132,7 +132,7 @@ def _run(args: argparse.Namespace) -> int:
     )
     try:
         result = runner.run(seed=args.seed, max_steps=args.steps)
-        print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0 if not result.terminated else 1
     finally:
         runner.close()
@@ -175,7 +175,7 @@ def _teleop(args: argparse.Namespace) -> int:
             policy,
             lambda: runner.run(seed=args.seed, max_steps=args.steps),
         )
-        print(json.dumps(result.__dict__, ensure_ascii=False, indent=2))
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         return 0 if not result.terminated else 1
     finally:
         runner.close()

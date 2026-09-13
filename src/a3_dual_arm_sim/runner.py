@@ -2,13 +2,34 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
+import numpy as np
 
 from .contracts import EpisodeContext
 from .env import A3DualArmEnv
 from .policy import Policy
 from .recording import Recorder
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert numpy containers to plain Python, recursively.
+
+    Environment ``info`` carries arrays (actions, object poses), and callers
+    serialise this result to JSON. Doing the conversion here keeps every consumer
+    from having to know which fields are arrays.
+    """
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -22,6 +43,13 @@ class EpisodeResult:
     #: Final environment info mapping. Task-specific metrics live here rather
     #: than as fields, so every task can be summarised without changing this type.
     final_info: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable view, with numpy converted to builtins."""
+
+        payload = asdict(self)
+        payload["final_info"] = _jsonable(dict(self.final_info))
+        return payload
 
 
 class EpisodeRunner:

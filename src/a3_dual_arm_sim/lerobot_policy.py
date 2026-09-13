@@ -142,8 +142,8 @@ class LeRobotPolicyAdapter:
                 "Install policy support with: pip install -e '.[dataset]'"
             ) from exc
 
-        checkpoint = config.checkpoint.expanduser().resolve()
-        dataset_root = config.dataset_root.expanduser().resolve()
+        checkpoint = Path(config.checkpoint).expanduser().resolve()
+        dataset_root = Path(config.dataset_root).expanduser().resolve()
         if not (checkpoint / "config.json").is_file():
             raise FileNotFoundError(f"Checkpoint has no config.json: {checkpoint}")
         if not (dataset_root / "meta" / "info.json").is_file():
