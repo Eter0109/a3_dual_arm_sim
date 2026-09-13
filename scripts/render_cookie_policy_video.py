@@ -23,6 +23,7 @@ Encoding needs libx264, provided by PyAV; ffmpeg itself is not on PATH.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -61,8 +62,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--steps",
         type=int,
-        default=800,
-        help="Control steps to record; the demonstration needs ~126 per cookie",
+        default=0,
+        help=(
+            "Control steps to record. 0 (the default) runs until the environment "
+            "ends the episode, i.e. to the 2500-step cookie horizon or to a "
+            "success/safety termination, so the recording covers the whole task "
+            "attempt including however it fails. The demonstration needs ~126 "
+            "steps per cookie."
+        ),
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=3000,
+        help="Safety cap used when --steps is 0, so a stuck rollout still ends",
     )
     parser.add_argument(
         "--view-size",
@@ -94,6 +107,35 @@ def load_font(size: int):
         if Path(path).exists():
             return ImageFont.truetype(path, size)
     return ImageFont.load_default(size=size)
+
+
+MIN_FONT_SIZE = 10
+
+
+def fit_text(text: str, max_width: int, cap_size: int):
+    """The font and text, shortened only if necessary, that fit ``max_width``.
+
+    Measuring at a reference size and scaling by the ratio avoids reloading the
+    TrueType file once per candidate size, which matters because this runs for
+    every frame of a several-thousand-step recording. Shrinking has a floor:
+    below it the text is clipped instead, since unreadable type is worse than a
+    truncated label.
+    """
+
+    available = max(40, max_width - 20)
+    measured = load_font(100).getlength(text)
+    if measured <= available:
+        return load_font(cap_size), text
+
+    size = int(100 * available / measured)
+    if size >= MIN_FONT_SIZE:
+        return load_font(min(cap_size, size)), text
+
+    font = load_font(min(cap_size, MIN_FONT_SIZE))
+    clipped = text
+    while clipped and font.getlength(clipped + "...") > available:
+        clipped = clipped[:-1]
+    return font, (clipped.rstrip() + "..." if len(clipped) < len(text) else text)
 
 
 class ExpertPolicy:
@@ -146,6 +188,7 @@ class FrameComposer:
         view: np.ndarray | None,
         cameras: dict[str, np.ndarray],
         lines: list[str],
+        title: tuple[str, ...] = (),
     ) -> np.ndarray:
         Image, ImageDraw = self._image, self._draw
         frame = Image.new("RGB", (self.width, self.height), (18, 18, 18))
@@ -172,15 +215,34 @@ class FrameComposer:
             draw.text((column + 4, top + 2), label, font=self._label_font, fill=(255, 230, 120))
 
         draw = ImageDraw.Draw(frame)
-        line_height = int(self._hud_font.size * 1.35)
-        boxes = [draw.textbbox((0, 0), line, font=self._hud_font) for line in lines]
-        plate_width = min(max(box[2] for box in boxes) + 20, self.width)
-        plate_height = line_height * len(lines) + 8
-        # A translucent plate keeps the numbers readable over any scene content.
+        # The label identifies which policy produced the video, so a recording is
+        # self-describing once it is separated from its log file. It is allowed to
+        # use the full width, while the numeric lines stay within the scene view so
+        # they never cover the policy-camera insets.
+        rows: list[tuple[str, Any, tuple[int, int, int]]] = []
+        for index, line in enumerate(title):
+            font, text = fit_text(line, self.width, self._hud_font.size)
+            colour = (120, 255, 160) if index == 0 else (150, 220, 170)
+            rows.append((text, font, colour))
+        if lines:
+            body_width = self.view_size or self.width
+            body_font, _ = fit_text(max(lines, key=len), body_width, self._hud_font.size)
+            rows.extend((line, body_font, (255, 255, 255)) for line in lines)
+
+        heights = [int(font.size * 1.35) for _, font, _ in rows]
+        plate_width = min(
+            max(draw.textbbox((0, 0), text, font=font)[2] for text, font, _ in rows) + 20,
+            self.width,
+        )
+        plate_height = sum(heights) + 8
+        # A translucent plate keeps the text readable over any scene content.
         shade = Image.new("RGB", (plate_width, plate_height), (0, 0, 0))
-        frame.paste(Image.blend(frame.crop((0, 0, plate_width, plate_height)), shade, 0.6), (0, 0))
-        for row, line in enumerate(lines):
-            draw.text((10, 4 + line_height * row), line, font=self._hud_font, fill=(255, 255, 255))
+        blended = Image.blend(frame.crop((0, 0, plate_width, plate_height)), shade, 0.6)
+        frame.paste(blended, (0, 0))
+        top = 4
+        for (text, font, colour), height in zip(rows, heights, strict=True):
+            draw.text((10, top), text, font=font, fill=colour)
+            top += height
 
         return np.asarray(frame, dtype=np.uint8)
 
@@ -237,6 +299,10 @@ def main() -> int:
     fps = args.fps or int(getattr(env.config, "control_hz", 20))
     composer = FrameComposer(args.view_size, args.panel_size)
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    # --steps 0 means "record the whole attempt", so the cap becomes the
+    # environment's own horizon unless the caller asks for something shorter.
+    step_limit = args.steps if args.steps > 0 else min(args.max_steps, env.config.horizon)
+    title = describe_policy(args, env)
 
     container = av.open(str(args.output), mode="w")
     stream = container.add_stream("libx264", rate=fps)
@@ -246,9 +312,13 @@ def main() -> int:
     stream.options = {"crf": str(args.crf), "preset": "medium"}
 
     print(f"source     : {'scripted expert' if args.expert else args.checkpoint}")
+    for index, line in enumerate(title):
+        print(f"{'policy     ' if index == 0 else '             '}: {line}")
     print(f"output     : {args.output}")
     print(f"frame      : {composer.width}x{composer.height} at {fps} fps")
-    print(f"steps      : {args.steps} (seed {args.seed})")
+    print(f"steps      : {step_limit} (seed {args.seed})")
+    if step_limit == env.config.horizon:
+        print("             = the environment horizon, so the whole attempt is recorded")
     print()
 
     frames = 0
@@ -259,11 +329,18 @@ def main() -> int:
     peak = 0
     knockouts = 0
     previous_target = 0
+    # Steps since the bin last gained a cookie. The rollout's failure is that it
+    # stops making progress long before the horizon, so the stall length is the
+    # number worth reading off the video.
+    stall = 0
+    peak_step = 0
+    first_knockout_step: int | None = None
+    timeline: list[tuple[int, int, int]] = []
     try:
         observation, _ = env.reset(seed=args.seed, options={"randomize_cookies": False})
         driver.reset(EpisodeContext(seed=args.seed, task=TASK, action_mode="joint_position"))
 
-        while not terminated and not truncated and step < args.steps:
+        while not terminated and not truncated and step < step_limit:
             step += 1
 
             view = (
@@ -281,7 +358,16 @@ def main() -> int:
             distance = float(distances[phase])
 
             placed = int(info.get("cookies_in_target", 0))
-            peak = max(peak, placed)
+            if placed > peak:
+                peak = placed
+                peak_step = step
+                stall = 0
+                timeline.append((step, placed, int(info.get("cookies_in_source", 30))))
+                print(f"  step {step:>4}: in_bin {placed}/10 (new peak)", flush=True)
+            else:
+                stall += 1
+            if placed < previous_target and first_knockout_step is None:
+                first_knockout_step = step
             if placed < previous_target:
                 knockouts += 1
             previous_target = placed
@@ -296,7 +382,9 @@ def main() -> int:
                         f"phase {phase}/{len(reference)}   distance {distance:.3f} rad   "
                         f"knocked out {knockouts}"
                     ),
+                    f"stalled {stall} steps since the last new placement",
                 ],
+                title=title,
             )
             for packet in stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")):
                 container.mux(packet)
@@ -305,12 +393,13 @@ def main() -> int:
             action = driver.act(observation, TASK)
             observation, _, terminated, truncated, info = env.step(action)
 
-            if step % 50 == 0:
+            if step % 100 == 0:
                 elapsed = time.perf_counter() - started
+                remaining = (step_limit - step) / max(step / elapsed, 1e-6)
                 print(
                     f"  step {step:>4} in_bin {placed:>2} peak {peak:>2} "
-                    f"phase {phase:>4} dist {distance:.3f} "
-                    f"({elapsed:.0f}s, {step / elapsed:.2f} steps/s)",
+                    f"stalled {stall:>4} phase {phase:>4} dist {distance:.3f} "
+                    f"({elapsed:.0f}s, ~{remaining:.0f}s left)",
                     flush=True,
                 )
 
@@ -333,8 +422,78 @@ def main() -> int:
         f"in_source {int(info.get('cookies_in_source', 0))}/30"
     )
     print(f"result   : peak {peak}/10 in the bin, {knockouts} knockouts")
+    print(f"stall    : last new placement at step {peak_step}, then {stall} steps of none")
+    if first_knockout_step is not None:
+        print(f"first loss of a placed cookie at step {first_knockout_step}")
+    print()
+    print("placements (step, in_bin, in_source):")
+    for placed_step, bin_count, source_count in timeline:
+        print(f"  step {placed_step:>4}  in_bin {bin_count:>2}  in_source {source_count:>2}")
     print(f"written  : {args.output}")
     return 0
+
+
+def describe_policy(args: argparse.Namespace, env: Any) -> tuple[str, ...]:
+    """The overlay lines naming the policy.
+
+    A recording is usually watched away from its log file, and "is this the
+    trained model or the expert?" is the first question it has to answer. For a
+    checkpoint that means the policy type, the optimisation steps it saw, and
+    which directory it came from, all read from the checkpoint rather than assumed
+    from the path.
+    """
+
+    if args.expert:
+        return ("expert: scripted planner, not a learned policy",)
+
+    checkpoint = Path(args.checkpoint)
+    policy_type = "unknown"
+    config_path = checkpoint / "config.json"
+    if config_path.exists():
+        try:
+            policy_type = json.loads(config_path.read_text()).get("type", "unknown")
+        except (OSError, ValueError):
+            pass
+
+    # `train_config.json` is written by the training run; its `steps` is the total
+    # number of optimisation steps, which is what separates a fine-tuned model from
+    # the untouched base.
+    steps = "trained, step count unknown"
+    train_config = checkpoint / "train_config.json"
+    if train_config.exists():
+        try:
+            total = json.loads(train_config.read_text()).get("steps")
+            if total:
+                steps = f"fine-tuned {int(total)} steps"
+        except (OSError, ValueError):
+            pass
+
+    # Show the path as given and its target when they differ: `last` is a symlink
+    # into a numbered step directory, and which step a video came from is exactly
+    # what a viewer needs to know.
+    resolved = Path(checkpoint).resolve()
+    shown = _relative(Path(checkpoint))
+    if resolved != Path(checkpoint).absolute():
+        shown = f"{shown} -> {resolved.parent.name}"
+
+    horizon = getattr(env.config, "horizon", 0)
+    return (
+        f"policy: {policy_type} ({steps})   env horizon {horizon} steps",
+        f"checkpoint: {shown}",
+    )
+
+
+def _relative(path: Path) -> Path:
+    """``path`` relative to the project when possible, else unchanged.
+
+    Deliberately does not resolve symlinks: the caller wants to show the path it
+    was given, and resolving here would make the symlink annotation redundant.
+    """
+
+    try:
+        return path.absolute().relative_to(PROJECT)
+    except ValueError:
+        return path
 
 
 if __name__ == "__main__":
