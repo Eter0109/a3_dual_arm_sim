@@ -45,6 +45,12 @@ class CartesianDeltaAdapter:
         mujoco.mj_forward(self.model, work)
         targets: list[np.ndarray] = []
         for arm_index in range(2):
+            qids = np.asarray(self._qpos_ids[arm_index], dtype=np.int32)
+            initial_q = work.qpos[qids].copy()
+            if not np.any(command[arm_index, :6]):
+                targets.append(initial_q)
+                continue
+
             site_id = self._sites[arm_index]
             target_position = work.site_xpos[site_id].copy()
             target_position += (
@@ -52,37 +58,39 @@ class CartesianDeltaAdapter:
             )
             target_quaternion = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(target_quaternion, work.site_xmat[site_id])
-            mujoco.mju_quatIntegrate(
-                target_quaternion,
-                command[arm_index, 3:6],
-                self.config.cartesian_rotation_scale_rad,
-            )
-            qids = np.asarray(self._qpos_ids[arm_index], dtype=np.int32)
-            dids = np.asarray(self._dof_ids[arm_index], dtype=np.int32)
+            has_rot = bool(np.any(np.abs(command[arm_index, 3:6]) > 1e-4))
+            if has_rot:
+                mujoco.mju_quatIntegrate(
+                    target_quaternion,
+                    command[arm_index, 3:6],
+                    self.config.cartesian_rotation_scale_rad,
+                )
             limits = self._ranges[arm_index]
-            for _ in range(self.config.ik_iterations):
+            rot_weight = 0.10 if has_rot else 0.03
+
+            def residual(qpos: np.ndarray) -> np.ndarray:
+                work.qpos[qids] = qpos
                 mujoco.mj_forward(self.model, work)
-                position_error = target_position - work.site_xpos[site_id]
                 current_quaternion = np.empty(4, dtype=np.float64)
                 mujoco.mju_mat2Quat(current_quaternion, work.site_xmat[site_id])
                 rotation_error = np.empty(3, dtype=np.float64)
                 mujoco.mju_subQuat(rotation_error, target_quaternion, current_quaternion)
-                error = np.r_[position_error, rotation_error]
-                if np.linalg.norm(error) < 1e-5:
-                    break
-                jacp = np.zeros((3, self.model.nv), dtype=np.float64)
-                jacr = np.zeros((3, self.model.nv), dtype=np.float64)
-                mujoco.mj_jacSite(self.model, work, jacp, jacr, site_id)
-                jacobian = np.vstack((jacp[:, dids], jacr[:, dids]))
-                regularizer = np.eye(6) * self.config.ik_damping**2
-                delta = jacobian.T @ np.linalg.solve(
-                    jacobian @ jacobian.T + regularizer, error
-                )
-                center = np.mean(limits, axis=1)
-                delta += 0.01 * (center - work.qpos[qids])
-                delta = np.clip(delta, -0.04, 0.04)
-                work.qpos[qids] = np.clip(work.qpos[qids] + delta, limits[:, 0], limits[:, 1])
-            targets.append(work.qpos[qids].copy())
+                p_err = work.site_xpos[site_id] - target_position
+                reg_err = 0.005 * (qpos - initial_q)
+                return np.r_[p_err, rot_weight * rotation_error, reg_err]
+
+            from scipy.optimize import least_squares
+
+            res = least_squares(
+                residual,
+                np.clip(initial_q, limits[:, 0] + 1e-4, limits[:, 1] - 1e-4),
+                bounds=(limits[:, 0] + 1e-4, limits[:, 1] - 1e-4),
+                max_nfev=35,
+                ftol=1e-4,
+                xtol=1e-4,
+                gtol=1e-4,
+            )
+            targets.append(np.asarray(res.x, dtype=np.float64))
         return np.ascontiguousarray(
             np.r_[targets[0], (command[0, 6] + 1.0) / 2.0,
                   targets[1], (command[1, 6] + 1.0) / 2.0],

@@ -168,10 +168,7 @@ def _add_gripper(
         wrist_target_position = config.cameras.left_wrist_target_m
     else:
         wrist_camera_position = config.cameras.right_wrist_position_m
-        target_x, target_y, target_z = config.cookie_transfer.target_bin_attach_position_m
-        # The right gripper basis maps its local (x, y, z) to flange
-        # coordinates as (y, -z, -x). Aim at the attached bin center.
-        wrist_target_position = (target_y, -target_z, -target_x)
+        wrist_target_position = config.cameras.right_wrist_target_m
 
     wrist_target = ET.SubElement(
         flange,
@@ -471,6 +468,18 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             conaffinity="3",
             friction=_vec(scene.cookie_friction),
             group="3",
+            # Elastic / compliant contact parameters.
+            # solref="timeconst dampratio" – longer timeconst (0.04 s) gives a
+            # spring-like feel; dampratio < 1 allows a small rebound so a cookie
+            # squeezed between neighbours can be pulled out without a force spike.
+            solref="0.04 0.85",
+            # solimp="dmin dmax width midpoint power" – dmax=0.97 permits up to
+            # 3% of contact depth as elastic penetration; width=0.003 spreads the
+            # transition so adjacent cookies slide past each other smoothly.
+            solimp="0.75 0.97 0.003 0.5 2",
+            # condim=6 enables full tangential + torsional friction so the gripper
+            # keeps lateral purchase while extracting a cookie from the stack.
+            condim="6",
         )
         visual_half_size = tuple(value - 0.0004 for value in scene.cookie_half_size_m)
         column, row = divmod(index, 6)
@@ -528,7 +537,10 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         damping=str(config.joint_damping),
         armature=str(config.joint_armature),
     )
-    ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
+    if scene == "cookie_transfer":
+        ET.SubElement(default, "geom", solref="0.04 0.85", solimp="0.75 0.97 0.002 0.5 2")
+    else:
+        ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
 
     assets = ET.SubElement(root, "asset")
     ET.SubElement(

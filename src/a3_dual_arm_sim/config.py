@@ -48,9 +48,10 @@ class CameraConfig:
     workspace_target_m: tuple[float, ...] = (0.15, 0.34, 0.80)
     front_position_m: tuple[float, ...] = (1.30, -0.80, 1.55)
     front_fovy_deg: float = 58.0
-    left_wrist_position_m: tuple[float, ...] = (0.0, 0.040, 0.110)
-    left_wrist_target_m: tuple[float, ...] = (0.0, 0.170, -0.015)
-    right_wrist_position_m: tuple[float, ...] = (-0.120, -0.040, 0.0)
+    left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
+    left_wrist_target_m: tuple[float, ...] = (0.0, 0.245, 0.085)
+    right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, -0.085)
+    right_wrist_target_m: tuple[float, ...] = (0.0, -0.245, -0.085)
     wrist_fovy_deg: float = 70.0
 
 
@@ -155,6 +156,7 @@ class SimConfig:
             or len(self.cameras.left_wrist_position_m) != 3
             or len(self.cameras.left_wrist_target_m) != 3
             or len(self.cameras.right_wrist_position_m) != 3
+            or len(self.cameras.right_wrist_target_m) != 3
         ):
             raise ValueError("camera positions must contain three values")
         if len(self.cookie_transfer.cookie_source_positions_m) != 30:
@@ -186,11 +188,14 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         front_position_m=_float_tuple(camera_raw, "front_position_m", (0.95, -0.55, 1.28)),
         front_fovy_deg=float(camera_raw.get("front_fovy_deg", 52.0)),
         left_wrist_position_m=_float_tuple(
-            camera_raw, "left_wrist_position_m", (0.0, 0.040, 0.110)
+            camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
         ),
-        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", (0.0, 0.170, -0.015)),
+        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", (0.0, 0.160, -0.010)),
         right_wrist_position_m=_float_tuple(
-            camera_raw, "right_wrist_position_m", (-0.120, -0.040, 0.0)
+            camera_raw, "right_wrist_position_m", (0.0, -0.045, -0.085)
+        ),
+        right_wrist_target_m=_float_tuple(
+            camera_raw, "right_wrist_target_m", (0.0, -0.160, 0.010)
         ),
         wrist_fovy_deg=float(camera_raw.get("wrist_fovy_deg", 70.0)),
     )
