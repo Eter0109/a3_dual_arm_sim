@@ -152,9 +152,12 @@ def test_lerobot_v3_round_trip(tmp_path: Path) -> None:
     ]
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    dataset = LeRobotDataset(
-        "local/a3-test", root=root, download_videos=False, return_uint8=True
-    )
+    try:
+        dataset = LeRobotDataset(
+            "local/a3-test", root=root, download_videos=False, return_uint8=True
+        )
+    except TypeError:
+        dataset = LeRobotDataset("local/a3-test", root=root, download_videos=False)
     assert len(dataset) == 2
     assert dataset.num_episodes == 1
     assert tuple(dataset[0]["action"].shape) == (16,)

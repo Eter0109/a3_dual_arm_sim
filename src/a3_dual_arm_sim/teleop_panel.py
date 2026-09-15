@@ -262,9 +262,19 @@ class TeleopControlPanel:
         return button
 
     def _event_key(self, event: Any) -> str:
-        if event.keysym == "space":
+        keysym = getattr(event, "keysym", "").lower()
+        if keysym == "space":
             return " "
-        return str(event.char).lower()
+        if keysym == "bracketleft":
+            return "["
+        if keysym == "bracketright":
+            return "]"
+        if keysym in ("up", "down", "left", "right", "prior", "next", "pageup", "pagedown"):
+            return keysym
+        char = str(getattr(event, "char", "")).lower()
+        if char:
+            return char
+        return keysym
 
     def _on_key_press(self, event: Any) -> str:
         key = self._event_key(event)

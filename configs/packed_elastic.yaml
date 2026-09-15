@@ -1,13 +1,9 @@
+  # 继承默认值并覆盖饼干物理参数
 physics_hz: 500
 control_hz: 20
-horizon: 1000
+horizon: 6000
 image_width: 256
 image_height: 256
-# Set either to false to skip that per-light render pass. Software rasterizers
-# spend most of their frame time in shadow and reflection maps, so disabling
-# them is the single largest available speed-up when no GPU is present.
-render_shadows: true
-render_reflections: true
 max_joint_step_rad: 0.05
 max_gripper_step: 0.08
 cartesian_translation_scale_m: 0.025
@@ -22,63 +18,75 @@ home:
   right: [0.0, -0.35, 0.0, 0.65, 0.0, -0.25, 0.0]
   grippers: [0.6, 0.6]
 
-# Current example values. These are visual estimates, not calibrated measurements.
 cameras:
   calibration_status: prototype_estimate
   workspace_target_m: [0.15, 0.34, 0.80]
   front_position_m: [1.30, -0.80, 1.55]
   front_fovy_deg: 58.0
   left_wrist_position_m: [0.0, 0.045, 0.085]
-  left_wrist_target_m: [0.0, 0.245, 0.085]
+  left_wrist_target_m: [0.0, 0.160, -0.010]
   right_wrist_position_m: [0.0, -0.045, -0.085]
-  right_wrist_target_m: [0.0, -0.245, -0.085]
+  right_wrist_target_m: [0.0, -0.160, 0.010]
   wrist_fovy_deg: 70.0
 
 cookie_transfer:
   calibration_status: prototype_estimate
-  cookie_half_size_m: [0.025, 0.0095, 0.025]
-  cookie_mass_kg: 0.035
-  cookie_friction: [2.0, 0.03, 0.002]
+  
+  # ── 饼干尺寸稍微缩小，为"弹性压缩"留出空间 ──
+  cookie_half_size_m: [0.0248, 0.0095, 0.0248]
+  cookie_mass_kg: 0.040          # 稍重，更真实
+  
+  # ── 低摩擦（容易从缝隙滑出）+ 弹性接触靠 model.py 的 solref 控制 ──
+  cookie_friction: [0.8, 0.02, 0.001]
+  
   cookie_model_z_m: 0.781
   cookie_reset_z_m: 0.791
+
+  # ── 紧密堆积：列间距 = 0.050（刚好接触），行间距 = 0.055 ──
   cookie_source_positions_m:
     - [0.065, 0.340]
-    - [0.065, 0.370]
-    - [0.065, 0.400]
-    - [0.065, 0.430]
-    - [0.065, 0.460]
-    - [0.120, 0.340]
-    - [0.120, 0.370]
-    - [0.120, 0.400]
-    - [0.120, 0.430]
+    - [0.065, 0.390]
+    - [0.065, 0.440]
     - [0.065, 0.490]
-    - [0.120, 0.460]
+    - [0.065, 0.540]
+    - [0.120, 0.340]
+    - [0.120, 0.390]
+    - [0.120, 0.440]
     - [0.120, 0.490]
+    - [0.120, 0.540]
     - [0.175, 0.340]
-    - [0.175, 0.370]
-    - [0.175, 0.400]
-    - [0.175, 0.430]
-    - [0.175, 0.460]
+    - [0.175, 0.390]
+    - [0.175, 0.440]
     - [0.175, 0.490]
+    - [0.175, 0.540]
     - [0.230, 0.340]
-    - [0.230, 0.370]
-    - [0.230, 0.400]
-    - [0.230, 0.430]
-    - [0.230, 0.460]
+    - [0.230, 0.390]
+    - [0.230, 0.440]
     - [0.230, 0.490]
+    - [0.230, 0.540]
     - [0.285, 0.340]
-    - [0.285, 0.370]
-    - [0.285, 0.400]
-    - [0.285, 0.430]
-    - [0.285, 0.460]
+    - [0.285, 0.390]
+    - [0.285, 0.440]
     - [0.285, 0.490]
+    - [0.285, 0.540]
+    # (5列×5行=25块，剩余5块放第二层或调整)
+    - [0.065, 0.590]
+    - [0.120, 0.590]
+    - [0.175, 0.590]
+    - [0.230, 0.590]
+    - [0.285, 0.590]
+
   bin_wall_thickness_m: 0.006
-  bin_friction: [1.2, 0.02, 0.001]
-  source_bin_center_m: [0.175, 0.415]
-  source_bin_half_size_m: [0.143, 0.093]
-  source_bin_wall_height_m: 0.035
+  bin_friction: [0.8, 0.015, 0.001]
+  
+  # ── 扩大源箱以容纳 5×6 排列 ──
+  source_bin_center_m: [0.175, 0.465]
+  source_bin_half_size_m: [0.145, 0.135]   # 从 [0.143, 0.093] 扩大
+  source_bin_wall_height_m: 0.045
   source_floor_z_m: 0.753
   source_wall_base_z_m: 0.750
+  
+  # 以下保持原值
   target_bin_half_size_m: [0.068, 0.075]
   target_bin_wall_height_m: 0.045
   base_height_m: 1.10

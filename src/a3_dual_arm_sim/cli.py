@@ -152,6 +152,7 @@ def _teleop(args: argparse.Namespace) -> int:
         render_cameras=args.camera_render,
         fast_render=args.fast_render,
     )
+    env.set_key_callback(policy.handle_key)
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
         env,

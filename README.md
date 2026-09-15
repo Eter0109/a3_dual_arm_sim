@@ -445,6 +445,53 @@ need only Pillow and PyAV; the `ffmpeg` binary is not required.
 
 ## Keyboard teleoperation
 
+Idle Cartesian arms retain their last commanded joint positions, including while
+recording or controlling only the other arm. The cookie scene uses ideal model-based
+arm gravity compensation, routed through force-limited joints; payload tracking
+error can still occur. This is a simulator approximation requiring real calibration.
+
+The cookie scene starts with both tool axes pointing down, a 1.10 m base height,
+and separated bins. The target bin is a free rigid body initially resting on the
+table; it follows the right gripper only through contact, never through a weld or
+kinematic attachment. The expert first approaches its near rim, verifies both
+finger contacts, raises it 3 cm, and commands an 8-degree tilt. The left arm then
+transfers cookies while the right arm holds its grasp. Missing support or unstable
+released cookies are reported as failures, not counted as completed transfers.
+
+Tune `cookie_transfer.base_height_m`, `deployment_home`,
+`target_bin_world_position_m`, `box_lift_m`, `box_tilt_deg`, `right_grasp_pitch_deg`, and the two
+`*_gripper_kp` values in `configs/default.yaml`. These gains, contact parameters,
+box mass, and mount dimensions are prototype estimates. Changing mount height
+requires solving a compatible home pose again. The old `target_bin_attach_*`
+fields are retained for right wrist camera compatibility; they no longer attach
+the box to the arm.
+
+Cooperative expert preview (experimental, **not a verified ten-cookie expert**):
+
+```bash
+cd /home/eter/桌面/workspace/a3_dual_arm_sim
+unset MUJOCO_GL
+python examples/run_cookie_transfer.py \
+  --config configs/cookie_cooperative.yaml --render --max-steps 6000
+```
+
+The viewer starts in free-camera mode at the front oblique viewpoint: left-drag
+rotates, right-drag pans, and the wheel zooms. This does not change recorded policy
+camera poses. The current contact-based expert still encounters interference in
+the near rows. It stops on support loss, disturbed previously packed cookies, or
+placement timeout, rather than sweeping back through the loaded box. Check final
+`Success` and `Cookies in Target Bin`; a historical verified placement is not proof
+that the cookie remains packed. Do not use failed attempts as successful training
+demonstrations. The ideal gravity compensation and simplified Robotiq jaws are
+simulation approximations, not real-hardware controller calibration.
+
+Local fixed-layout seed-0 regression (`--max-steps 6000`) stopped at step 2412:
+six historical verified placements, five cookies passing final containment checks,
+and `success=false` after a packed cookie was disturbed. Right box support remained
+verified (about 9.9 degrees tilt). The report is
+`artifacts/cooperative_guarded_seed0.json`; this is a partial failure result, not
+a ten-cookie success-rate benchmark.
+
 ```bash
 a3-sim teleop --record datasets/a3_manual --repo-id local/a3-manual \
   --task "manual tabletop demonstration"

@@ -1,0 +1,12 @@
+# Prototype cooperative scene. Unspecified fields use SimConfig defaults.
+physics_hz: 500
+control_hz: 20
+horizon: 6000
+cookie_transfer:
+  base_height_m: 1.10
+  target_bin_world_position_m: [0.060, 0.090, 0.753]
+  box_lift_m: 0.030
+  box_tilt_deg: 8.0
+  left_gripper_kp: 400.0
+  right_gripper_kp: 2000.0
+  right_grasp_pitch_deg: 0.0

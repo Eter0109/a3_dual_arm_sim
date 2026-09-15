@@ -1,0 +1,66 @@
+{
+  "summary": {
+    "episodes": 1,
+    "successes": 0,
+    "success_rate": 0.0,
+    "mean_completed_cookies": 5.0,
+    "mean_steps": 2412.0,
+    "failure_phase_counts": {
+      "DESCEND_TO_PLACE": 1
+    }
+  },
+  "episodes": [
+    {
+      "seed": 0,
+      "success": false,
+      "grasp_verified": true,
+      "lift_verified": true,
+      "dropped_during_transfer": false,
+      "completed_cookies": 5,
+      "expert_confirmed_cookies": 6,
+      "failed_cookie": 2,
+      "failure_phase": "DESCEND_TO_PLACE",
+      "reason": "packed Cookie 13 disturbed; holding position",
+      "max_gripper_force_n": 22.892228825627104,
+      "steps": 2412,
+      "cookies_in_target": 5,
+      "cookies_in_source": 23,
+      "target_slot_occupancy": [
+        -1,
+        -1,
+        -1,
+        -1,
+        6,
+        -1,
+        12,
+        1,
+        0,
+        5
+      ],
+      "retries_per_slot": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        1,
+        1,
+        0,
+        0
+      ],
+      "retry_reasons": [
+        "VERIFY_LIFT: Cookie 12, slot 6: Cookie did not follow the gripper",
+        "VERIFY_LIFT: Cookie 1, slot 7: Cookie did not follow the gripper",
+        "VERIFY_LIFT: Cookie 13, slot 5: Cookie did not follow the gripper",
+        "VERIFY_LIFT: Cookie 13, slot 5: Cookie did not follow the gripper"
+      ],
+      "box_support_verified": true,
+      "box_tilt_deg": 9.935578185105138,
+      "right_box_contact_forces_n": [
+        10.8224565859472,
+        15.670243904570901
+      ]
+    }
+  ]
+}

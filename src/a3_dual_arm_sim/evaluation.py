@@ -30,6 +30,9 @@ class CookieTransferEpisodeResult:
     target_slot_occupancy: list[int]
     retries_per_slot: list[int]
     retry_reasons: list[str]
+    box_support_verified: bool
+    box_tilt_deg: float
+    right_box_contact_forces_n: list[float]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,9 +51,7 @@ def run_cookie_transfer_episode(
     steps = 0
     truncated = False
     try:
-        observation, info = env.reset(
-            seed=seed, options={"randomize_cookies": randomize_cookies}
-        )
+        observation, info = env.reset(seed=seed, options={"randomize_cookies": randomize_cookies})
         expert.reset()
         terminated = False
         while not terminated and not expert.failed and steps < max_steps:
@@ -80,6 +81,16 @@ def run_cookie_transfer_episode(
             )
         return CookieTransferEpisodeResult(
             seed=seed,
+            box_support_verified=expert.box_support.ready
+            and bool(np.all(expert.box_support.contact_forces() > 0.1)),
+            box_tilt_deg=float(
+                np.rad2deg(
+                    np.arccos(
+                        np.clip(env.data.xmat[env._target_bin_body].reshape(3, 3)[2, 2], -1, 1)
+                    )
+                )
+            ),
+            right_box_contact_forces_n=expert.box_support.contact_forces().tolist(),
             success=success,
             grasp_verified=CookiePhase.LIFT in phases,
             lift_verified=CookiePhase.MOVE_TO_SLOT in phases,
@@ -93,9 +104,7 @@ def run_cookie_transfer_episode(
             steps=steps,
             cookies_in_target=int(info.get("cookies_in_target", 0)),
             cookies_in_source=int(info.get("cookies_in_source", 0)),
-            target_slot_occupancy=[
-                int(value) for value in info.get("target_slot_occupancy", ())
-            ],
+            target_slot_occupancy=[int(value) for value in info.get("target_slot_occupancy", ())],
             retries_per_slot=list(expert.retry_counts),
             retry_reasons=list(expert.retry_reasons),
         )
@@ -131,9 +140,7 @@ def evaluate_cookie_transfer(
             )
             if results
             else 0.0,
-            "mean_steps": float(np.mean([result.steps for result in results]))
-            if results
-            else 0.0,
+            "mean_steps": float(np.mean([result.steps for result in results])) if results else 0.0,
             "failure_phase_counts": dict(sorted(failure_phases.items())),
         },
         "episodes": [result.to_dict() for result in results],

@@ -77,6 +77,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._viewer: Any = None
         self._key_callback: Any = None
         self._step_count = 0
+        self._max_recorded_gripper_force = 0.0
         self._safety_stop = False
         self._safety_reason: str | None = None
         self._last_applied_action = np.zeros(JOINT_ACTION_DIM, dtype=np.float64)
@@ -186,6 +187,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
         self.data.time = 0.0
+        self._max_recorded_gripper_force = 0.0
         self._last_applied_action = np.asarray(home_action, dtype=np.float64)
         if self.render_mode == "human":
             self._ensure_viewer()
@@ -226,6 +228,12 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 if self.action_mode == "joint_position"
                 else self._ik.convert(self.data, requested)
             )
+            if self.action_mode == "cartesian_delta":
+                # An idle arm holds its commanded pose, not its gravity-deflected
+                # measurement. Re-targeting the measurement integrates sag forever.
+                for offset, start in ((0, 0), (7, 8)):
+                    if not np.any(requested[offset:offset + 6]):
+                        canonical[start:start + 7] = self._last_applied_action[start:start + 7]
             applied = self._limit_joint_action(canonical)
             self._apply_controls(applied)
             for _ in range(self.config.substeps):
@@ -243,6 +251,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         terminated = self._safety_stop
         truncated = self._step_count >= self.config.horizon and not terminated
         if self.render_mode == "human" and self._viewer is not None:
+            self._update_viewer_force_hud()
             self._viewer.sync()
         observation = self._observation()
         info = {
@@ -262,11 +271,22 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         arm_command = np.r_[command[:7], command[8:15]]
         arm_current = np.r_[current[:7], current[8:15]]
         arm_command = np.clip(arm_command, self._arm_ranges[:, 0], self._arm_ranges[:, 1])
-        arm_command = np.clip(
-            arm_command,
-            arm_current - self.config.max_joint_step_rad,
-            arm_current + self.config.max_joint_step_rad,
-        )
+        if self.action_mode == "cartesian_delta":
+            arm_delta = arm_command - arm_current
+            max_delta = float(np.max(np.abs(arm_delta)))
+            if max_delta > self.config.max_joint_step_rad:
+                arm_delta = arm_delta * (self.config.max_joint_step_rad / max_delta)
+            arm_command = np.clip(
+                arm_current + arm_delta,
+                self._arm_ranges[:, 0],
+                self._arm_ranges[:, 1],
+            )
+        else:
+            arm_command = np.clip(
+                arm_command,
+                arm_current - self.config.max_joint_step_rad,
+                arm_current + self.config.max_joint_step_rad,
+            )
         command[:7] = arm_command[:7]
         command[8:15] = arm_command[7:]
         for index in (7, 15):
@@ -424,15 +444,69 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             self._viewer = mujoco.viewer.launch_passive(
                 self.model, self.data, key_callback=self._key_callback
             )
-            # MuJoCo's default free camera fits the infinite floor and can leave the
-            # actual workcell tiny or outside the visible region.  Start from the
-            # calibrated scene camera; users can still switch cameras in the viewer.
-            self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-            self._viewer.cam.fixedcamid = self._camera_ids["front"]
+            # Keep the useful front-camera viewpoint, but use a free camera so
+            # mouse rotation/pan/zoom work immediately. Policy cameras stay fixed.
+            self._configure_viewer_camera(self._viewer.cam)
+
+    def _configure_viewer_camera(self, camera: mujoco.MjvCamera) -> None:
+        target = np.asarray(self.config.cameras.workspace_target_m, dtype=np.float64)
+        offset = np.asarray(self.config.cameras.front_position_m) - target
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+        camera.fixedcamid = -1
+        camera.lookat[:] = target
+        camera.distance = float(np.linalg.norm(offset))
+        camera.azimuth = float(np.rad2deg(np.arctan2(-offset[1], -offset[0])))
+        camera.elevation = -float(np.rad2deg(np.arctan2(offset[2], np.linalg.norm(offset[:2]))))
+
+    def _update_viewer_force_hud(self) -> None:
+        if self._viewer is None:
+            return
+        try:
+            inner_f = float(self._sensor("L_finger_inner_touch_sensor")[0])
+            outer_f = float(self._sensor("L_finger_outer_touch_sensor")[0])
+            max_f = max(inner_f, outer_f)
+            self._max_recorded_gripper_force = max(self._max_recorded_gripper_force, max_f)
+
+            # 在屏幕内部以紧凑小字 HUD 叠加显示最大值与历史峰值
+            if hasattr(self._viewer, "set_texts"):
+                text1 = "MAX GRIPPER FORCE:\nPEAK RECORDED:"
+                text2 = f"{max_f:.2f} N\n{self._max_recorded_gripper_force:.2f} N"
+                try:
+                    self._viewer.set_texts([
+                        (
+                            mujoco.mjtFontScale.mjFONTSCALE_100,
+                            mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                            text1,
+                            text2,
+                        )
+                    ])
+                except Exception:
+                    pass
+
+            # 窗口标题栏同步显示当前最大值与峰值
+            title_text = (
+                f"MuJoCo : a3_cookie_transfer | "
+                f"Max Force: {max_f:.2f} N (Peak: {self._max_recorded_gripper_force:.2f} N)"
+            )
+            try:
+                self._viewer.title = title_text
+            except Exception:
+                pass
+
+            window = getattr(self._viewer, "_window", None)
+            if window is not None:
+                try:
+                    import glfw
+                    glfw.set_window_title(window, title_text)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def render(self) -> np.ndarray | None:
         if self.render_mode == "human":
             self._ensure_viewer()
+            self._update_viewer_force_hud()
             self._viewer.sync()
             return None
         return self._render_camera("front")
