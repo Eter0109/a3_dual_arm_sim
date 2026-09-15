@@ -23,10 +23,13 @@ def _run(source: str) -> subprocess.CompletedProcess[str]:
 def test_package_import_does_not_load_mujoco() -> None:
     result = _run(
         "import sys, a3_dual_arm_sim;"
-        "print('mujoco' in sys.modules, a3_dual_arm_sim.__version__)"
+        "print('mujoco' in sys.modules, bool(a3_dual_arm_sim.__version__))"
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "False 0.1.0"
+    # Only the two facts under test: MuJoCo is absent from the import graph, and
+    # the package still exposes a version. Asserting the version string itself
+    # would fail on every release for no reason.
+    assert result.stdout.strip() == "False True"
 
 
 def test_training_modules_import_without_mujoco() -> None:

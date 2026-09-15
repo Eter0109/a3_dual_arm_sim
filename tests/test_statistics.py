@@ -20,7 +20,11 @@ from a3_dual_arm_sim.statistics import (
     floor_normalization_std,
 )
 
-# Mirrors the cookie dataset: the left arm moves, the right arm holds the bin.
+# Synthetic statistics shaped like a real cookie dataset: one arm moving, the
+# other parked, with LeRobot's aggregation artifacts in the parked dimensions.
+# The values are fixtures, not a snapshot of any particular recording, so they do
+# not need to track scene changes such as the right arm later learning to lift
+# the target bin.
 SPURIOUS_ACTION_STD = [
     0.1155, 0.1935, 0.2565, 0.2569, 0.2656, 0.2978, 0.0807, 0.0796,
     3.807e-07, 3.836e-08, 5.563e-03, 1.016e-03, 3.156e-07, 3.422e-04, 4.068e-10, 1.897e-05,
