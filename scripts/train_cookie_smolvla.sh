@@ -7,9 +7,20 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=12:00:00
-#SBATCH --output=/lab/haoq_lab/cse12311731/a3_dual_arm_sim/logs/train_cookie_%j.log
+#SBATCH --output=logs/train_cookie_%j.log
 
-# Fine-tune SmolVLA on the overnight cookie-transfer dataset.
+# Fine-tune SmolVLA on the cookie-transfer dataset.
+#
+# Submit from the project root, which is what makes the relative --output above
+# land in logs/: `sbatch` resolves it against the submitting directory, and Slurm
+# does not expand variables inside #SBATCH directives.
+#
+#   sbatch scripts/train_cookie_smolvla.sh 20000 4
+#
+# The partition, account, and QoS name this project's own cluster; at another site
+# either edit those three lines or override them on the command line, since Slurm
+# rejects a job with no account rather than falling back to a default. The resource
+# requests (cpus-per-task, mem, time) and the GPU selection are portable as written.
 #
 # Pass steps as $1 (default 20000) and batch size as $2 (default 4).
 #
@@ -23,7 +34,9 @@ set -uo pipefail
 STEPS="${1:-20000}"
 BATCH_SIZE="${2:-4}"
 
-PROJECT=/lab/haoq_lab/cse12311731/a3_dual_arm_sim
+# Derived, not hardcoded, so a checkout anywhere works. Sibling collection scripts
+# use the same expression.
+PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATASET="${PROJECT}/outputs/datasets/a3_cookie_overnight"
 BASE_MODEL="${PROJECT}/.runtime/smolvla_base"
 OUTPUT="${PROJECT}/outputs/training/cookie_smolvla"
@@ -36,7 +49,9 @@ export TRANSFORMERS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 export MUJOCO_GL=egl
 
-source /lab/haoq_lab/cse12311731/miniconda3/etc/profile.d/conda.sh
+# Overridable because the interpreter path is a site fact; the default is the
+# environment this project was developed against.
+source "${CONDA_SH:-/lab/haoq_lab/cse12311731/miniconda3/etc/profile.d/conda.sh}"
 conda activate a3_sim
 # Drop the login node's software-Mesa injection; unused here but harmful if kept.
 unset LD_LIBRARY_PATH LIBGL_DRIVERS_PATH

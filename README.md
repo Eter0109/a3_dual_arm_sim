@@ -469,7 +469,6 @@ the box to the arm.
 Cooperative expert preview (experimental, **not a verified ten-cookie expert**):
 
 ```bash
-cd /home/eter/桌面/workspace/a3_dual_arm_sim
 unset MUJOCO_GL
 python examples/run_cookie_transfer.py \
   --config configs/cookie_cooperative.yaml --render --max-steps 6000
