@@ -6,12 +6,12 @@ import numpy as np
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
 
 
-def test_cookie_scene_has_central_stand_bins_and_thirty_upright_cookies() -> None:
+def test_cookie_scene_has_central_stand_bins_and_eighty_upright_cookies() -> None:
     env = A3CookieTransferEnv(render_cameras=False)
     try:
         for name in ("stand_mast", "source_bin_floor", "target_bin_floor"):
             assert mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, name) >= 0
-        for index in range(30):
+        for index in range(80):
             assert mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}") >= 0
         # Adjacent walls overlap at every corner, rather than merely meeting edge-to-edge.
         for bin_name in ("source_bin", "target_bin"):
@@ -61,7 +61,7 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         _, second = env.reset(seed=11)
         np.testing.assert_allclose(env.cookie_positions, positions)
         assert first["cookies_in_target"] == second["cookies_in_target"] == 0
-        assert first["cookies_in_source"] == second["cookies_in_source"] == 30
+        assert first["cookies_in_source"] == second["cookies_in_source"] == 80
         assert first["source_initially_filled"]
         assert second["source_initially_filled"]
         assert all(
@@ -69,6 +69,49 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
             >= np.cos(env.task_config.max_tilt_rad)
             for geom_id in env._cookie_geoms
         )
+    finally:
+        env.close()
+
+
+def test_dense_dimensions_capacity_walls_and_mirrored_home() -> None:
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0)
+        scene = env.config.cookie_transfer
+        np.testing.assert_allclose(2 * env.COOKIE_HALF_SIZE, [0.05, 0.019 / 3, 0.025])
+        positions = np.asarray(env.SOURCE_POSITIONS)
+        xs, ys = np.unique(positions[:, 0]), np.unique(positions[:, 1])
+        assert (len(xs), len(ys), len(positions)) == (4, 20, 80)
+        np.testing.assert_allclose(np.diff(xs) - 0.05, 0.0004)
+        np.testing.assert_allclose(np.diff(ys) - 0.019 / 3, 0.0004)
+        slots = np.asarray(env.TARGET_SLOTS_LOCAL)
+        assert (len(np.unique(slots[:, 0])), len(np.unique(slots[:, 1]))) == (2, 5)
+        np.testing.assert_allclose(
+            np.ptp(positions, axis=0) + 2 * env.COOKIE_HALF_SIZE[:2] + 0.006,
+            2 * env.SOURCE_INNER_HALF_SIZE,
+        )
+        np.testing.assert_allclose(
+            np.ptp(slots, axis=0) + 2 * env.COOKIE_HALF_SIZE[:2],
+            2 * env.TARGET_INNER_HALF_SIZE,
+        )
+        floor_top = scene.source_floor_z_m + scene.bin_wall_thickness_m / 2
+        assert np.isclose(env.SOURCE_WALL_TOP_Z - floor_top, 1.2 * 0.025)
+        assert np.isclose(
+            scene.target_bin_wall_height_m
+            - (scene.target_floor_z_m + scene.bin_wall_thickness_m / 2),
+            0.025,
+        )
+        for name in ("SHOULDER_Y_S", "ELBOW_P_S", "WRIST_P_S", "flange"):
+            np.testing.assert_allclose(
+                env.data.body(f"R_{name}").xpos,
+                env.data.body(f"L_{name}").xpos * [1, -1, 1],
+                atol=1e-5,
+            )
+        np.testing.assert_allclose(scene.source_bin_center_m, [0.175, 0.315])
+        target_world = slots + np.asarray(scene.target_bin_world_position_m[:2])
+        np.testing.assert_allclose(np.unique(target_world[:, 0]), xs[:2])
+        row_offsets = (target_world[:, 1] - ys[0]) / (ys[1] - ys[0])
+        np.testing.assert_allclose(row_offsets, np.round(row_offsets), atol=1e-10)
     finally:
         env.close()
 
@@ -88,7 +131,7 @@ def test_success_requires_exact_settled_upright_two_by_five_fill() -> None:
         assert terminated
         assert info["success"]
         assert info["cookies_in_target"] == 10
-        assert info["cookies_in_source"] == 20
+        assert info["cookies_in_source"] == 70
         assert info["exact_2x5_fill"]
         assert info["target_touches_all_walls"]
         assert all(index >= 0 for index in info["target_slot_occupancy"])
@@ -113,7 +156,7 @@ def test_cookie_transfer_expert_runs_feedback_state_machine() -> None:
         assert not hasattr(expert, "actions")
         assert not expert.failed, expert.failure_reason
         assert info["cookies_in_target"] >= 1
-        assert info["cookies_in_source"] <= 29
+        assert info["cookies_in_source"] <= 79
         for phase in (
             CookiePhase.VERIFY_GRASP,
             CookiePhase.VERIFY_LIFT,
