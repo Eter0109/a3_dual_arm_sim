@@ -448,6 +448,8 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wall_z=scene.target_bin_wall_height_m / 2,
     )
 
+    columns = sorted({p[0] for p in scene.cookie_source_positions_m})
+    rows = sorted({p[1] for p in scene.cookie_source_positions_m})
     for index, (x, y) in enumerate(scene.cookie_source_positions_m):
         cookie = ET.SubElement(
             world,
@@ -482,7 +484,7 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             condim="6",
         )
         visual_half_size = tuple(value - 0.0004 for value in scene.cookie_half_size_m)
-        column, row = divmod(index, 6)
+        column, row = columns.index(x), rows.index(y)
         cookie_rgba = "1.0 0.78 0.20 1" if (column + row) % 2 == 0 else "0.88 0.50 0.04 1"
         ET.SubElement(
             cookie,

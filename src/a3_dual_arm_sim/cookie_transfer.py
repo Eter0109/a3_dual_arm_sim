@@ -14,7 +14,7 @@ from .env import A3DualArmEnv
 
 @dataclass(frozen=True)
 class CookieTransferTaskConfig:
-    cookie_count: int = 30
+    cookie_count: int = 80
     required_cookies: int = 10
     position_noise_m: float = 0.0
     yaw_noise_rad: float = 0.0
@@ -36,7 +36,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
     def TARGET_SLOT_CENTERS(self) -> np.ndarray:
         return np.asarray(
             [
-                self.privileged_target_slot_world(i, 0.031)[:2]
+                self.privileged_target_slot_world(i, self._target_cookie_center_z)[:2]
                 for i in range(len(self.TARGET_SLOTS_LOCAL))
             ]
         )
@@ -65,6 +65,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             scene="cookie_transfer",
         )
         scene_config = self.config.cookie_transfer
+        if task_config is None:
+            self.task_config = CookieTransferTaskConfig(
+                cookie_count=len(scene_config.cookie_source_positions_m)
+            )
         if self.task_config.cookie_count != len(scene_config.cookie_source_positions_m):
             raise ValueError("task cookie_count must match configured cookie source positions")
         self.SOURCE_POSITIONS = scene_config.cookie_source_positions_m
@@ -87,7 +91,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
             scene_config.source_wall_base_z_m + scene_config.source_bin_wall_height_m
         )
         self.TARGET_WALL_HEIGHT = scene_config.target_bin_wall_height_m
-        self.SOURCE_FLOOR_TOP_Z = scene_config.source_floor_z_m
+        self.SOURCE_FLOOR_TOP_Z = (
+            scene_config.source_floor_z_m + scene_config.bin_wall_thickness_m / 2
+        )
+        self._target_cookie_center_z = (
+            scene_config.target_floor_z_m
+            + scene_config.bin_wall_thickness_m / 2
+            + scene_config.cookie_half_size_m[2]
+        )
         self.COOKIE_RESET_Z = scene_config.cookie_reset_z_m
         self.DEPLOYMENT_HOME = np.asarray(scene_config.deployment_home, dtype=np.float64)
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
@@ -266,7 +277,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
                 abs(p_rel[0]) <= self.TARGET_INNER_HALF_SIZE[0] + 0.02
                 and abs(p_rel[1]) <= self.TARGET_INNER_HALF_SIZE[1] + 0.02
             ):
-                p_rel[2] = 0.031
+                p_rel[2] = self._target_cookie_center_z
                 pos = tb_pos + tb_mat @ p_rel
                 if quaternion is None:
                     target_q = np.empty(4, dtype=np.float64)

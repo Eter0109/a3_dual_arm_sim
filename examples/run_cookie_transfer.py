@@ -59,7 +59,7 @@ def main() -> int:
                 hold_cnt = info.get("success_hold_count", 0)
                 print(
                     f"Step {step:4d} | target={in_target:2d}/10 | "
-                    f"source remaining={in_source:2d}/30 | hold={hold_cnt:2d}"
+                    f"source remaining={in_source:2d}/{env.task_config.cookie_count} | hold={hold_cnt:2d}"
                 )
             if truncated:
                 break
@@ -72,7 +72,10 @@ def main() -> int:
         print(f"Success: {info.get('success')}")
         print(f"Exact 2x5 Fill: {info.get('exact_2x5_fill')}")
         print(f"Cookies in Target Bin: {info.get('cookies_in_target')}/10")
-        print(f"Cookies Remaining in Source Bin: {info.get('cookies_in_source')}/30")
+        print(
+            f"Cookies Remaining in Source Bin: {info.get('cookies_in_source')}"
+            f"/{env.task_config.cookie_count}"
+        )
         print(f"Touches All 4 Walls: {info.get('target_touches_all_walls')}")
         print(f"Target Slot Occupancy: {info.get('target_slot_occupancy')}")
         print(f"Expert State: {expert.status}")

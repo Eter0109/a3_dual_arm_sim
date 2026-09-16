@@ -15,7 +15,7 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 - A central mast matching the photographed overhead mounting, a tabletop, deterministic reset,
   position control, rate limiting, and an emergency stop.
 - Two separate scenes: the original three-object sandbox and a video-inspired cookie packing task
-  with a large source bin, a `2x5` target box, and thirty upright thin square cookie proxies.
+  with a `4x20` source bin, a `2x5` target box, and eighty upright thin cookie proxies.
 
 The two source files `L_LAST_S.STL` and `R_LAST_S.STL` are invalid header-only files and are not
 used. The arm STL files are visual geometry; conservative capsules are used for collision.
@@ -154,20 +154,27 @@ same four methods without changing the environment, runner, or recorder.
 
 `A3CookieTransferEnv` is a separate task variant based on the supplied deployment photograph and
 4.8-second packing video. The A3 base is carried by a central dark mast, the arms start in a hanging
-ready pose, and thirty thin square cookie proxies begin upright in three columns of ten in the large
-source bin. The source box has a `15×20` inner cavity (using `5×2` block footprints), so the three
-columns of ten touch all four inner walls. The destination box sits near the tray edge and has a
-`10×10` inner cavity for two columns of five touching pieces. Box walls overlap at all four corners,
+ready pose mirrored about the central stand. Eighty cookie proxies begin upright in four columns
+of twenty. Each piece is 50 mm wide, 6.333 mm thick, and 25 mm high (one-third of the
+previous thickness and half the previous height); mass scales by the same volume ratio to
+5.83 g. Adjacent pieces have 0.4 mm clearance. The source cavity is approximately
+207.2 × 140.27 mm, leaving 3 mm between the packed array and each wall;
+the empty destination cavity is 100.4 × 33.27 mm with 2 × 5 slots.
+Both boxes sit toward the right arm (world -y); the destination's two columns align
+with source columns 0/1, with matching row pitch and grid alignment.
+Source walls rise 30 mm above the inside floor; destination walls rise 25 mm,
+matching cookie height. Their geometry includes an additional 6 mm below the floor top.
+Box walls overlap at all four corners,
 so there are no corner escape gaps. Both boxes use the same uniform light-gray material while the
 cookie proxies alternate between two yellow-orange shades, making adjacent tightly packed pieces
-visually separable without debug markers. Their low walls retain the lower part of each upright piece
-without hiding it from the front camera. The
+visually separable without debug markers. Look down into the boxes using the rotatable
+viewer to inspect the pieces behind the raised walls. The
 source material provides no metric calibration, so stand, bin, camera, and cookie dimensions are
 explicit approximations rather than claimed real-world measurements.
 
 Success is not inferred from an arm waypoint. Exactly ten complete pieces must be upright and stable
 inside the target box, with one piece assigned to each `2x5` slot and the packed array reaching all
-four inner walls, while the other twenty remain in the source bin. This exact fill must persist below the linear/angular speed limits for 20 consecutive
+four inner walls, while the other seventy remain in the source bin. This exact fill must persist below the linear/angular speed limits for 20 consecutive
 control steps (one second). Counts, per-piece masks, slot occupancy, and the hold counter are reported
 in `info`; they remain privileged task/evaluation state and are not added to the policy observation.
 
@@ -291,7 +298,10 @@ requires solving a compatible home pose again. The old `target_bin_attach_*`
 fields are retained for right wrist camera compatibility; they no longer attach
 the box to the arm.
 
-Cooperative expert preview (experimental, **not a verified ten-cookie expert**):
+Cooperative expert preview (experimental, **not a verified ten-cookie expert**).
+The new thin 80-cookie scene changes grasp clearances and box dimensions; the
+existing expert's grasp waypoints still need retuning for this layout. Use the hold
+policy or teleoperation to inspect the updated environment.
 
 ```bash
 cd /home/eter/桌面/workspace/a3_dual_arm_sim
@@ -310,7 +320,7 @@ that the cookie remains packed. Do not use failed attempts as successful trainin
 demonstrations. The ideal gravity compensation and simplified Robotiq jaws are
 simulation approximations, not real-hardware controller calibration.
 
-Local fixed-layout seed-0 regression (`--max-steps 6000`) stopped at step 2412:
+Historical regression on the previous 30-cookie layout (`--max-steps 6000`) stopped at step 2412:
 six historical verified placements, five cookies passing final containment checks,
 and `success=false` after a packed cookie was disturbed. Right box support remained
 verified (about 9.9 degrees tilt). The report is

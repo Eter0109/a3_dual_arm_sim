@@ -8,35 +8,19 @@ import yaml
 
 from .paths import default_config_path
 
+# Upright pieces: 50 mm wide, 19/3 mm thick, 25 mm high. A 0.4 mm
+# clearance avoids initial interpenetration while keeping the rows dense.
+COOKIE_HALF_SIZE = (0.025, 0.0095 / 3, 0.0125)
+COOKIE_PITCH = (0.0504, 0.019 / 3 + 0.0004)
 COOKIE_SOURCE_POSITIONS = tuple(
-    [
-        (0.065, 0.340),
-        (0.065, 0.370),
-        (0.065, 0.400),
-        (0.065, 0.430),
-        (0.065, 0.460),
-        (0.120, 0.340),
-        (0.120, 0.370),
-        (0.120, 0.400),
-        (0.120, 0.430),
-        (0.065, 0.490),
-        (0.120, 0.460),
-        (0.120, 0.490),
-    ]
-    + [(x, y) for x in (0.175, 0.230, 0.285) for y in (0.340, 0.370, 0.400, 0.430, 0.460, 0.490)]
+    (0.175 + (column - 1.5) * COOKIE_PITCH[0], 0.315 + (row - 9.5) * COOKIE_PITCH[1])
+    for column in range(4)
+    for row in range(20)
 )
-
-TARGET_SLOTS_LOCAL = (
-    (-0.025, -0.060),
-    (+0.028, -0.060),
-    (-0.025, -0.041),
-    (+0.028, -0.041),
-    (-0.025, -0.022),
-    (+0.028, -0.022),
-    (-0.025, -0.003),
-    (+0.028, -0.003),
-    (-0.025, +0.035),
-    (+0.028, +0.035),
+TARGET_SLOTS_LOCAL = tuple(
+    ((column - 0.5) * COOKIE_PITCH[0], (row - 2) * COOKIE_PITCH[1])
+    for row in range(5)
+    for column in range(2)
 )
 
 
@@ -66,22 +50,23 @@ class CookieSceneConfig:
     left_gripper_kp: float = 400.0
     right_gripper_kp: float = 2000.0
     right_grasp_pitch_deg: float = 0.0
-    cookie_half_size_m: tuple[float, ...] = (0.025, 0.0095, 0.025)
-    cookie_mass_kg: float = 0.035
+    cookie_half_size_m: tuple[float, ...] = COOKIE_HALF_SIZE
+    cookie_mass_kg: float = 0.035 / 6
     cookie_friction: tuple[float, ...] = (2.0, 0.03, 0.002)
     cookie_source_positions_m: tuple[tuple[float, ...], ...] = COOKIE_SOURCE_POSITIONS
-    cookie_model_z_m: float = 0.781
-    cookie_reset_z_m: float = 0.791
+    cookie_model_z_m: float = 0.7685
+    cookie_reset_z_m: float = 0.7688
     bin_wall_thickness_m: float = 0.006
     bin_friction: tuple[float, ...] = (1.2, 0.02, 0.001)
-    source_bin_center_m: tuple[float, ...] = (0.175, 0.415)
-    source_bin_half_size_m: tuple[float, ...] = (0.143, 0.093)
-    source_bin_wall_height_m: float = 0.035
+    source_bin_center_m: tuple[float, ...] = (0.175, 0.315)
+    source_bin_half_size_m: tuple[float, ...] = (0.1096, 0.07613333333333333)
+    source_bin_wall_height_m: float = 0.036
     source_floor_z_m: float = 0.753
     source_wall_base_z_m: float = 0.750
-    target_bin_half_size_m: tuple[float, ...] = (0.068, 0.075)
-    target_bin_wall_height_m: float = 0.045
-    target_bin_world_position_m: tuple[float, ...] = (0.060, 0.090, 0.753)
+    target_bin_half_size_m: tuple[float, ...] = (0.0562, 0.022633333333333333)
+    target_bin_wall_height_m: float = 0.031
+    # Match source columns 0/1 and the same row lattice, across the box gap.
+    target_bin_world_position_m: tuple[float, ...] = (0.1246, -0.01156666666666667, 0.753)
     target_bin_attach_position_m: tuple[float, ...] = (-0.284576, -0.120338, 0.077169)
     target_bin_attach_quaternion: tuple[float, ...] = (
         0.368302,
@@ -91,15 +76,15 @@ class CookieSceneConfig:
     )
     target_floor_z_m: float = 0.003
     target_slots_local_m: tuple[tuple[float, ...], ...] = TARGET_SLOTS_LOCAL
-    target_slot_tolerance_m: tuple[float, ...] = (0.020, 0.0095)
+    target_slot_tolerance_m: tuple[float, ...] = (0.010, 0.0025)
     deployment_home: tuple[float, ...] = (
-        1.156228,
-        1.014347,
-        -0.423179,
-        -0.555182,
-        -0.932225,
-        -0.268247,
-        -1.463581,
+        1.046019,
+        1.494815,
+        -0.398286,
+        -0.866287,
+        1.894449,
+        -0.248025,
+        1.285323,
         1.0,
         -1.046019,
         -1.494815,
@@ -159,8 +144,8 @@ class SimConfig:
             or len(self.cameras.right_wrist_target_m) != 3
         ):
             raise ValueError("camera positions must contain three values")
-        if len(self.cookie_transfer.cookie_source_positions_m) != 30:
-            raise ValueError("cookie_transfer must contain exactly 30 source positions")
+        if len(self.cookie_transfer.cookie_source_positions_m) < 10:
+            raise ValueError("cookie_transfer must contain at least 10 source positions")
         if len(self.cookie_transfer.target_slots_local_m) != 10:
             raise ValueError("cookie_transfer must contain exactly 10 target slots")
         if len(self.cookie_transfer.deployment_home) != 16:
