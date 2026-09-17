@@ -7,7 +7,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from .config import COOKIE_COLLISION_STEPS, SimConfig
+from .config import SimConfig
 from .contracts import ARM_JOINTS, ActionMode
 from .env import A3DualArmEnv
 
@@ -119,14 +119,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_JOINT, f"cookie_{index}_free")
             for index in range(self.task_config.cookie_count)
         )
-        # A Cookie's collision geom is a stack of boxes (see COOKIE_COLLISION_STEPS),
-        # so each Cookie maps to several geoms rather than one.  Contact checks have
-        # to match against the whole set.
+        # A Cookie's collision geom is several geoms rather than one -- the beveled
+        # shape is built as a compound, and a mesh geom has to be face-split -- so
+        # each Cookie maps to a set.  `_cookie_geoms` names the primary (collision)
+        # geom per Cookie, which is what the batch expert labels a graph node with,
+        # and `_cookie_collision_geoms` is the whole set that contact checks match
+        # against.
         self._cookie_geoms = tuple(
-            tuple(
-                self._id(mujoco.mjtObj.mjOBJ_GEOM, f"cookie_{index}_geom_{part}")
-                for part in range(COOKIE_COLLISION_STEPS + 1 + COOKIE_COLLISION_STEPS)
-            )
+            self._id(mujoco.mjtObj.mjOBJ_GEOM, f"cookie_{index}_geom")
             for index in range(self.task_config.cookie_count)
         )
         self._cookie_collision_geoms = tuple(

@@ -54,7 +54,17 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 position, rotation = self._place_pose(clearance, column)
                 target_q, actual_q, error = np.empty(4), np.empty(4), np.empty(3)
                 mujoco.mju_mat2Quat(target_q, rotation.ravel())
-                q = self._solve_l(position, target_q, self.q_transit)
+                try:
+                    q = self._solve_l(position, target_q, self.q_transit)
+                except RuntimeError as exc:
+                    # The IK refuses a solution that misses by more than its own
+                    # tolerance, which for this pose means the box is out of reach.
+                    # Report it as such rather than letting the raw solver message
+                    # escape: this check exists to say "unreachable".
+                    raise RuntimeError(
+                        f"target column {column + 1} unreachable with vertical grasp: "
+                        f"{exc}; reposition the tabletop target box"
+                    ) from exc
                 work.qpos[self._l_qpos] = q
                 mujoco.mj_kinematics(self.model, work)
                 mujoco.mju_mat2Quat(actual_q, work.site_xmat[self._l_site])
