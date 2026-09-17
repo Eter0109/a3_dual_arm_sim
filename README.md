@@ -4,6 +4,116 @@ An independent, policy-neutral MuJoCo environment for the fourteen-axis A3 dual-
 It supports code policies, keyboard teleoperation, canonical action replay, force feedback, and
 LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
+## 中文快速上手
+
+当前新增的是 **倒角饼干的 5＋5 批量搬运基线**：左臂一次夹起五块，分两次放进桌面上的
+小盒，右臂停在外侧。固定布局已完成整轮验证，但还不是随机场景下的可靠采集系统。
+这是读取仿真真值的闭环规则 Expert，**不是 VLA，也不是通过相机识别饼干**。
+
+### 先选对入口
+
+| 想做什么 | 入口 | 是否录制训练数据 |
+| --- | --- | --- |
+| 看新版一次五块、两次共十块 | `examples/run_cookie_batch.py --render` | 否 |
+| 看旧版右臂托盒、左臂逐块搬运 | `examples/run_cookie_transfer.py --config configs/cookie_cooperative.yaml --render` | 否；当前 80 块布局未验证完整成功 |
+| 自己遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 否 |
+| 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 是；需要相机和数据集依赖 |
+| 策略接口采集 / SmolVLA 训练 | 见下方数据集与训练说明 | 独立流程；新版 batch 演示尚未接入录制 |
+
+**JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 新版 batch 脚本不自动录制，
+也不支持 `--record`；旧版 `evaluate_cookie_transfer.py` 评估的是逐块 Expert，不是新版 batch。
+
+### 安装与可视化
+
+以下命令在仓库根目录执行。已有环境的 WSL 用户先运行 `conda activate a3sim`。
+仅运行仿真和测试不需要安装 LeRobot：
+
+```bash
+python -m pip install -e ".[dev]"
+
+# 打开新版 5＋5 演示；默认读取 configs/cookie_batch.yaml，不录制数据。
+unset MUJOCO_GL
+python -u examples/run_cookie_batch.py --render --max-steps 6000
+```
+
+窗口中鼠标左键拖动旋转视角，右键拖动平移，滚轮缩放。
+`unset MUJOCO_GL` 是清除离屏渲染设置，不是修复 WSLg 的命令；如果窗口仍不显示，
+需要单独检查 WSLg/显示驱动。该演示默认不读取三路相机 RGB，图形窗口只用于观察。
+
+### 不开窗口，保存结果
+
+```bash
+python -u examples/run_cookie_batch.py --seed 0 --max-steps 6000 \
+  --output artifacts/my_cookie_batch_eval.json
+
+# 可选：阶段截图，用于诊断，不是训练数据。
+MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+  --snapshots artifacts/batch_snapshots --debug
+
+# 查看所有可用参数。
+python examples/run_cookie_batch.py --help
+```
+
+成功应同时看到 `success: true`、`phase: DONE`、目标盒 10 块、源盒 70 块，
+以及两批的 `lifted: 5` 和 `released: true`。脚本成功返回 0，失败或超步数返回 1。
+仅“夹起来了”或“曾经放进去过”不算最终成功。
+
+### 这次具体改了什么
+
+- **模型**：饼干约 50 × 6.333 × 25 mm，上下边缘做 2.5 mm、45° 倒角，底部保留平面。
+  batch 使用箱体核心＋上下倒角碰撞体，保留外形和碰撞质量，不把饼干绑定到夹爪。
+- **场景**：仍为 4 × 20 共 80 块；batch 的间隙改为 2.5 mm，未预留整根手指宽的通道。
+  目标盒加宽并移到左臂可达位置，放在桌上；原默认场景的 0.4 mm 间隙保留。
+- **闭环控制**：读取实际位置、姿态、接触和抬升情况，选择露出端连续直立的五块，
+  先保持张开接近抓取点上方，再把夹爪预闭合到批次宽度并确认实测开度稳定，随后插入、
+  夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
+  邻近饼干倾倒时跳过受阻端，而不是继续向下硬压；没有自动扶正功能。
+- **物理参数**：batch 默认物理 1000 Hz、控制 20 Hz、滑动摩擦系数 0.8。
+  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 8 N 会失败退出。
+  这些均为仿真参数，并非真实硬件的标定值或安全保证。
+- **判定**：要求十块释放后直立、稳定、完整进入小盒，源盒仍有七十块；
+  不再要求 batch 满足旧任务的精确槽位／四面贴壁条件。
+
+### 已验证的结果与限制
+
+`artifacts/cookie_batch_baseline_seed0.json` 保存的是此前固定布局 seed 0 的 5＋5
+基线：1844 个控制步、目标盒 10 块、源盒 70 块；两批为 ID 0–4 与 20–24，最大指垫力
+约 4.48 N。当前版本改变了初始姿态与抓取阶段，已验证模型、预闭合状态机和短程无头运行，
+**尚未重新完成整轮 5＋5 长程验收**；在新的报告出现前，不应把旧基线当作本版本的成功证明。
+
+![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
+
+上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率**：目前只改 seed 不会改变饼干布局，
+也不保证任选五块、换尺寸或换摆放后仍能成功。源盒中部分剩余饼干可能倾倒。
+开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，当时还有另一轮诊断运行并行；
+这不是独占机器的性能基准。当前优先验证接触与搬运，尚未优化到实时，暂不建议直接大规模采集。
+
+### 文件导航与回归检查
+
+| 文件 | 主要作用 |
+| --- | --- |
+| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 新版 5＋5 的场景、接触和控制参数 |
+| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 演示入口、结果 JSON、诊断截图 |
+| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 五块选择、闭环状态机、抬升／释放验证 |
+| [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 场景与倒角碰撞模型生成 |
+| [src/a3_dual_arm_sim/cookie_transfer.py](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干任务、接触查询、计数与成功判定 |
+| [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与原场景默认参数 |
+| [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 原逐块 Expert 与共享运动规划 |
+| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 新版选取、接触链、失败保护等回归测试 |
+
+```bash
+python -m pytest tests/test_cookie_batch.py tests/test_model.py tests/test_cookie_transfer.py \
+  -k "not expert and not evaluation" -q
+```
+
+这组相关测试为 30 项通过、5 项未选中；**不代表整个旧版 Expert 测试套件通过**。
+下文保留通用接口与训练说明：
+[动作与观测](#action-and-observation-contract) ·
+[策略与数据采集](#replaceable-policies-and-collection) ·
+[SmolVLA](#grasp-expert-and-smolvla) ·
+[遥控](#keyboard-teleoperation) ·
+[Batch 技术细节](#beveled-cookie-batch-expert-experimental)。
+
 ## What is modeled
 
 - Seven URDF joints per arm, using the source link geometry, mass/inertia, limits, velocity, and
@@ -41,6 +151,9 @@ not raise, it just makes every collected demonstration wrong. `3.3.7` is the ver
 ```bash
 
 cd a3_dual_arm_sim/
+# Simulation and tests only:
+python -m pip install -e ".[dev]"
+# Add dataset support only when needed:
 python -m pip install -e ".[dataset,dev]"
 # Add the training extra when using SmolVLA:
 python -m pip install -e ".[train,dev]"
@@ -94,7 +207,7 @@ MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
 The CLI rejects `--no-camera-render` together with `--record` so an accidental debug launch cannot
 write a dataset containing black camera streams. Manual keyboard collection is the necessary
 exception to the viewer-off rule: `teleop --record ...` keeps both the Human Viewer and Policy RGB
-on because keyboard input comes from the viewer.
+on; keyboard input comes from the dedicated A3 control panel, not the viewer.
 
 On a machine without a GPU the offscreen cameras dominate frame time: MuJoCo regenerates one
 shadow map per light for every camera, and that cost does not depend on the camera resolution. Pass
@@ -204,12 +317,20 @@ sketch, and the migration path. Read it before extending the adapter.
 
 ## Cookie transfer scene
 
+This section describes the **default / legacy single-Cookie configuration**.
+The batch configuration overrides spacing, box geometry and support, contact settings,
+and success criteria; see [the batch baseline](#beveled-cookie-batch-expert-experimental).
+
 `A3CookieTransferEnv` is a separate task variant based on the supplied deployment photograph and
 4.8-second packing video. The A3 base is carried by a central dark mast, the arms start in a hanging
 ready pose mirrored about the central stand. Eighty cookie proxies begin upright in four columns
 of twenty. Each piece is 50 mm wide, 6.333 mm thick, and 25 mm high (one-third of the
 previous thickness and half the previous height); mass scales by the same volume ratio to
-5.83 g. Adjacent pieces have 0.4 mm clearance. The source cavity is approximately
+5.83 g. Their upper and lower long edges have a configurable 2.5 mm, 45-degree
+bevel in both the visible and collision meshes, while the full middle remains
+6.33 mm thick. Adjacent pieces still have only 0.4 mm clearance at the middle;
+the bevel guides finger contact but does not by itself guarantee a collision-free
+insertion. The source cavity is approximately
 207.2 × 140.27 mm, leaving 3 mm between the packed array and each wall;
 the empty destination cavity is 100.4 × 33.27 mm with 2 × 5 slots.
 Both boxes sit toward the right arm (world -y); the destination's two columns align
@@ -460,7 +581,7 @@ error can still occur. This is a simulator approximation requiring real calibrat
 The cookie scene starts with both tool axes pointing down, a 1.10 m base height,
 and separated bins. The target bin is a free rigid body initially resting on the
 table; it follows the right gripper only through contact, never through a weld or
-kinematic attachment. The expert first approaches its near rim, verifies both
+kinematic attachment. The legacy cooperative expert first approaches its near rim, verifies both
 finger contacts, raises it 3 cm, and commands an 8-degree tilt. The left arm then
 transfers cookies while the right arm holds its grasp. Missing support or unstable
 released cookies are reported as failures, not counted as completed transfers.
@@ -479,6 +600,7 @@ existing expert's grasp waypoints still need retuning for this layout. Use the h
 policy or teleoperation to inspect the updated environment.
 
 ```bash
+# Run from the repository root.
 unset MUJOCO_GL
 python examples/run_cookie_transfer.py \
   --config configs/cookie_cooperative.yaml --render --max-steps 6000
@@ -524,3 +646,83 @@ standard orbit, pan, and zoom behavior for inspecting the scene.
 
 Episode metadata is stored in `a3_episode_metadata.jsonl`, including source controller, source
 action mode, canonical stored action mode, seed, task, frame count, and optional success label.
+
+## Beveled-Cookie batch expert (experimental)
+
+`run_cookie_batch.py` is the separate five-at-a-time controller; the original
+`run_cookie_transfer.py` still runs the single-Cookie expert.
+
+```bash
+# Interactive trial; does NOT record a training dataset.
+unset MUJOCO_GL
+python -u examples/run_cookie_batch.py --render
+
+# Headless evaluation; write only the requested JSON result.
+python -u examples/run_cookie_batch.py --seed 0 --output artifacts/batch_eval_seed0.json
+
+# Controlled parameter comparison; the coefficient stays constant throughout.
+python -u examples/run_cookie_batch.py --sliding-friction 0.8 --physics-hz 1000
+
+# Optional diagnostic screenshots (not training observations).
+MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+  --snapshots artifacts/batch_snapshots --debug
+```
+
+The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions and
+2.5 mm bevels are unchanged. The source has 80 Cookies, with a uniform 2.5 mm gap
+instead of 0.4 mm; there are **no pre-cut finger-width lanes**. The left gripper
+first reaches the pose above the Cookies with fully open jaws, then pre-closes
+to the computed five-Cookie width and waits for the measured opening to settle.
+It descends slowly through the bevels, compresses five neighbouring Cookies, checks
+a contact chain through all five, and verifies that each actually rises. The
+second batch prefers the same column after the first five are removed. If a
+neighbour tips during extraction, the expert skips that obstructed end and
+selects five upright Cookies at the opposite exposed end (then another column
+if necessary). It does not keep pushing into the fallen Cookie.
+Insertion stops if either pad exceeds 8 N for three consecutive control ticks;
+this is a simulation guard, not a calibrated real-hardware force limit.
+The target box is widened to leave space for the fingers to open and retract.
+Its table position is moved to (0.095, 0.100, 0.753) m so both columns are
+reachable with a vertical left-hand grasp. The expert checks both placement
+columns at low/high clearance before grasping; joint limits are not relaxed.
+
+The batch uses an exact compound collision solid (box core plus upper/lower
+beveled mesh caps), preserving the visible shape and total collision mass.
+All pieces are included in finger/contact-chain detection. Sliding friction is
+0.8; it is constant through insertion and transport, not switched per phase.
+Thin stacked Cookies require tighter contact settings and a smaller integration
+step: this configuration uses 1000 Hz physics and 20 Hz control. These are
+simulation settings, not measured hardware/material calibration. Camera RGB
+rendering remains disabled during the trial, apart from explicitly requested
+diagnostic screenshots.
+
+Success requires exactly ten Cookies released, upright, settled and geometrically
+inside the target, with seventy left in the source. The old exact-slot/wall-touch
+criterion is retained for the original task but is not required by this batch
+trial. A reported lift is not a successful placement. Read the final JSON
+`success`, `batches` and `failure_reason`; failed trials must not be labelled as
+successful demonstrations. The controller uses simulator truth, not a VLA, and
+never attaches or teleports Cookies during execution.
+
+This batch trial intentionally uses a **tabletop target box**, with the right
+arm parked. Two top-down 2F85 housings interfere around the small box opening;
+continuous right-arm box holding is therefore not part of this baseline.
+The original cooperative single-Cookie example remains available separately.
+The runner currently fixes the Cookie layout: changing the seed alone is not a
+random-layout robustness test. This is an experimental contact-control baseline,
+not a guarantee of reliable demonstrations or a calibrated real-world model.
+
+Reference validation (2026-09-17, fixed layout, seed 0): two full replays
+completed 5 + 5 in 1844 control steps, with 10 released/upright/settled Cookies
+in the target and 70 remaining in the source. The final default-config replay
+included the insertion-force guard. It selected IDs 0-4 and 20-24 because the
+remaining ends of the first column had tilted. Maximum measured pad force was
+4.48 N and the maximum monitored Cookie/pad contact penetration was 0.095 mm.
+Thirty relevant model/contact/task tests passed; this is not a full legacy-expert
+suite pass or a randomized-layout success-rate result.
+
+Known limitations: neighbouring Cookies can still tip and are skipped, not
+restored. Throughput is not yet optimized: the development headless replay took
+about 21 minutes for roughly 92 seconds of simulated control, with another
+diagnostic replay running concurrently. Do not expect real-time playback or
+start large dataset collection on the basis of this one fixed-layout baseline.

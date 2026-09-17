@@ -17,6 +17,7 @@ from typing import Any
 
 # Public name -> module that defines it, relative to this package.
 _EXPORTS: dict[str, str] = {
+    "A3CookieBatchExpert": "batch_expert",
     "A3CookieTransferEnv": "cookie_transfer",
     "A3CookieTransferExpert": "expert",
     "A3DualArmEnv": "env",
@@ -31,6 +32,7 @@ _EXPORTS: dict[str, str] = {
 # Kept literal so the exported surface stays readable; a test asserts that it
 # matches _EXPORTS.
 __all__ = [
+    "A3CookieBatchExpert",
     "A3CookieTransferEnv",
     "A3CookieTransferExpert",
     "A3DualArmEnv",

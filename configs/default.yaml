@@ -3,11 +3,6 @@ control_hz: 20
 horizon: 1000
 image_width: 256
 image_height: 256
-# Set either to false to skip that per-light render pass. Software rasterizers
-# spend most of their frame time in shadow and reflection maps, so disabling
-# them is the single largest available speed-up when no GPU is present.
-render_shadows: true
-render_reflections: true
 max_joint_step_rad: 0.05
 max_gripper_step: 0.08
 cartesian_translation_scale_m: 0.025
@@ -39,24 +34,18 @@ cameras:
 cookie_transfer:
   calibration_status: prototype_estimate
   cookie_half_size_m: [0.025, 0.0031666666666666666, 0.0125]
-  # (cut depth along y, cut span along z).  Opens the gap between row
-  # neighbours into a V so the 6.35 mm jaw pads can slide down it.  Also sets
-  # the base width: 2 * (cookie_half_size_m[1] - chamfer[0]).
-  # The span has to be long enough that the groove still clears the pad at the
-  # depth the pad bottom reaches (~4.1 mm below the top face), but not so long
-  # that it eats the Cookie's full-thickness band -- that band is what the jaws
-  # bite, and at span 12 mm it is only 1 mm wide and the measured grip failed.
-  cookie_chamfer_m: [0.002, 0.008]
+  # 45-degree chamfer on the upper/lower long edges of each upright Cookie.
+  cookie_edge_bevel_m: 0.0025
   cookie_mass_kg: 0.005833333333333334
   cookie_model_z_m: 0.7685
   cookie_reset_z_m: 0.7688
   source_bin_center_m: [0.175, 0.315]
+  source_bin_half_size_m: [0.1096, 0.07613333333333333]
   source_bin_wall_height_m: 0.036
   source_floor_z_m: 0.753
   source_wall_base_z_m: 0.750
-  # target_bin_world_position_m and target_bin_half_size_m are derived in
-  # config.py from COOKIE_PITCH so the 2x5 slots stay on the source row lattice
-  # and always fit with a wall to spare.  Do not hard-code them here.
+  target_bin_world_position_m: [0.1246, -0.01156666666666667, 0.753]
+  target_bin_half_size_m: [0.0562, 0.022633333333333333]
   target_bin_wall_height_m: 0.031
   target_floor_z_m: 0.003
   target_slot_tolerance_m: [0.010, 0.0025]

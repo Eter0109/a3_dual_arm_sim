@@ -27,6 +27,7 @@ class CookiePhase(Enum):
     SUPPORT_BOX = auto()
     SELECT_COOKIE = auto()
     APPROACH = auto()
+    PRE_CLOSE = auto()
     ALIGN = auto()
     DESCEND = auto()
     CLOSE = auto()
@@ -385,7 +386,7 @@ class A3CookieTransferExpert:
 
         def residual(q: np.ndarray) -> np.ndarray:
             work.qpos[self._l_qpos] = q
-            mujoco.mj_forward(self.model, work)
+            mujoco.mj_kinematics(self.model, work)
             cur_quat = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(cur_quat, work.site_xmat[self._l_site])
             err = np.empty(3, dtype=np.float64)
@@ -786,35 +787,38 @@ class A3CookieTransferExpert:
     def _descent_gripper(self) -> float:
         """Jaw opening that puts both pads in the grooves either side of the target.
 
-        The pads must descend into the two flares, so where they sit matters as
-        much as how wide the opening is.  Centring each pad in its groove -- rather
-        than merely clearing the target Cookie's top face -- is what buys the
-        tolerance to descend without the arm drifting onto a neighbour.
+        The pads must descend into the two gaps, so where they sit matters as much
+        as how wide the opening is.  Centring each pad in its groove -- rather than
+        merely clearing the target Cookie's top face -- is what buys the tolerance
+        to descend without the arm drifting onto a neighbour.
 
-        The groove at the top face is ``pitch - top_face`` wide and its centre sits
-        ``pitch / 2`` from the target's centre.  A pad centred there has its inner
-        face at ``pitch / 2 - pad_thickness / 2``, so the face-to-face aperture is
+        Both grooves together span ``pitch - cookie_thickness`` and the pair is
+        centred on the target, so a pad centred in each has its inner face at
+        ``(pitch - pad_thickness) / 2`` from the target's centre.  The face-to-face
+        aperture is therefore
 
             aperture = pitch - pad_thickness
 
-        Aperture is not a knob: the earlier version used ``top_face + clearance``
-        (2.733 mm), which leaves the pad centre only 0.2 mm from the target's top
-        face edge.  Measured drift down the flare is 0.6 mm, so a pad rode over the
-        top face and the descent stopped 4 mm high with the jaws closing on air.
-        At ``pitch - pad_thickness`` (4.983 mm) each pad is centred and has 1.3 mm
-        of play either way.
+        Aperture is not a knob.  Merely clearing the target's top face left the pad
+        centre 0.2 mm from the face edge while the measured drift is 0.6 mm, so a
+        pad rode over the top face and the descent stopped short with the jaws
+        closing on air; the centred value has over a millimetre of play.
+
+        The formula only means anything when a pad actually fits in a groove.  A
+        row gap smaller than the pad cannot be pinched Cookie-by-Cookie at all --
+        that is the case the batch expert exists for -- so fall back to clearing
+        the top face rather than commanding an opening that would drive the pads
+        into the target.
 
         Converting aperture into a command: the jaws close symmetrically, so the
         face-to-face gap is ``2 * GRIPPER_RANGE_M * opening``.
         """
         pad = float(getattr(self.env, "PAD_THICKNESS_M", 2 * 2 * 0.003175))
         pitch = float(getattr(self.env, "COOKIE_PITCH_Y", 0.0))
+        thickness = 2.0 * float(self.env.COOKIE_HALF_SIZE[1])
         aperture = pitch - pad
-        if aperture <= 0.0:  # no pitch available, fall back to the top face
-            half_y = float(self.env.COOKIE_HALF_SIZE[1])
-            chamfer = getattr(self.env, "COOKIE_CHAMFER", None)
-            top_face = 2.0 * (half_y - (float(chamfer[0]) if chamfer is not None else 0.0))
-            aperture = top_face + self.grasp_clearance_m
+        if aperture <= thickness:  # no groove wide enough for a pad
+            aperture = thickness + self.grasp_clearance_m
         return float(np.clip(aperture / (2.0 * self.env.GRIPPER_RANGE_M), 0.0, 1.0))
 
     def _plan_current_cookie(self) -> None:
