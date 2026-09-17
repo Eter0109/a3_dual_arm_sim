@@ -857,13 +857,31 @@ class A3CookieTransferExpert:
         lifted = cookie_position[2] >= self.env.SOURCE_FLOOR_TOP_Z + 0.055
         return bool(lifted and follows_gripper)
 
+    def _cookie_rest_height(self) -> float:
+        """World z of an upright Cookie standing on the source bin floor.
+
+        This is the reference for "is the Cookie back on the bin floor?", so it
+        is derived from ``COOKIE_HALF_SIZE`` for the same reason the grasp height
+        is: it is a function of the Cookie's size, not a free tuning knob.  A
+        Cookie that has shrunk must not have to rise the old, taller Cookie's
+        height before a drop is noticed.
+        """
+        return self.env.SOURCE_FLOOR_TOP_Z + self.env.COOKIE_HALF_SIZE[2]
+
     def _cookie_dropped(self) -> bool:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie())
         eef_position = self.data.site_xpos[self._l_site]
         # Contact flags can flicker while a thin object remains securely held.
         # Separation from the end effector is the robust transfer-time signal.
         separated = np.linalg.norm(cookie_position - eef_position) > 0.085
-        fell_back = cookie_position[2] <= self.env.SOURCE_FLOOR_TOP_Z + 0.025
+        # ``0.025`` used to stand here.  It was only correct while the Cookie was
+        # 50 mm tall, because it is the Cookie's *half height* -- the height of an
+        # upright Cookie's centre above the bin floor, i.e. exactly
+        # ``COOKIE_HALF_SIZE[2]``.  Once the Cookie was shortened to 25 mm, the
+        # stale literal sat 12.5 mm above the real rest height, so any Cookie
+        # that rose by less than that was still reported as back on the floor.
+        # Derive it instead.
+        fell_back = cookie_position[2] <= self._cookie_rest_height()
         return bool(self.phase_steps > 5 and (separated or fell_back))
 
     def _retry(self, reason: str) -> None:

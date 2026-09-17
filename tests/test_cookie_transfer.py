@@ -382,3 +382,39 @@ def test_expert_plans_the_pinch_inside_the_cookie() -> None:
     finally:
         env.close()
 
+
+def test_drop_check_measures_against_the_real_rest_height() -> None:
+    """The "back on the bin floor" threshold has to track the Cookie height too.
+
+    Same root cause as the grasp height: ``0.025`` was the Cookie's *half height*
+    when the Cookie was 50 mm tall, so it happened to be the height of an upright
+    Cookie's centre.  Left stale after the Cookie was shortened to 25 mm, it sat
+    12.5 mm above the real rest height, so any Cookie that rose by less than that
+    -- a marginal pinch, or one nudged by a neighbour -- would still read as
+    "back on the bin floor" and be reported as dropped.
+    """
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0, options={"randomize_cookies": False})
+        expert = A3CookieTransferExpert(env)
+        expert.reset()
+
+        half_z = float(env.COOKIE_HALF_SIZE[2])
+        threshold = expert._cookie_rest_height()
+        assert threshold == pytest.approx(env.SOURCE_FLOOR_TOP_Z + half_z)
+
+        for _ in range(200):
+            mujoco.mj_step(env.model, env.data)
+        settled = float(env.privileged_cookie_position(0)[2])
+
+        # An un-lifted Cookie sits *below* the threshold (so a failed grasp is
+        # still reported), but only just below it (so a real lift clears it
+        # immediately and does not get mistaken for a drop).
+        assert settled < threshold <= settled + 0.005, (
+            f"rest-height threshold {threshold * 1000:.3f} mm vs settled Cookie "
+            f"centre {settled * 1000:.3f} mm"
+        )
+    finally:
+        env.close()
