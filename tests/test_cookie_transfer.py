@@ -46,7 +46,9 @@ def test_cookie_scene_has_central_stand_bins_and_eighty_upright_cookies() -> Non
         collision = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_geom")
         first_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_visual")
         second_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_1_visual")
-        assert np.all(env.model.geom_size[first_visual] < env.model.geom_size[collision])
+        assert env.model.geom_type[collision] == mujoco.mjtGeom.mjGEOM_MESH
+        assert env.model.geom_type[first_visual] == mujoco.mjtGeom.mjGEOM_MESH
+        assert env.model.geom_dataid[collision] != env.model.geom_dataid[first_visual]
         assert not np.allclose(
             env.model.geom_rgba[first_visual], env.model.geom_rgba[second_visual]
         )
@@ -65,10 +67,14 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         assert first["cookies_in_source"] == second["cookies_in_source"] == 80
         assert first["source_initially_filled"]
         assert second["source_initially_filled"]
+        assert np.all(
+            env.cookie_positions[:, 2] - env.COOKIE_HALF_SIZE[2]
+            >= env.SOURCE_FLOOR_TOP_Z - 0.002
+        )
         assert all(
-            abs(float(env.data.geom_xmat[geom_id].reshape(3, 3)[2, 2]))
+            abs(float(env.data.xmat[env._cookie_bodies[index]].reshape(3, 3)[2, 2]))
             >= np.cos(env.task_config.max_tilt_rad)
-            for geom_id in env._cookie_geoms
+            for index in range(env.task_config.cookie_count)
         )
     finally:
         env.close()

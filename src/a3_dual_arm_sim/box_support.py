@@ -69,7 +69,7 @@ class BoxSupportController:
 
         def residual(q):
             work.qpos[self.qids] = q
-            mujoco.mj_forward(self.model, work)
+            mujoco.mj_kinematics(self.model, work)
             current = np.empty(4)
             mujoco.mju_mat2Quat(current, work.site_xmat[self.site])
             error = np.empty(3)

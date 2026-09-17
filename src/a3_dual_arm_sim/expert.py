@@ -349,7 +349,7 @@ class A3CookieTransferExpert:
 
         def residual(q: np.ndarray) -> np.ndarray:
             work.qpos[self._l_qpos] = q
-            mujoco.mj_forward(self.model, work)
+            mujoco.mj_kinematics(self.model, work)
             cur_quat = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(cur_quat, work.site_xmat[self._l_site])
             err = np.empty(3, dtype=np.float64)

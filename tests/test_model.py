@@ -85,17 +85,39 @@ def test_cookie_scene_and_camera_values_come_from_config() -> None:
     config = replace(
         base,
         cameras=replace(base.cameras, front_fovy_deg=61.0),
-        cookie_transfer=replace(base.cookie_transfer, cookie_mass_kg=0.041),
+        cookie_transfer=replace(
+            base.cookie_transfer, cookie_mass_kg=0.041, cookie_edge_bevel_m=0.002
+        ),
     )
     root = ET.fromstring(build_model(config, scene="cookie_transfer").xml)
 
     front = root.find("./worldbody/camera[@name='front']")
     cookie = root.find("./worldbody/body[@name='cookie_0']/geom[@name='cookie_0_geom']")
+    visual = root.find("./worldbody/body[@name='cookie_0']/geom[@name='cookie_0_visual']")
+    collision_mesh = root.find("./asset/mesh[@name='cookie_collision_mesh']")
+    visual_mesh = root.find("./asset/mesh[@name='cookie_visual_mesh']")
 
     assert front is not None and front.attrib["fovy"] == "61"
     assert cookie is not None and cookie.attrib["mass"] == "0.041"
+    assert cookie.attrib["type"] == "mesh"
+    assert cookie.attrib["mesh"] == "cookie_collision_mesh"
+    assert visual is not None and visual.attrib["mesh"] == "cookie_visual_mesh"
+    assert collision_mesh is not None and visual_mesh is not None
+    collision_vertices = np.fromstring(collision_mesh.attrib["vertex"], sep=" ").reshape(-1, 3)
+    visual_vertices = np.fromstring(visual_mesh.attrib["vertex"], sep=" ").reshape(-1, 3)
     np.testing.assert_allclose(
-        np.fromstring(cookie.attrib["size"], sep=" "), [0.025, 0.0095 / 3, 0.0125]
+        np.max(np.abs(collision_vertices), axis=0), [0.025, 0.0095 / 3, 0.0125]
+    )
+    top_vertices = collision_vertices[
+        np.isclose(collision_vertices[:, 2], base.cookie_transfer.cookie_half_size_m[2])
+    ]
+    bottom_vertices = collision_vertices[
+        np.isclose(collision_vertices[:, 2], -base.cookie_transfer.cookie_half_size_m[2])
+    ]
+    np.testing.assert_allclose(np.max(np.abs(top_vertices[:, 1])), 0.0095 / 3 - 0.002)
+    np.testing.assert_allclose(np.max(np.abs(bottom_vertices[:, 1])), 0.0095 / 3 - 0.002)
+    assert np.all(
+        np.max(np.abs(visual_vertices), axis=0) < np.max(np.abs(collision_vertices), axis=0)
     )
     assert base.cameras.calibration_status == "prototype_estimate"
     assert base.cookie_transfer.calibration_status == "prototype_estimate"

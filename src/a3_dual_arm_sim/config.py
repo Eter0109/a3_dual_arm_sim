@@ -11,6 +11,7 @@ from .paths import default_config_path
 # Upright pieces: 50 mm wide, 19/3 mm thick, 25 mm high. A 0.4 mm
 # clearance avoids initial interpenetration while keeping the rows dense.
 COOKIE_HALF_SIZE = (0.025, 0.0095 / 3, 0.0125)
+COOKIE_EDGE_BEVEL_M = 0.0025
 COOKIE_PITCH = (0.0504, 0.019 / 3 + 0.0004)
 COOKIE_SOURCE_POSITIONS = tuple(
     (0.175 + (column - 1.5) * COOKIE_PITCH[0], 0.315 + (row - 9.5) * COOKIE_PITCH[1])
@@ -51,8 +52,12 @@ class CookieSceneConfig:
     right_gripper_kp: float = 2000.0
     right_grasp_pitch_deg: float = 0.0
     cookie_half_size_m: tuple[float, ...] = COOKIE_HALF_SIZE
+    cookie_edge_bevel_m: float = COOKIE_EDGE_BEVEL_M
+    cookie_collision_mode: str = "mesh"
     cookie_mass_kg: float = 0.035 / 6
     cookie_friction: tuple[float, ...] = (2.0, 0.03, 0.002)
+    cookie_solref: tuple[float, ...] = (0.01, 1.0)
+    cookie_solimp: tuple[float, ...] = (0.9, 0.95, 0.001, 0.5, 2.0)
     cookie_source_positions_m: tuple[tuple[float, ...], ...] = COOKIE_SOURCE_POSITIONS
     cookie_model_z_m: float = 0.7685
     cookie_reset_z_m: float = 0.7688
@@ -190,8 +195,16 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         cookie_half_size_m=_float_tuple(
             cookie_raw, "cookie_half_size_m", defaults.cookie_half_size_m
         ),
+        cookie_edge_bevel_m=float(
+            cookie_raw.get("cookie_edge_bevel_m", defaults.cookie_edge_bevel_m)
+        ),
         cookie_mass_kg=float(cookie_raw.get("cookie_mass_kg", defaults.cookie_mass_kg)),
+        cookie_collision_mode=str(
+            cookie_raw.get("cookie_collision_mode", defaults.cookie_collision_mode)
+        ),
         cookie_friction=_float_tuple(cookie_raw, "cookie_friction", defaults.cookie_friction),
+        cookie_solref=_float_tuple(cookie_raw, "cookie_solref", defaults.cookie_solref),
+        cookie_solimp=_float_tuple(cookie_raw, "cookie_solimp", defaults.cookie_solimp),
         cookie_source_positions_m=_nested_float_tuple(
             cookie_raw, "cookie_source_positions_m", defaults.cookie_source_positions_m
         ),

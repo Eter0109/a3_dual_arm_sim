@@ -34,6 +34,8 @@ cameras:
 cookie_transfer:
   calibration_status: prototype_estimate
   cookie_half_size_m: [0.025, 0.0031666666666666666, 0.0125]
+  # 45-degree chamfer on the upper/lower long edges of each upright Cookie.
+  cookie_edge_bevel_m: 0.0025
   cookie_mass_kg: 0.005833333333333334
   cookie_model_z_m: 0.7685
   cookie_reset_z_m: 0.7688

@@ -7,5 +7,8 @@ __pycache__/
 outputs/
 datasets/
 MUJOCO_LOG.TXT
+artifacts/batch_snapshots/
+artifacts/batch_snapshots_*/
+artifacts/batch_dev_*.json
 *.egg-info/
 .DS_Store

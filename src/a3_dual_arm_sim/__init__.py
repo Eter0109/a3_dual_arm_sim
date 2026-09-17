@@ -1,5 +1,6 @@
 """A3 dual-arm MuJoCo simulation package."""
 
+from .batch_expert import A3CookieBatchExpert
 from .cookie_transfer import A3CookieTransferEnv
 from .env import A3DualArmEnv
 from .evaluation import (
@@ -11,6 +12,7 @@ from .expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
 from .grasp import A3GraspEnv
 
 __all__ = [
+    "A3CookieBatchExpert",
     "A3CookieTransferEnv",
     "A3CookieTransferExpert",
     "A3DualArmEnv",
