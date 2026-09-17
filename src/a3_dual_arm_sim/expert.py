@@ -205,6 +205,30 @@ class A3GraspExpert:
         return None
 
 
+# How far below the Cookie's top face the jaws are meant to pinch.  Only this
+# depth is a real design choice; the rest of the offset follows
+# ``scene.cookie_half_size_m[2]`` (see ``_pinch_offset_from_cookie_centre``).
+_PINCH_DEPTH_BELOW_TOP_M = 0.002
+
+
+def _pinch_offset_from_cookie_centre(half_size_z: float) -> float:
+    """Offset from a Cookie's centre up to the height where the jaws pinch.
+
+    The jaws grip just below the Cookie's top face, so the offset has to be
+    derived from ``scene.cookie_half_size_m[2]`` -- it is *not* a free tuning
+    knob.  Whenever that half-size changes, this offset changes with it; keeping
+    them in sync is what makes the tool reach the Cookie instead of closing on
+    empty space above it.
+
+    This used to be the bare literal ``0.023``.  That was only correct while the
+    Cookie was 50 mm tall (half-size 25 mm, so the jaws sat 2 mm below the top
+    face).  When the Cookie was shortened to 25 mm tall the same literal aimed
+    the jaws ~10.5 mm *above* the top face, i.e. at empty space rather than at
+    the Cookie.
+    """
+    return float(half_size_z) - _PINCH_DEPTH_BELOW_TOP_M
+
+
 @dataclass
 class A3CookieTransferExpert:
     """Feedback-driven privileged expert for the ten-Cookie transfer task.
@@ -671,6 +695,17 @@ class A3CookieTransferExpert:
             + (f": {last_error}" if last_error is not None else "")
         )
 
+    def _grasp_height_offset(self) -> float:
+        """Height above the Cookie centre at which the jaws should close.
+
+        Read from ``COOKIE_HALF_SIZE`` on every call instead of cached at
+        construction time, because the environment's scene config -- and hence
+        the Cookie size -- is what this must track.  Both ``grasp_position`` and
+        the preliminary reachability ``tool_height`` in ``_plan_current_cookie``
+        must use this same value.
+        """
+        return _pinch_offset_from_cookie_centre(self.env.COOKIE_HALF_SIZE[2])
+
     def _plan_current_cookie(self) -> None:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie()).copy()
         approach_position = np.array(
@@ -678,8 +713,10 @@ class A3CookieTransferExpert:
         )
         grasp_position = cookie_position.copy()
         # Pinch the upper edge: deep grasps collide with adjacent upright
-        # cookies when lowering into tightly spaced rows.
-        grasp_position[2] += 0.023
+        # cookies when lowering into tightly spaced rows.  The offset is derived
+        # from the Cookie height, not hard-coded, so it stays correct when
+        # ``COOKIE_HALF_SIZE[2]`` changes; see ``_pinch_offset_from_cookie_centre``.
+        grasp_position[2] += self._grasp_height_offset()
         lift_position = approach_position.copy()
         target_position = self.data.xpos[self._tb_id].copy()
         target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()
@@ -690,13 +727,14 @@ class A3CookieTransferExpert:
         )
         tool_xy = self.env.TARGET_SLOTS_LOCAL[self._current_slot()]
         # Preliminary reachability must use the same top-edge grasp height as
-        # the post-lift, measured-transform planner below.
+        # the post-lift, measured-transform planner below, so it has to take the
+        # grasp offset from the same source rather than repeating a literal.
         tool_height = (
             self.env.config.cookie_transfer.target_floor_z_m
             + self.env.config.cookie_transfer.bin_wall_thickness_m
             + self.env.COOKIE_HALF_SIZE[2]
             + 0.008
-            + 0.023
+            + self._grasp_height_offset()
         )
         slot_place = target_position + target_rotation @ np.asarray(
             [tool_xy[0], tool_xy[1], tool_height]
@@ -819,13 +857,31 @@ class A3CookieTransferExpert:
         lifted = cookie_position[2] >= self.env.SOURCE_FLOOR_TOP_Z + 0.055
         return bool(lifted and follows_gripper)
 
+    def _cookie_rest_height(self) -> float:
+        """World z of an upright Cookie standing on the source bin floor.
+
+        This is the reference for "is the Cookie back on the bin floor?", so it
+        is derived from ``COOKIE_HALF_SIZE`` for the same reason the grasp height
+        is: it is a function of the Cookie's size, not a free tuning knob.  A
+        Cookie that has shrunk must not have to rise the old, taller Cookie's
+        height before a drop is noticed.
+        """
+        return self.env.SOURCE_FLOOR_TOP_Z + self.env.COOKIE_HALF_SIZE[2]
+
     def _cookie_dropped(self) -> bool:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie())
         eef_position = self.data.site_xpos[self._l_site]
         # Contact flags can flicker while a thin object remains securely held.
         # Separation from the end effector is the robust transfer-time signal.
         separated = np.linalg.norm(cookie_position - eef_position) > 0.085
-        fell_back = cookie_position[2] <= self.env.SOURCE_FLOOR_TOP_Z + 0.025
+        # ``0.025`` used to stand here.  It was only correct while the Cookie was
+        # 50 mm tall, because it is the Cookie's *half height* -- the height of an
+        # upright Cookie's centre above the bin floor, i.e. exactly
+        # ``COOKIE_HALF_SIZE[2]``.  Once the Cookie was shortened to 25 mm, the
+        # stale literal sat 12.5 mm above the real rest height, so any Cookie
+        # that rose by less than that was still reported as back on the floor.
+        # Derive it instead.
+        fell_back = cookie_position[2] <= self._cookie_rest_height()
         return bool(self.phase_steps > 5 and (separated or fell_back))
 
     def _retry(self, reason: str) -> None:
