@@ -7,7 +7,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from .config import SimConfig
+from .config import COOKIE_COLLISION_STEPS, SimConfig
 from .contracts import ARM_JOINTS, ActionMode
 from .env import A3DualArmEnv
 
@@ -83,6 +83,17 @@ class A3CookieTransferEnv(A3DualArmEnv):
             - scene_config.bin_wall_thickness_m
         )
         self.COOKIE_HALF_SIZE = np.asarray(scene_config.cookie_half_size_m, dtype=np.float64)
+        # (cut depth along y, cut span along z) for the chamfer that turns the gap
+        # between row neighbours into a V.  The expert reads this to size its jaw
+        # opening: the pads have to descend into the flare, not onto a top face.
+        self.COOKIE_CHAMFER = np.asarray(scene_config.cookie_chamfer_m, dtype=np.float64)
+        # Row spacing, and the thickness of one jaw pad along the closing axis.
+        # The expert needs both to place the pads in the groove between two
+        # neighbours rather than on top of a Cookie's top face.
+        _rows = sorted({float(p[1]) for p in scene_config.cookie_source_positions_m})
+        self.COOKIE_PITCH_Y = (
+            _rows[1] - _rows[0] if len(_rows) > 1 else 2.0 * self.COOKIE_HALF_SIZE[1]
+        )
         self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
         self.TARGET_SLOT_TOLERANCE = np.asarray(
             scene_config.target_slot_tolerance_m, dtype=np.float64
@@ -110,13 +121,25 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_JOINT, f"cookie_{index}_free")
             for index in range(self.task_config.cookie_count)
         )
+        # A Cookie's collision geom is a stack of boxes (see COOKIE_COLLISION_STEPS),
+        # so each Cookie maps to several geoms rather than one.  Contact checks have
+        # to match against the whole set.
         self._cookie_geoms = tuple(
-            self._id(mujoco.mjtObj.mjOBJ_GEOM, f"cookie_{index}_geom")
+            tuple(
+                self._id(mujoco.mjtObj.mjOBJ_GEOM, f"cookie_{index}_geom_{part}")
+                for part in range(COOKIE_COLLISION_STEPS + 1 + COOKIE_COLLISION_STEPS)
+            )
             for index in range(self.task_config.cookie_count)
         )
         self._left_finger_geoms = tuple(
             self._id(mujoco.mjtObj.mjOBJ_GEOM, f"L_finger_{finger}_geom")
             for finger in ("inner", "outer")
+        )
+        # Thickness of one jaw pad along the closing axis.  The pads have to sit in
+        # the groove between two neighbours, so the expert sizes its descent
+        # opening from this and COOKIE_PITCH_Y.
+        self.PAD_THICKNESS_M = 2.0 * float(
+            self.model.geom_size[self._left_finger_geoms[0]][1]
         )
         self._success_hold_count = 0
         self._source_initially_filled = False
@@ -148,15 +171,28 @@ class A3CookieTransferEnv(A3DualArmEnv):
             [slot_xy[0], slot_xy[1], z], dtype=np.float64
         )
 
+    def _cookie_rotation(self, index: int) -> np.ndarray:
+        """Orientation of the Cookie's body frame.
+
+        Deliberately *not* ``geom_xmat``.  The Cookie's collision geom is a convex
+        hull, and MuJoCo stores a mesh in its principal-axis frame, folding that
+        rotation into the geom frame.  For the Cookie hull that is a 120 degree
+        rotation about (1, 1, 1), so ``abs(geom_xmat) @ COOKIE_HALF_SIZE`` reports
+        a y half-extent of 25 mm instead of 3.17 mm -- which made the containment
+        checks read an upright Cookie as lying on its side.  The freejoint is on
+        the body, so the body frame is the one that tracks the real orientation.
+        """
+        return self.data.xmat[self._cookie_bodies[index]].reshape(3, 3)
+
     def privileged_left_finger_contacts(self, index: int) -> tuple[bool, bool]:
         """Report target-Cookie contact for each left finger from MuJoCo contacts."""
-        cookie_geom = self._cookie_geoms[index]
+        cookie_geoms = set(self._cookie_geoms[index])
         contacts = [False, False]
         for contact_index in range(self.data.ncon):
             contact = self.data.contact[contact_index]
-            pair = {int(contact.geom1), int(contact.geom2)}
+            one, two = int(contact.geom1), int(contact.geom2)
             for finger_index, finger_geom in enumerate(self._left_finger_geoms):
-                if pair == {finger_geom, cookie_geom}:
+                if finger_geom in (one, two) and (cookie_geoms & {one, two}):
                     contacts[finger_index] = True
         return contacts[0], contacts[1]
 
@@ -314,7 +350,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         require_settled: bool,
     ) -> bool:
         position = self.data.xpos[self._cookie_bodies[index]]
-        rotation = self.data.geom_xmat[self._cookie_geoms[index]].reshape(3, 3)
+        rotation = self._cookie_rotation(index)
         world_half_extent = np.abs(rotation) @ self.COOKIE_HALF_SIZE
         lower_xy = center - inner_half_size
         upper_xy = center + inner_half_size
@@ -350,7 +386,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         tb_pos = self.data.xpos[self._target_bin_body]
         tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
         c_pos = self.data.xpos[self._cookie_bodies[index]]
-        c_mat = self.data.geom_xmat[self._cookie_geoms[index]].reshape(3, 3)
+        c_mat = self._cookie_rotation(index)
 
         p_rel = tb_mat.T @ (c_pos - tb_pos)
         r_rel = tb_mat.T @ c_mat
@@ -418,7 +454,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
                     continue
                 c_pos = self.data.xpos[self._cookie_bodies[index]]
                 p_rel = tb_mat.T @ (c_pos - tb_pos)
-                r_rel = tb_mat.T @ self.data.geom_xmat[self._cookie_geoms[index]].reshape(3, 3)
+                r_rel = tb_mat.T @ self._cookie_rotation(index)
                 half_extent = (np.abs(r_rel) @ self.COOKIE_HALF_SIZE)[:2]
                 edges.append((p_rel[:2] - half_extent, p_rel[:2] + half_extent))
             inner_lower = -inner_half_size
@@ -428,7 +464,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
                 if not use_cookie:
                     continue
                 position = self.data.xpos[self._cookie_bodies[index]][:2]
-                rotation = self.data.geom_xmat[self._cookie_geoms[index]].reshape(3, 3)
+                rotation = self._cookie_rotation(index)
                 half_extent = (np.abs(rotation) @ self.COOKIE_HALF_SIZE)[:2]
                 edges.append((position - half_extent, position + half_extent))
             inner_lower = center - inner_half_size

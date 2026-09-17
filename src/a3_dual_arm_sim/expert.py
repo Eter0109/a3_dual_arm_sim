@@ -243,7 +243,41 @@ class A3CookieTransferExpert:
     max_joint_step_rad: float = 0.020
     max_gripper_step: float = 0.060
     joint_tolerance_rad: float = 0.055
+    # IK acceptance.  The old thresholds (retry above 12 mm, accept up to 16 mm)
+    # were loose enough to silently accept a solution that missed the commanded
+    # point by 9 mm -- which put the jaw pads 5 mm above the Cookie with nothing
+    # touching.  A pinch needs the pads within a millimetre of the planned height,
+    # and a good solution exists (the same waypoint solves to 0.001 mm from a
+    # different seed), so retry well before that instead of accepting the miss.
+    ik_retry_tolerance_m: float = 0.002
+    ik_max_tolerance_m: float = 0.004
+    # How close the arm has to get before a descend is considered finished.
+    #
+    # This only has to catch the *transient*: ``_motion_done`` flips as soon as the
+    # interpolated command queue empties, with the joints still chasing the last
+    # command, and the expert used to leave DESCEND right then.  It must be LOOSER
+    # than the servos' steady-state droop, measured at 0.0068 rad -- asking for
+    # better than the servos can hold means the check never passes at all and the
+    # refinement below never runs.  Accuracy comes from the tool-space correction
+    # instead, which measures and cancels that droop.
+    arrival_tolerance_rad: float = 0.010
+    # Tool-space tolerance for the descent, and how many times to re-aim for it.
+    # The position servos settle ~4 mm below the commanded height at this reach
+    # even though the joints sit within 0.007 rad of the command.  That is enough
+    # to hold the pads above the planned pinch height, where they close on air, and
+    # joint-space arrival cannot see it -- so DESCEND closes the loop on the
+    # measured tool position and re-aims, overshooting by exactly the measured
+    # error.
+    tool_tolerance_m: float = 0.001
+    max_descent_aims: int = 4
+    # Transit / align / retract: jaws well clear of the row so they cannot catch.
     open_gripper: float = 0.28
+    # Descending: the pads slide down the flare between the target Cookie and its
+    # two neighbours, so the opening is set from the chamfered top face rather
+    # than left wide.  At 0.28 the jaws were 23.8 mm apart -- three and a half row
+    # pitches -- which put the pads over Cookies two places away instead of in the
+    # two gaps flanking the target.
+    grasp_clearance_m: float = 0.0004
     closed_gripper: float = 0.0
     release_gripper: float = 0.25
     close_steps: int = 18
@@ -317,6 +351,8 @@ class A3CookieTransferExpert:
         self.failure_phase: str | None = None
         self.retry_reasons: list[str] = []
         self._waypoints: dict[str, np.ndarray] = {}
+        self._grasp_target_world: np.ndarray | None = None
+        self._descent_aims = 0
         self._grasp_stable_count = 0
         self._release_stable_count = 0
         self._settle_count = 0
@@ -363,7 +399,7 @@ class A3CookieTransferExpert:
             max_nfev=500,
         )
         position_error = float(np.linalg.norm(residual(res.x)[:3]))
-        if position_error > 0.012:
+        if position_error > self.ik_retry_tolerance_m:
             rng = np.random.default_rng(0)
             for seed in [
                 self.data.qpos[self._l_qpos],
@@ -379,9 +415,9 @@ class A3CookieTransferExpert:
                 if np.linalg.norm(candidate.fun[:6]) < np.linalg.norm(res.fun[:6]):
                     res = candidate
                 position_error = float(np.linalg.norm(residual(res.x)[:3]))
-                if position_error < 0.012:
+                if position_error < self.ik_retry_tolerance_m:
                     break
-        if not res.success or position_error > 0.016:
+        if not res.success or position_error > self.ik_max_tolerance_m:
             raise RuntimeError(
                 "cookie expert IK failed: "
                 f"success={res.success} position_error={position_error:.5f}"
@@ -406,6 +442,8 @@ class A3CookieTransferExpert:
         self.failure_phase = None
         self.retry_reasons = []
         self._waypoints = {}
+        self._grasp_target_world = None
+        self._descent_aims = 0
         self._grasp_stable_count = 0
         self._release_stable_count = 0
         self._settle_count = 0
@@ -488,8 +526,16 @@ class A3CookieTransferExpert:
             self._advance(CookiePhase.DESCEND)
 
         if self.phase is CookiePhase.DESCEND:
-            action = self._trajectory_command(self._waypoints["grasp"], self.open_gripper)
-            if self._motion_done:
+            action = self._trajectory_command(self._waypoints["grasp"], self._descent_gripper())
+            if self._motion_done and self._reached(
+                self._waypoints["grasp"], tolerance=self.arrival_tolerance_rad
+            ):
+                if self._aim_descent():
+                    self._advance(CookiePhase.CLOSE)
+            elif self._motion_done and self._timed_out(120):
+                # Something below is holding the pads up (a neighbour's corner, a
+                # wall, or the servos bottomed out).  Close anyway rather than spin
+                # here, and let VERIFY_GRASP judge whether a Cookie was caught.
                 self._advance(CookiePhase.CLOSE)
             return action
 
@@ -706,6 +752,71 @@ class A3CookieTransferExpert:
         """
         return _pinch_offset_from_cookie_centre(self.env.COOKIE_HALF_SIZE[2])
 
+    def _aim_descent(self) -> bool:
+        """Re-aim the grasp waypoint until the tool is actually there.
+
+        Returns True once the measured tool position is within
+        ``tool_tolerance_m`` of the commanded point, or once the retry budget is
+        spent.  The correction is the measured error itself: the servos droop by a
+        steady-state amount that joint-space arrival cannot detect, so the command
+        has to overshoot by exactly that much.
+        """
+        if self._grasp_target_world is None:
+            return True
+        site = self.data.site_xpos[self._l_site]
+        error = self._grasp_target_world - site
+        if float(np.linalg.norm(error)) <= self.tool_tolerance_m:
+            return True
+        if self._descent_aims >= self.max_descent_aims:
+            return True
+        self._descent_aims += 1
+        try:
+            self._waypoints["grasp"] = self._solve_l(
+                self._grasp_target_world + error,
+                self._target_quat_canonical,
+                self.data.qpos[self._l_qpos],
+            )
+        except RuntimeError:
+            return True
+        # Force ``_trajectory_command`` to rebuild its interpolation toward the
+        # corrected waypoint instead of reusing the previous one.
+        self._motion_key = None
+        return False
+
+    def _descent_gripper(self) -> float:
+        """Jaw opening that puts both pads in the grooves either side of the target.
+
+        The pads must descend into the two flares, so where they sit matters as
+        much as how wide the opening is.  Centring each pad in its groove -- rather
+        than merely clearing the target Cookie's top face -- is what buys the
+        tolerance to descend without the arm drifting onto a neighbour.
+
+        The groove at the top face is ``pitch - top_face`` wide and its centre sits
+        ``pitch / 2`` from the target's centre.  A pad centred there has its inner
+        face at ``pitch / 2 - pad_thickness / 2``, so the face-to-face aperture is
+
+            aperture = pitch - pad_thickness
+
+        Aperture is not a knob: the earlier version used ``top_face + clearance``
+        (2.733 mm), which leaves the pad centre only 0.2 mm from the target's top
+        face edge.  Measured drift down the flare is 0.6 mm, so a pad rode over the
+        top face and the descent stopped 4 mm high with the jaws closing on air.
+        At ``pitch - pad_thickness`` (4.983 mm) each pad is centred and has 1.3 mm
+        of play either way.
+
+        Converting aperture into a command: the jaws close symmetrically, so the
+        face-to-face gap is ``2 * GRIPPER_RANGE_M * opening``.
+        """
+        pad = float(getattr(self.env, "PAD_THICKNESS_M", 2 * 2 * 0.003175))
+        pitch = float(getattr(self.env, "COOKIE_PITCH_Y", 0.0))
+        aperture = pitch - pad
+        if aperture <= 0.0:  # no pitch available, fall back to the top face
+            half_y = float(self.env.COOKIE_HALF_SIZE[1])
+            chamfer = getattr(self.env, "COOKIE_CHAMFER", None)
+            top_face = 2.0 * (half_y - (float(chamfer[0]) if chamfer is not None else 0.0))
+            aperture = top_face + self.grasp_clearance_m
+        return float(np.clip(aperture / (2.0 * self.env.GRIPPER_RANGE_M), 0.0, 1.0))
+
     def _plan_current_cookie(self) -> None:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie()).copy()
         approach_position = np.array(
@@ -717,6 +828,9 @@ class A3CookieTransferExpert:
         # from the Cookie height, not hard-coded, so it stays correct when
         # ``COOKIE_HALF_SIZE[2]`` changes; see ``_pinch_offset_from_cookie_centre``.
         grasp_position[2] += self._grasp_height_offset()
+        # Where the tool should end up, kept so DESCEND can close the loop on it.
+        self._grasp_target_world = grasp_position.copy()
+        self._descent_aims = 0
         lift_position = approach_position.copy()
         target_position = self.data.xpos[self._tb_id].copy()
         target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()

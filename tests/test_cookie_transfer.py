@@ -4,6 +4,12 @@ import mujoco
 import numpy as np
 import pytest
 
+from a3_dual_arm_sim.config import (
+    COOKIE_BIN_SLACK_M,
+    COOKIE_COLLISION_STEPS,
+    COOKIE_GAP_Y_M,
+    TARGET_BIN_SLACK_M,
+)
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
 
 
@@ -43,10 +49,28 @@ def test_cookie_scene_has_central_stand_bins_and_eighty_upright_cookies() -> Non
             np.testing.assert_allclose(
                 env.model.geom_rgba[front_visual], env.model.geom_rgba[left_visual]
             )
-        collision = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_geom")
         first_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_0_visual")
         second_visual = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cookie_1_visual")
-        assert np.all(env.model.geom_size[first_visual] < env.model.geom_size[collision])
+        # The visual is a mesh inset from the collision hull.  Read the mesh's own
+        # vertices: a mesh's geom_size is expressed in its principal-axis frame, so
+        # comparing it against a box's size would compare different quantities.
+        mesh_id = int(env.model.geom_dataid[first_visual])
+        adr, num = int(env.model.mesh_vertadr[mesh_id]), int(env.model.mesh_vertnum[mesh_id])
+        visual_half = np.sort(np.ptp(env.model.mesh_vert[adr : adr + num], axis=0) / 2)
+        collision_half = np.sort(np.asarray(env.config.cookie_transfer.cookie_half_size_m))
+        assert np.all(visual_half < collision_half), (
+            f"visual half-extents {visual_half * 1000} must be inset inside "
+            f"{collision_half * 1000} mm"
+        )
+        # Every collision part is a box spanning the full Cookie width.
+        for part in range(COOKIE_COLLISION_STEPS + 1 + COOKIE_COLLISION_STEPS):
+            geom = mujoco.mj_name2id(
+                env.model, mujoco.mjtObj.mjOBJ_GEOM, f"cookie_0_geom_{part}"
+            )
+            assert geom >= 0, f"missing collision part {part}"
+            np.testing.assert_allclose(
+                env.model.geom_size[geom][0], env.config.cookie_transfer.cookie_half_size_m[0]
+            )
         assert not np.allclose(
             env.model.geom_rgba[first_visual], env.model.geom_rgba[second_visual]
         )
@@ -65,10 +89,12 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         assert first["cookies_in_source"] == second["cookies_in_source"] == 80
         assert first["source_initially_filled"]
         assert second["source_initially_filled"]
+        # Each Cookie maps to several collision geoms (a stack of boxes), and a box
+        # geom's frame is its body frame, so read the body instead of a geom.
         assert all(
-            abs(float(env.data.geom_xmat[geom_id].reshape(3, 3)[2, 2]))
+            abs(float(env.data.xmat[body].reshape(3, 3)[2, 2]))
             >= np.cos(env.task_config.max_tilt_rad)
-            for geom_id in env._cookie_geoms
+            for body in env._cookie_bodies
         )
     finally:
         env.close()
@@ -84,17 +110,69 @@ def test_dense_dimensions_capacity_walls_and_mirrored_home() -> None:
         xs, ys = np.unique(positions[:, 0]), np.unique(positions[:, 1])
         assert (len(xs), len(ys), len(positions)) == (4, 20, 80)
         np.testing.assert_allclose(np.diff(xs) - 0.05, 0.0004)
-        np.testing.assert_allclose(np.diff(ys) - 0.019 / 3, 0.0004)
+        # The row gap is a design knob now: the jaw pads have to displace it, so it
+        # has to clear the pad on top of whatever the chamfer already opens up.
+        gap_y = np.diff(ys) - 0.019 / 3
+        np.testing.assert_allclose(gap_y, COOKIE_GAP_Y_M)
+        chamfer_a, chamfer_b = env.COOKIE_CHAMFER
+        pad_thickness = 2 * 0.003175
+        assert gap_y[0] + 2 * chamfer_a >= pad_thickness, (
+            f"gap {gap_y[0] * 1000:.3f} mm plus chamfer {2 * chamfer_a * 1000:.3f} mm must clear the "
+            f"{pad_thickness * 1000:.3f} mm jaw pad"
+        )
+        # The chamfer cuts the top, bottom and the two row-facing sides, so it also
+        # sets how wide the base the Cookie stands on is, and it cannot be deeper
+        # than the Cookie is tall or the two cuts would meet.
+        base_width = 2 * (env.COOKIE_HALF_SIZE[1] - chamfer_a)
+        assert base_width > 0.002, f"base is only {base_width * 1000:.3f} mm - a knife edge"
+        assert chamfer_b <= env.COOKIE_HALF_SIZE[2]
+        # The groove narrows with depth, and a pinch puts the pad's *bottom* about
+        # 4.1 mm below the top face, so clearing the pad at the top face is not
+        # enough.  Check it where the pad bottom actually sits.
+        pad_reach = 0.0041
+        groove_at_reach = gap_y[0] + 2 * chamfer_a * max(0.0, 1.0 - pad_reach / chamfer_b)
+        assert groove_at_reach > pad_thickness, (
+            f"groove at the pad's reach depth is {groove_at_reach * 1000:.3f} mm vs the "
+            f"{pad_thickness * 1000:.3f} mm pad; the pad would have to force itself in, "
+            f"which deflects the arm sideways on the way down"
+        )
+        # ...but a long chamfer also eats the full-thickness band the jaws bite.
+        full_thickness_band = 2 * (env.COOKIE_HALF_SIZE[2] - chamfer_b)
+        assert full_thickness_band >= 0.004, (
+            f"only {full_thickness_band * 1000:.3f} mm of untapered Cookie side left for the jaws "
+            f"to grip; at 1 mm the measured grip failed and the Cookie slipped out"
+        )
+        # The end rows have no neighbour on one side, so the pad has to fit between
+        # the outermost Cookie and the bin wall instead.
+        assert COOKIE_BIN_SLACK_M > pad_thickness, (
+            f"only {COOKIE_BIN_SLACK_M * 1000:.3f} mm between the end Cookie and the wall, "
+            f"but the pad is {pad_thickness * 1000:.3f} mm thick"
+        )
         slots = np.asarray(env.TARGET_SLOTS_LOCAL)
         assert (len(np.unique(slots[:, 0])), len(np.unique(slots[:, 1]))) == (2, 5)
+        # y carries COOKIE_BIN_SLACK_M per side so a pad fits past the end Cookie;
+        # x keeps the original 3 mm per side, since a pad only ever closes along y.
         np.testing.assert_allclose(
-            np.ptp(positions, axis=0) + 2 * env.COOKIE_HALF_SIZE[:2] + 0.006,
-            2 * env.SOURCE_INNER_HALF_SIZE,
+            np.ptp(positions[:, 1]) + 2 * env.COOKIE_HALF_SIZE[1] + 2 * COOKIE_BIN_SLACK_M,
+            2 * env.SOURCE_INNER_HALF_SIZE[1],
         )
         np.testing.assert_allclose(
-            np.ptp(slots, axis=0) + 2 * env.COOKIE_HALF_SIZE[:2],
+            np.ptp(positions[:, 0]) + 2 * env.COOKIE_HALF_SIZE[0] + 0.006,
+            2 * env.SOURCE_INNER_HALF_SIZE[0],
+        )
+        # The target bin also has to leave room for the closed jaw pads, which ride
+        # past the wall with the Cookie until it is released.
+        slack = np.asarray(TARGET_BIN_SLACK_M)
+        np.testing.assert_allclose(
+            np.ptp(slots, axis=0) + 2 * env.COOKIE_HALF_SIZE[:2] + 2 * slack,
             2 * env.TARGET_INNER_HALF_SIZE,
         )
+        pad_half = 0.003175
+        assert slack[1] > pad_half, (
+            f"target bin leaves {slack[1] * 1000:.4f} mm for the pads, but half a pad "
+            f"is {pad_half * 1000:.4f} mm - the pads would drive into the wall"
+        )
+        assert slack[0] > 0.0, "target bin has no x clearance for the Cookie"
         floor_top = scene.source_floor_z_m + scene.bin_wall_thickness_m / 2
         assert np.isclose(env.SOURCE_WALL_TOP_Z - floor_top, 1.2 * 0.025)
         assert np.isclose(

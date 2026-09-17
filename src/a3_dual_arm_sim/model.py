@@ -8,7 +8,12 @@ from xml.etree import ElementTree as ET
 
 import mujoco
 
-from .config import SimConfig
+from .config import (
+    COOKIE_COLLISION_STEPS,
+    COOKIE_SCENE_SOLIMP,
+    COOKIE_SCENE_SOLREF,
+    SimConfig,
+)
 from .contracts import ARM_JOINTS, LEFT_JOINTS, RIGHT_JOINTS
 from .paths import asset_root
 
@@ -408,6 +413,78 @@ def _add_open_bin(
         )
 
 
+def _chamfered_cookie_vertices(
+    half_size: tuple[float, ...], chamfer: tuple[float, ...], inset: float = 0.0
+) -> list[tuple[float, float, float]]:
+    """Corners of an upright Cookie whose four y-facing edges are chamfered.
+
+    `chamfer` is (cut depth along y, cut span along z).  The cut is applied to
+    the top and bottom alike, so the resulting y-z section is an octagon that is
+    narrow at the top and bottom and full thickness in the middle band.  Symmetry
+    is deliberate: it is what turns the gap between two neighbours into a V that
+    a jaw pad can slide down from either direction.
+
+    The returned vertex list is fed to MuJoCo as a bare point cloud -- with no
+    face list, MuJoCo takes the convex hull, which is exactly this shape.
+    """
+    hx = half_size[0] - inset
+    hy = half_size[1] - inset
+    hz = half_size[2] - inset
+    a = min(chamfer[0], 2 * hy / 3)
+    b = min(chamfer[1], 2 * hz)
+    section = (
+        (hy - a, hz),
+        (hy, hz - b),
+        (hy, -hz + b),
+        (hy - a, -hz),
+        (-hy + a, -hz),
+        (-hy, -hz + b),
+        (-hy, hz - b),
+        (-hy + a, hz),
+    )
+    return [(x, y, z) for x in (hx, -hx) for (y, z) in section]
+
+
+def _vertex_string(vertices: list[tuple[float, float, float]]) -> str:
+    return " ".join(f"{x:.9f} {y:.9f} {z:.9f}" for x, y, z in vertices)
+
+
+def _chamfered_cookie_boxes(
+    half_size: tuple[float, ...], chamfer: tuple[float, ...], steps: int
+) -> list[tuple[float, float, float]]:
+    """Stack of boxes whose union approximates the chamfered Cookie.
+
+    Returns ``(z_centre, y_half, z_half)`` per box; every box spans the full x
+    half-width, and the stack is symmetric top to bottom.  One full-thickness band
+    in the middle, then ``steps`` slices per side tracing the taper.
+
+    Each slice takes the half-thickness of its *outer* (narrower) end, so the
+    staircase always sits at or inside the ideal hull -- it can never collide with
+    something the smooth shape would have cleared, and the top face comes out at
+    exactly the designed width.
+    """
+    hy = half_size[1]
+    hz = half_size[2]
+    a = min(chamfer[0], 2 * hy / 3)
+    b = min(chamfer[1], 2 * hz)
+    steps = max(int(steps), 1)
+    step_z = b / steps
+    y_top = hy - a  # half-thickness at the very top face
+
+    boxes = [(0.0, hy, hz - b)]
+    for k in range(steps):
+        # slice k covers depth k*step_z .. (k+1)*step_z below the top face
+        y_half = y_top + a * k / steps
+        z_centre = hz - (k + 0.5) * step_z
+        for sign in (1.0, -1.0):
+            boxes.append((sign * z_centre, y_half, step_z / 2))
+    return boxes
+
+
+def _cookie_box_volumes(boxes: list[tuple[float, float, float]], hx: float) -> list[float]:
+    return [8.0 * hx * y * z for _, y, z in boxes]
+
+
 def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) -> None:
     scene = config.cookie_transfer
     # Source bin: on table
@@ -450,6 +527,31 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})
     rows = sorted({p[1] for p in scene.cookie_source_positions_m})
+
+    # Collision is a stack of boxes; only the visual geom is a mesh.  See
+    # COOKIE_COLLISION_STEPS for why a hull is unusable as collision geometry here.
+    assets = root.find("asset")
+    if assets is None:  # pragma: no cover - build_model always creates one
+        assets = ET.SubElement(root, "asset")
+    ET.SubElement(
+        assets,
+        "mesh",
+        name="cookie_hull_visual",
+        vertex=_vertex_string(
+            _chamfered_cookie_vertices(
+                scene.cookie_half_size_m, scene.cookie_chamfer_m, inset=0.0004
+            )
+        ),
+    )
+    cookie_boxes = _chamfered_cookie_boxes(
+        scene.cookie_half_size_m, scene.cookie_chamfer_m, COOKIE_COLLISION_STEPS
+    )
+    # Spread the Cookie's mass over the stack in proportion to volume, so the total
+    # is exactly cookie_mass_kg and the inertia is that of a body spanning the full
+    # height rather than of the one flat slab that happens to carry the mass.
+    box_volumes = _cookie_box_volumes(cookie_boxes, scene.cookie_half_size_m[0])
+    volume_total = sum(box_volumes)
+
     for index, (x, y) in enumerate(scene.cookie_source_positions_m):
         cookie = ET.SubElement(
             world,
@@ -458,40 +560,38 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             pos=f"{x} {y} {scene.cookie_model_z_m}",
         )
         ET.SubElement(cookie, "freejoint", name=f"cookie_{index}_free")
-        ET.SubElement(
-            cookie,
-            "geom",
-            name=f"cookie_{index}_geom",
-            type="box",
-            size=_vec(scene.cookie_half_size_m),
-            mass=f"{scene.cookie_mass_kg:.10g}",
-            rgba="0 0 0 0",
-            contype="1",
-            conaffinity="3",
-            friction=_vec(scene.cookie_friction),
-            group="3",
-            # Elastic / compliant contact parameters.
-            # solref="timeconst dampratio" – longer timeconst (0.04 s) gives a
-            # spring-like feel; dampratio < 1 allows a small rebound so a cookie
-            # squeezed between neighbours can be pulled out without a force spike.
-            solref="0.04 0.85",
-            # solimp="dmin dmax width midpoint power" – dmax=0.97 permits up to
-            # 3% of contact depth as elastic penetration; width=0.003 spreads the
-            # transition so adjacent cookies slide past each other smoothly.
-            solimp="0.75 0.97 0.003 0.5 2",
-            # condim=6 enables full tangential + torsional friction so the gripper
-            # keeps lateral purchase while extracting a cookie from the stack.
-            condim="6",
-        )
-        visual_half_size = tuple(value - 0.0004 for value in scene.cookie_half_size_m)
+        # Geoms inside one body do not collide with each other, so this stack acts
+        # as a single union.  The chamfer makes the gap to each neighbour flare into
+        # a V that a jaw pad can slide down.
+        for part, ((z_centre, y_half, z_half), volume) in enumerate(
+            zip(cookie_boxes, box_volumes, strict=True)
+        ):
+            ET.SubElement(
+                cookie,
+                "geom",
+                name=f"cookie_{index}_geom_{part}",
+                type="box",
+                pos=f"0 0 {z_centre:.9f}",
+                size=f"{scene.cookie_half_size_m[0]:.9f} {y_half:.9f} {z_half:.9f}",
+                mass=f"{scene.cookie_mass_kg * volume / volume_total:.10g}",
+                rgba="0 0 0 0",
+                contype="1",
+                conaffinity="3",
+                friction=_vec(scene.cookie_friction),
+                group="3",
+                # condim=6 enables full tangential + torsional friction so the
+                # gripper keeps lateral purchase while extracting a Cookie.
+                # solref/solimp come from the scene's <default> geom.
+                condim="6",
+            )
         column, row = columns.index(x), rows.index(y)
         cookie_rgba = "1.0 0.78 0.20 1" if (column + row) % 2 == 0 else "0.88 0.50 0.04 1"
         ET.SubElement(
             cookie,
             "geom",
             name=f"cookie_{index}_visual",
-            type="box",
-            size=_vec(visual_half_size),
+            type="mesh",
+            mesh="cookie_hull_visual",
             mass="0.0001",
             rgba=cookie_rgba,
             contype="0",
@@ -540,7 +640,15 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         armature=str(config.joint_armature),
     )
     if scene == "cookie_transfer":
-        ET.SubElement(default, "geom", solref="0.04 0.85", solimp="0.75 0.97 0.002 0.5 2")
+        # Stiff contacts for the whole scene.  MuJoCo blends the two surfaces'
+        # parameters, so a soft bin floor under a stiff Cookie is still soft;
+        # setting this at the <default> level keeps every pair consistent.
+        ET.SubElement(
+            default,
+            "geom",
+            solref=COOKIE_SCENE_SOLREF,
+            solimp=COOKIE_SCENE_SOLIMP,
+        )
     else:
         ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
 
