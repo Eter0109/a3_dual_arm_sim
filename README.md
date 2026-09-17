@@ -14,6 +14,7 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 | 想做什么 | 入口 | 是否录制训练数据 |
 | --- | --- | --- |
+| 查看双小盒新场景 | `a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 否 |
 | 看新版一次五块、两次共十块 | `examples/run_cookie_batch.py --render` | 否 |
 | 看旧版右臂托盒、左臂逐块搬运 | `examples/run_cookie_transfer.py --config configs/cookie_cooperative.yaml --render` | 否；当前 80 块布局未验证完整成功 |
 | 自己遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 否 |
@@ -22,6 +23,31 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 **JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 新版 batch 脚本不自动录制，
 也不支持 `--record`；旧版 `evaluate_cookie_transfer.py` 评估的是逐块 Expert，不是新版 batch。
+
+### 双小盒场景（环境预览）
+
+`configs/cookie_two_box.yaml` 基于 5＋5 的场景参数，仅把目标小盒沿五块饼干排列方向
+（局部 Y）的外半宽从 35 mm 缩到 28 mm；另一维、饼干尺寸和源盒布局不变。
+盒内该方向的净宽从 58 mm 变为 44 mm。第二个同尺寸空盒放在
+`(0.245, 0.100, 0.753)` m，工作盒仍在 `(0.095, 0.100, 0.753)` m。
+两个盒子都有独立自由关节，可被机械臂通过接触推动；第二盒与工作盒之间留有间距，
+工作盒朝桌前方（负 Y）移出的路径保持空出。
+
+```bash
+unset MUJOCO_GL
+a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml \
+  --policy a3_dual_arm_sim.policy:make_hold_policy \
+  --render --no-camera-render --steps 1000
+```
+
+这条命令只让机械臂保持原位以观察环境，不录制数据。当前任务统计和成功判定仍针对
+`target_bin` 这个工作盒；备用盒名称为 `spare_target_bin`。右臂推走满盒、
+备用盒移入工作位，以及新版尺寸下的批量抓取动作，留待后续专家控制阶段实现。
+原 `configs/cookie_batch.yaml` 保留作为此前单盒基线；不要用它的历史验收报告
+推断双盒场景的搬运成功率。
+
+保存三路相机画面时运行
+`MUJOCO_GL=egl python examples/preview_cameras.py --config configs/cookie_two_box.yaml --output outputs/two_box_cameras`。
 
 ### 安装与可视化
 
@@ -93,6 +119,7 @@ python examples/run_cookie_batch.py --help
 | 文件 | 主要作用 |
 | --- | --- |
 | [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 新版 5＋5 的场景、接触和控制参数 |
+| [configs/cookie_two_box.yaml](configs/cookie_two_box.yaml) | 缩窄工作盒并加入可推动备用盒的独立场景配置 |
 | [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 演示入口、结果 JSON、诊断截图 |
 | [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 五块选择、闭环状态机、抬升／释放验证 |
 | [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 场景与倒角碰撞模型生成 |

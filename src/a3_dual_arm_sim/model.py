@@ -538,6 +538,33 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         floor_z=scene.target_floor_z_m,
         wall_z=scene.target_bin_wall_height_m / 2,
     )
+    if scene.spare_target_bin_world_position_m is not None:
+        spare_bin = ET.SubElement(
+            world,
+            "body",
+            name="spare_target_bin",
+            pos=_vec(scene.spare_target_bin_world_position_m),
+        )
+        ET.SubElement(spare_bin, "freejoint", name="spare_target_bin_free")
+        ET.SubElement(
+            spare_bin,
+            "inertial",
+            pos="0 0 0.01",
+            mass="0.10",
+            diaginertia="0.0002 0.0002 0.0003",
+        )
+        _add_open_bin(
+            spare_bin,
+            name="spare_target_bin",
+            center=(0.0, 0.0),
+            half_size=scene.target_bin_half_size_m,
+            height=scene.target_bin_wall_height_m,
+            rgba=BIN_RGBA,
+            thickness=scene.bin_wall_thickness_m,
+            friction=scene.bin_friction,
+            floor_z=scene.target_floor_z_m,
+            wall_z=scene.target_bin_wall_height_m / 2,
+        )
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})
     rows = sorted({p[1] for p in scene.cookie_source_positions_m})
