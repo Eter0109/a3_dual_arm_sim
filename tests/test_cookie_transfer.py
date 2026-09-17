@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mujoco
 import numpy as np
+import pytest
 
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
 
@@ -322,3 +323,62 @@ def test_expert_stops_if_a_previously_packed_cookie_moves(monkeypatch) -> None:
         assert "packed Cookie 0 disturbed" in expert.failure_reason
     finally:
         env.close()
+
+
+def test_pinch_offset_tracks_the_cookie_half_size() -> None:
+    """The jaws pinch a fixed depth below the top face, whatever the Cookie size.
+
+    The offsets here reproduce the historical 50 mm-Cookie value (``0.023``)
+    exactly, which is the point: behaviour for the old Cookie is unchanged, while
+    a resized Cookie now gets a proportionally corrected offset instead of the
+    jaws closing at the same absolute height regardless of what they are aiming
+    at.
+    """
+    from a3_dual_arm_sim.expert import _pinch_offset_from_cookie_centre
+
+    assert _pinch_offset_from_cookie_centre(0.025) == pytest.approx(0.023)
+    assert _pinch_offset_from_cookie_centre(0.0125) == pytest.approx(0.0105)
+    # A Cookie respanned in z resizes the offset by the same amount.
+    assert _pinch_offset_from_cookie_centre(0.025) - _pinch_offset_from_cookie_centre(
+        0.0125
+    ) == pytest.approx(0.0125)
+
+
+def test_expert_plans_the_pinch_inside_the_cookie() -> None:
+    """The planned grasp waypoint has to fall inside the Cookie's height.
+
+    This is the scene-level half of the same invariant: the commanded tool height
+    has to overlap the Cookie it is aiming at, not hover above it.  The pinch
+    height used to be the literal ``0.023``, correct only while the Cookie was
+    50 mm tall; once the Cookie was shortened to 25 mm the jaws were commanded to
+    ~10.5 mm *above* the top face -- aiming at empty space.  Resizing the Cookie
+    again must not break this.
+    """
+    from a3_dual_arm_sim.expert import A3CookieTransferExpert
+
+    env = A3CookieTransferEnv(render_cameras=False)
+    try:
+        env.reset(seed=0, options={"randomize_cookies": False})
+        expert = A3CookieTransferExpert(env)
+        expert.reset()
+        expert._select_cookie()
+
+        cookie_index = expert.current_cookie_index
+        assert cookie_index is not None, expert.failure_reason
+        cookie_z = float(env.privileged_cookie_position(cookie_index)[2])
+        half_z = float(env.COOKIE_HALF_SIZE[2])
+
+        # Forward-kinematics the commanded waypoint rather than stepping, so the
+        # assertion is about what the planner asked for and not about how far the
+        # arm managed to track it.
+        env.data.qpos[expert._l_qpos] = expert._waypoints["grasp"]
+        mujoco.mj_kinematics(env.model, env.data)
+        tool_z = float(env.data.site_xpos[expert._l_site][2])
+
+        assert cookie_z - half_z < tool_z < cookie_z + half_z, (
+            f"grasp waypoint z={tool_z * 1000:.3f} mm is outside the Cookie span "
+            f"[{((cookie_z - half_z) * 1000):.3f}, {((cookie_z + half_z) * 1000):.3f}] mm"
+        )
+    finally:
+        env.close()
+
