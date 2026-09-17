@@ -287,6 +287,21 @@ def _add_gripper(
             condim="4" if cookie_scene else "3",
             group="3",
         )
+        # The physical pad belongs to hidden collision group 3.  Render an
+        # identical, visual-only pad so contact does not look like a gap
+        # between the 2F-85 fingers and a Cookie.
+        ET.SubElement(
+            inner_finger,
+            "geom",
+            name=f"{prefix}_finger_{finger_name}_pad_visual",
+            type="box",
+            pos="0 -0.0245203 0.03242",
+            size="0.010 0.003175 0.01675",
+            rgba="0.08 0.08 0.08 1",
+            contype="0",
+            conaffinity="0",
+            group="2",
+        )
         ET.SubElement(
             inner_finger,
             "site",
@@ -459,7 +474,9 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
     assets = root.find("asset")
     if assets is None:
         raise RuntimeError("model assets must exist before adding the Cookie scene")
-    visual_half_size = tuple(value - 0.0004 for value in scene.cookie_half_size_m)
+    # Keep visual and collision envelopes coincident.  A smaller visual mesh
+    # made a correctly contacting Cookie look detached from the finger pads.
+    visual_half_size = scene.cookie_half_size_m
     _add_beveled_cookie_mesh(
         assets, "cookie_collision_mesh", scene.cookie_half_size_m, scene.cookie_edge_bevel_m
     )

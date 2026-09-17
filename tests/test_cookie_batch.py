@@ -9,6 +9,7 @@ import pytest
 from a3_dual_arm_sim.batch_expert import A3CookieBatchExpert
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
+from a3_dual_arm_sim.expert import CookiePhase
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "cookie_batch.yaml"
 
@@ -84,6 +85,44 @@ def test_batch_rejects_unreachable_table_box_before_grasping():
         env.reset(seed=0, options={"randomize_cookies": False})
         with pytest.raises(RuntimeError, match="unreachable"):
             A3CookieBatchExpert(env).reset()
+    finally:
+        env.close()
+
+
+def test_batch_preclose_happens_above_cookies_before_descent():
+    env = A3CookieTransferEnv(CONFIG, render_cameras=False)
+    try:
+        env.reset(seed=0, options={"randomize_cookies": False})
+        expert = A3CookieBatchExpert(env)
+        expert.reset()
+        expert._select_batch()
+        approach = None
+        for _ in range(40):
+            approach = expert.act()
+            env.step(approach)
+            if expert.phase is CookiePhase.PRE_CLOSE:
+                break
+        assert expert.phase is CookiePhase.PRE_CLOSE
+        assert approach[7] == 1.0
+        for _ in range(24):
+            env.step(expert.act())
+            if expert.phase is CookiePhase.DESCEND:
+                break
+        assert expert.phase is CookiePhase.DESCEND
+        assert expert._opening < 1.0
+    finally:
+        env.close()
+
+
+def test_batch_home_is_mirrored_and_near_first_approach():
+    env = A3CookieTransferEnv(CONFIG, render_cameras=False)
+    try:
+        env.reset(seed=0, options={"randomize_cookies": False})
+        np.testing.assert_allclose(env.DEPLOYMENT_HOME[:7], -env.DEPLOYMENT_HOME[8:15])
+        expert = A3CookieBatchExpert(env)
+        expert.reset()
+        expert._select_batch()
+        assert np.max(np.abs(expert._approach_q - env.DEPLOYMENT_HOME[:7])) < np.deg2rad(15)
     finally:
         env.close()
 

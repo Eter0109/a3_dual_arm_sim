@@ -27,6 +27,7 @@ class CookiePhase(Enum):
     SUPPORT_BOX = auto()
     SELECT_COOKIE = auto()
     APPROACH = auto()
+    PRE_CLOSE = auto()
     ALIGN = auto()
     DESCEND = auto()
     CLOSE = auto()

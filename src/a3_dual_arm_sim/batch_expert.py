@@ -29,6 +29,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._stable = 0
         self._jam_count = 0
         self._opening = 1.0
+        self._preclose_stable = 0
         self._servo_pos = None
         self._grip_reference = None
         self.max_pad_force = 0.0
@@ -77,6 +78,8 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     def _advance(self, phase):
         super()._advance(phase)
         self._stable = 0
+        if phase is not CookiePhase.PRE_CLOSE:
+            self._preclose_stable = 0
         self._jam_count = 0
         self._servo_pos = None
 
@@ -196,8 +199,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._opening = self._insert_opening
         self._pick_eef = self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
         self._high_eef = self._pick_eef + [0, 0, 0.105]
+        # Seed from the measured deployment pose so the first motion remains
+        # on the nearby mirrored IK branch instead of taking the old transit
+        # branch with a large wrist/elbow rotation.
         self._approach_q = self._solve_l(
-            self._high_eef, self._target_quat_canonical, self.q_transit
+            self._high_eef, self._target_quat_canonical, self.env.current_joint_action[:7]
         )
         self._advance(CookiePhase.APPROACH)
 
@@ -237,9 +243,27 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             self._fail(f"batch phase timeout; contacts={self._contact_chain()[1].tolist()}")
             return self.env.last_applied_action.copy()
         if self.phase is CookiePhase.APPROACH:
-            action = self._trajectory_command(self._approach_q, self._opening)
+            # Travel with the jaws fully open.  The target batch width is set
+            # only once the tool is steady above the Cookies.
+            action = self._trajectory_command(self._approach_q, 1.0)
             if self._motion_done and self._reached(self._approach_q, tolerance=0.025):
+                self._advance(CookiePhase.PRE_CLOSE)
+            return action
+        if self.phase is CookiePhase.PRE_CLOSE:
+            action = self._hold_command(self._approach_q, self._opening)
+            actual_opening = float(self.env.current_joint_action[7])
+            if abs(actual_opening - self._opening) <= 0.006:
+                self._preclose_stable += 1
+            else:
+                self._preclose_stable = 0
+            if self._preclose_stable >= 3:
                 self._advance(CookiePhase.DESCEND)
+            elif self.phase_steps >= 120:
+                self._fail(
+                    "pre-close did not reach target opening; "
+                    f"target={self._opening * 0.085 * 1000:.1f} mm "
+                    f"actual={actual_opening * 0.085 * 1000:.1f} mm"
+                )
             return action
         if self.phase is CookiePhase.DESCEND:
             if self._insertion_jammed(self._total_pad_forces):

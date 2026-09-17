@@ -65,7 +65,8 @@ python examples/run_cookie_batch.py --help
 - **场景**：仍为 4 × 20 共 80 块；batch 的间隙改为 2.5 mm，未预留整根手指宽的通道。
   目标盒加宽并移到左臂可达位置，放在桌上；原默认场景的 0.4 mm 间隙保留。
 - **闭环控制**：读取实际位置、姿态、接触和抬升情况，选择露出端连续直立的五块，
-  经接近、插入、夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
+  先保持张开接近抓取点上方，再把夹爪预闭合到批次宽度并确认实测开度稳定，随后插入、
+  夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
   邻近饼干倾倒时跳过受阻端，而不是继续向下硬压；没有自动扶正功能。
 - **物理参数**：batch 默认物理 1000 Hz、控制 20 Hz、滑动摩擦系数 0.8。
   摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 8 N 会失败退出。
@@ -75,14 +76,14 @@ python examples/run_cookie_batch.py --help
 
 ### 已验证的结果与限制
 
-2026-09-17，固定布局 seed 0 的两次完整运行均完成 5＋5。最终默认配置结果为：
-1844 个控制步，目标盒 10 块、源盒 70 块；两批分别选择 ID 0–4 和 20–24。
-最大指垫力约 4.48 N，监测到的最大饼干／指垫接触穿透约 0.095 mm。
-完整数据见 [固定布局验收报告](artifacts/cookie_batch_baseline_seed0.json)。
+`artifacts/cookie_batch_baseline_seed0.json` 保存的是此前固定布局 seed 0 的 5＋5
+基线：1844 个控制步、目标盒 10 块、源盒 70 块；两批为 ID 0–4 与 20–24，最大指垫力
+约 4.48 N。当前版本改变了初始姿态与抓取阶段，已验证模型、预闭合状态机和短程无头运行，
+**尚未重新完成整轮 5＋5 长程验收**；在新的报告出现前，不应把旧基线当作本版本的成功证明。
 
 ![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
 
-上图来自同一固定布局的诊断运行。**这不是随机布局成功率**：目前只改 seed 不会改变饼干布局，
+上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率**：目前只改 seed 不会改变饼干布局，
 也不保证任选五块、换尺寸或换摆放后仍能成功。源盒中部分剩余饼干可能倾倒。
 开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，当时还有另一轮诊断运行并行；
 这不是独占机器的性能基准。当前优先验证接触与搬运，尚未优化到实时，暂不建议直接大规模采集。
@@ -495,7 +496,9 @@ MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
 The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions and
 2.5 mm bevels are unchanged. The source has 80 Cookies, with a uniform 2.5 mm gap
 instead of 0.4 mm; there are **no pre-cut finger-width lanes**. The left gripper
-descends slowly through the bevels, compresses five neighbouring Cookies, checks
+first reaches the pose above the Cookies with fully open jaws, then pre-closes
+to the computed five-Cookie width and waits for the measured opening to settle.
+It descends slowly through the bevels, compresses five neighbouring Cookies, checks
 a contact chain through all five, and verifies that each actually rises. The
 second batch prefers the same column after the first five are removed. If a
 neighbour tips during extraction, the expert skips that obstructed end and

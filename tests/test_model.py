@@ -116,13 +116,28 @@ def test_cookie_scene_and_camera_values_come_from_config() -> None:
     ]
     np.testing.assert_allclose(np.max(np.abs(top_vertices[:, 1])), 0.0095 / 3 - 0.002)
     np.testing.assert_allclose(np.max(np.abs(bottom_vertices[:, 1])), 0.0095 / 3 - 0.002)
-    assert np.all(
-        np.max(np.abs(visual_vertices), axis=0) < np.max(np.abs(collision_vertices), axis=0)
+    np.testing.assert_allclose(
+        np.max(np.abs(visual_vertices), axis=0), np.max(np.abs(collision_vertices), axis=0)
     )
     assert base.cameras.calibration_status == "prototype_estimate"
     assert base.cookie_transfer.calibration_status == "prototype_estimate"
 
 
+def test_gripper_visual_pads_match_hidden_collision_pads() -> None:
+    root = ET.fromstring(build_model(load_config(), scene="cookie_transfer").xml)
+    for side in ("L", "R"):
+        for finger in ("inner", "outer"):
+            collision = root.find(
+                f".//geom[@name='{side}_finger_{finger}_geom']"
+            )
+            visual = root.find(
+                f".//geom[@name='{side}_finger_{finger}_pad_visual']"
+            )
+            assert collision is not None and visual is not None
+            assert visual.attrib["pos"] == collision.attrib["pos"]
+            assert visual.attrib["size"] == collision.attrib["size"]
+            assert visual.attrib["group"] == "2"
+            assert visual.attrib["contype"] == "0"
 def test_wrist_cameras_are_symmetric() -> None:
     config = load_config()
     root = ET.fromstring(build_model(config, scene="cookie_transfer").xml)
