@@ -81,11 +81,24 @@ class KeyboardTeleopPolicy:
                 self._handle_command_locked(key)
 
     def handle_key(self, keycode: int) -> None:
-        """Compatibility one-shot input for scripts and tests, not the Viewer."""
-        try:
-            key = chr(keycode).lower()
-        except (ValueError, OverflowError):
-            return
+        """Compatibility input for both MuJoCo GLFW viewer and tests."""
+        glfw_map = {
+            265: "up",
+            264: "down",
+            263: "left",
+            262: "right",
+            266: "prior",
+            267: "next",
+            32: " ",
+            256: "q",
+        }
+        if keycode in glfw_map:
+            key = glfw_map[keycode]
+        else:
+            try:
+                key = chr(keycode).lower()
+            except (ValueError, OverflowError):
+                return
         with self._lock:
             if key in MOTION_KEYS:
                 axis, value = MOTION_KEYS[key]

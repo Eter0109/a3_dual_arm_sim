@@ -94,9 +94,7 @@ def _add_inertial(body: ET.Element, link: ET.Element) -> None:
     )
 
 
-def _add_link_geometry(
-    body: ET.Element, link_name: str, direction: float, length: float
-) -> None:
+def _add_link_geometry(body: ET.Element, link_name: str, direction: float, length: float) -> None:
     ET.SubElement(
         body,
         "geom",
@@ -124,7 +122,12 @@ def _add_link_geometry(
 
 
 def _add_gripper(
-    parent: ET.Element, side: str, direction: float, config: SimConfig
+    parent: ET.Element,
+    side: str,
+    direction: float,
+    config: SimConfig,
+    *,
+    cookie_scene: bool = False,
 ) -> None:
     prefix = side[0].upper()
     flange = ET.SubElement(
@@ -165,12 +168,7 @@ def _add_gripper(
         wrist_target_position = config.cameras.left_wrist_target_m
     else:
         wrist_camera_position = config.cameras.right_wrist_position_m
-        target_x, target_y, target_z = (
-            config.cookie_transfer.target_bin_attach_position_m
-        )
-        # The right gripper basis maps its local (x, y, z) to flange
-        # coordinates as (y, -z, -x). Aim at the attached bin center.
-        wrist_target_position = (target_y, -target_z, -target_x)
+        wrist_target_position = config.cameras.right_wrist_target_m
 
     wrist_target = ET.SubElement(
         flange,
@@ -286,6 +284,7 @@ def _add_gripper(
             contype="2",
             conaffinity="1",
             friction="3.0 0.02 0.002",
+            condim="4" if cookie_scene else "3",
             group="3",
         )
         ET.SubElement(
@@ -425,16 +424,16 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wall_z=scene.source_wall_base_z_m + scene.source_bin_wall_height_m / 2,
     )
 
-    # Target bin: attached to right gripper with tilt
-    r_robotiq = next(
-        e for e in root.iter("body") if e.attrib.get("name") == "R_robotiq_2f85"
-    )
+    # A free rigid box can only follow the gripper through physical contact.
     target_bin = ET.SubElement(
-        r_robotiq,
+        world,
         "body",
         name="target_bin",
-        pos=_vec(scene.target_bin_attach_position_m),
-        quat=_vec(scene.target_bin_attach_quaternion),
+        pos=_vec(scene.target_bin_world_position_m),
+    )
+    ET.SubElement(target_bin, "freejoint", name="target_bin_free")
+    ET.SubElement(
+        target_bin, "inertial", pos="0 0 0.01", mass="0.10", diaginertia="0.0002 0.0002 0.0003"
     )
     _add_open_bin(
         target_bin,
@@ -449,17 +448,8 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wall_z=scene.target_bin_wall_height_m / 2,
     )
 
-    contact = root.find("contact")
-    if contact is None:
-        contact = ET.SubElement(root, "contact")
-    for finger in ("inner", "outer"):
-        ET.SubElement(
-            contact,
-            "exclude",
-            body1="target_bin",
-            body2=f"R_finger_{finger}",
-        )
-
+    columns = sorted({p[0] for p in scene.cookie_source_positions_m})
+    rows = sorted({p[1] for p in scene.cookie_source_positions_m})
     for index, (x, y) in enumerate(scene.cookie_source_positions_m):
         cookie = ET.SubElement(
             world,
@@ -480,12 +470,22 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             conaffinity="3",
             friction=_vec(scene.cookie_friction),
             group="3",
+            # Elastic / compliant contact parameters.
+            # solref="timeconst dampratio" – longer timeconst (0.04 s) gives a
+            # spring-like feel; dampratio < 1 allows a small rebound so a cookie
+            # squeezed between neighbours can be pulled out without a force spike.
+            solref="0.04 0.85",
+            # solimp="dmin dmax width midpoint power" – dmax=0.97 permits up to
+            # 3% of contact depth as elastic penetration; width=0.003 spreads the
+            # transition so adjacent cookies slide past each other smoothly.
+            solimp="0.75 0.97 0.003 0.5 2",
+            # condim=6 enables full tangential + torsional friction so the gripper
+            # keeps lateral purchase while extracting a cookie from the stack.
+            condim="6",
         )
         visual_half_size = tuple(value - 0.0004 for value in scene.cookie_half_size_m)
-        column, row = divmod(index, 6)
-        cookie_rgba = (
-            "1.0 0.78 0.20 1" if (column + row) % 2 == 0 else "0.88 0.50 0.04 1"
-        )
+        column, row = columns.index(x), rows.index(y)
+        cookie_rgba = "1.0 0.78 0.20 1" if (column + row) % 2 == 0 else "0.88 0.50 0.04 1"
         ET.SubElement(
             cookie,
             "geom",
@@ -519,6 +519,9 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         timestep=f"{1 / config.physics_hz:.10g}",
         gravity="0 0 -9.81",
         integrator="implicitfast",
+        cone="elliptic" if scene == "cookie_transfer" else "pyramidal",
+        impratio="10" if scene == "cookie_transfer" else "1",
+        noslip_iterations="5" if scene == "cookie_transfer" else "0",
     )
     ET.SubElement(root, "size", nconmax="400", njmax="1000")
     visual = ET.SubElement(root, "visual")
@@ -536,7 +539,10 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         damping=str(config.joint_damping),
         armature=str(config.joint_armature),
     )
-    ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
+    if scene == "cookie_transfer":
+        ET.SubElement(default, "geom", solref="0.04 0.85", solimp="0.75 0.97 0.002 0.5 2")
+    else:
+        ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
 
     assets = ET.SubElement(root, "asset")
     ET.SubElement(
@@ -550,9 +556,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         width="512",
         height="3072",
     )
-    ET.SubElement(
-        assets, "material", name="floor", rgba="0.22 0.24 0.27 1", reflectance="0.05"
-    )
+    ET.SubElement(assets, "material", name="floor", rgba="0.22 0.24 0.27 1", reflectance="0.05")
     ET.SubElement(assets, "material", name="table", rgba="0.52 0.34 0.18 1")
     for link_name in ("base_link", *(joint.child for joint in source_joints.values())):
         ET.SubElement(assets, "mesh", name=f"mesh_{link_name}", file=f"{link_name}.STL")
@@ -577,12 +581,8 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         )
 
     world = ET.SubElement(root, "worldbody")
-    ET.SubElement(
-        world, "light", pos="0.4 -0.8 2.4", dir="-0.2 0.3 -1", diffuse="0.9 0.9 0.9"
-    )
-    ET.SubElement(
-        world, "light", pos="-0.6 0.8 1.8", dir="0.2 -0.3 -1", diffuse="0.45 0.45 0.45"
-    )
+    ET.SubElement(world, "light", pos="0.4 -0.8 2.4", dir="-0.2 0.3 -1", diffuse="0.9 0.9 0.9")
+    ET.SubElement(world, "light", pos="-0.6 0.8 1.8", dir="0.2 -0.3 -1", diffuse="0.45 0.45 0.45")
     ET.SubElement(
         world,
         "geom",
@@ -605,13 +605,14 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         conaffinity="3",
         friction="1 0.01 0.001",
     )
+    base_height = config.cookie_transfer.base_height_m if scene == "cookie_transfer" else 0.98
     ET.SubElement(
         world,
         "geom",
         name="stand_mast",
         type="box",
-        pos="-0.35 0 0.49",
-        size="0.040 0.040 0.49",
+        pos=f"-0.35 0 {base_height / 2}",
+        size=f"0.040 0.040 {base_height / 2}",
         rgba="0.08 0.09 0.10 1",
         contype="0",
         conaffinity="0",
@@ -621,7 +622,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         "geom",
         name="stand_bracket",
         type="box",
-        pos="-0.35 0 0.91",
+        pos=f"-0.35 0 {base_height - 0.07}",
         size="0.10 0.12 0.035",
         rgba="0.18 0.19 0.21 1",
         contype="0",
@@ -644,7 +645,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         fovy=f"{config.cameras.front_fovy_deg:.10g}",
     )
 
-    base = ET.SubElement(world, "body", name="base_link", pos="-0.35 0 0.98")
+    base = ET.SubElement(world, "body", name="base_link", pos=f"-0.35 0 {base_height}")
     _add_inertial(base, links["base_link"])
     ET.SubElement(
         base,
@@ -669,16 +670,10 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     )
 
     child_map = {
-        joint.parent: joint
-        for joint in source_joints.values()
-        if joint.name in LEFT_JOINTS
+        joint.parent: joint for joint in source_joints.values() if joint.name in LEFT_JOINTS
     }
     child_map.update(
-        {
-            joint.parent: joint
-            for joint in source_joints.values()
-            if joint.name in RIGHT_JOINTS
-        }
+        {joint.parent: joint for joint in source_joints.values() if joint.name in RIGHT_JOINTS}
     )
 
     def add_chain(parent: ET.Element, joint: JointSource, side: str) -> None:
@@ -701,12 +696,23 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
             length = 0.0815
         _add_link_geometry(body, joint.child, direction, length)
         if next_joint is None:
-            _add_gripper(body, side, direction, config)
+            _add_gripper(body, side, direction, config, cookie_scene=scene == "cookie_transfer")
         else:
             add_chain(body, next_joint, side)
 
     add_chain(base, source_joints[LEFT_JOINTS[0]], "left")
     add_chain(base, source_joints[RIGHT_JOINTS[0]], "right")
+
+    if scene == "cookie_transfer":
+        # Ideal model-based gravity compensation for the prototype arm servos.
+        # Route compensation through actuators so joint force limits still apply.
+        for body in base.iter("body"):
+            body.set("gravcomp", "1")
+        for joint in base.iter("joint"):
+            joint.set("actuatorgravcomp", "true")
+            source = source_joints.get(joint.attrib.get("name"))
+            effort = source.effort if source is not None else 40
+            joint.set("actuatorfrcrange", f"{-effort} {effort}")
 
     if scene == "cookie_transfer":
         _add_cookie_scene(root, world, config)
@@ -717,9 +723,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
             (0.68, 0.22, 0.79, "0.18 0.75 0.3 1"),
         )
         for index, (x, y, z, rgba) in enumerate(colors):
-            obj = ET.SubElement(
-                world, "body", name=f"object_{index}", pos=f"{x} {y} {z}"
-            )
+            obj = ET.SubElement(world, "body", name=f"object_{index}", pos=f"{x} {y} {z}")
             ET.SubElement(obj, "freejoint", name=f"object_{index}_free")
             ET.SubElement(
                 obj,
@@ -754,19 +758,21 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
                 "position",
                 name=f"{name}_position",
                 joint=f"{name}_joint",
-                kp="120",
+                kp=str(
+                    config.cookie_transfer.right_gripper_kp
+                    if prefix == "R"
+                    else config.cookie_transfer.left_gripper_kp
+                )
+                if scene == "cookie_transfer"
+                else "120",
                 ctrlrange=f"0 {ROBOTIQ_2F85_JAW_TRAVEL_M}",
                 forcerange="-40 40",
             )
 
     sensors = ET.SubElement(root, "sensor")
     for prefix in ("L", "R"):
-        ET.SubElement(
-            sensors, "force", name=f"{prefix}_wrist_force", site=f"{prefix}_wrist_ft"
-        )
-        ET.SubElement(
-            sensors, "torque", name=f"{prefix}_wrist_torque", site=f"{prefix}_wrist_ft"
-        )
+        ET.SubElement(sensors, "force", name=f"{prefix}_wrist_force", site=f"{prefix}_wrist_ft")
+        ET.SubElement(sensors, "torque", name=f"{prefix}_wrist_torque", site=f"{prefix}_wrist_ft")
         for finger in ("inner", "outer"):
             ET.SubElement(
                 sensors,
@@ -778,14 +784,10 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     xml = ET.tostring(root, encoding="unicode")
     mesh_dir = asset_root() / "meshes"
     binary_assets = {
-        path.name: path.read_bytes()
-        for path in mesh_dir.iterdir()
-        if path.suffix.lower() == ".stl"
+        path.name: path.read_bytes() for path in mesh_dir.iterdir() if path.suffix.lower() == ".stl"
     }
     model = mujoco.MjModel.from_xml_string(xml, assets=binary_assets)
-    return ModelBundle(
-        model=model, xml=xml, source_joints=tuple(source_joints.values())
-    )
+    return ModelBundle(model=model, xml=xml, source_joints=tuple(source_joints.values()))
 
 
 def write_generated_xml(

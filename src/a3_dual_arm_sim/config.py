@@ -8,39 +8,19 @@ import yaml
 
 from .paths import default_config_path
 
+# Upright pieces: 50 mm wide, 19/3 mm thick, 25 mm high. A 0.4 mm
+# clearance avoids initial interpenetration while keeping the rows dense.
+COOKIE_HALF_SIZE = (0.025, 0.0095 / 3, 0.0125)
+COOKIE_PITCH = (0.0504, 0.019 / 3 + 0.0004)
 COOKIE_SOURCE_POSITIONS = tuple(
-    [
-        (0.065, 0.340),
-        (0.065, 0.370),
-        (0.065, 0.400),
-        (0.065, 0.430),
-        (0.065, 0.460),
-        (0.120, 0.340),
-        (0.120, 0.370),
-        (0.120, 0.400),
-        (0.120, 0.430),
-        (0.065, 0.490),
-        (0.120, 0.460),
-        (0.120, 0.490),
-    ]
-    + [
-        (x, y)
-        for x in (0.175, 0.230, 0.285)
-        for y in (0.340, 0.370, 0.400, 0.430, 0.460, 0.490)
-    ]
+    (0.175 + (column - 1.5) * COOKIE_PITCH[0], 0.315 + (row - 9.5) * COOKIE_PITCH[1])
+    for column in range(4)
+    for row in range(20)
 )
-
-TARGET_SLOTS_LOCAL = (
-    (-0.025, -0.060),
-    (+0.028, -0.060),
-    (-0.025, -0.041),
-    (+0.028, -0.041),
-    (-0.025, -0.022),
-    (+0.028, -0.022),
-    (-0.025, -0.003),
-    (+0.028, -0.003),
-    (-0.025, +0.035),
-    (+0.028, +0.035),
+TARGET_SLOTS_LOCAL = tuple(
+    ((column - 0.5) * COOKIE_PITCH[0], (row - 2) * COOKIE_PITCH[1])
+    for row in range(5)
+    for column in range(2)
 )
 
 
@@ -50,11 +30,12 @@ class CameraConfig:
 
     calibration_status: str = "prototype_estimate"
     workspace_target_m: tuple[float, ...] = (0.15, 0.34, 0.80)
-    front_position_m: tuple[float, ...] = (0.95, -0.55, 1.28)
-    front_fovy_deg: float = 52.0
-    left_wrist_position_m: tuple[float, ...] = (0.0, 0.040, 0.110)
-    left_wrist_target_m: tuple[float, ...] = (0.0, 0.170, -0.015)
-    right_wrist_position_m: tuple[float, ...] = (-0.120, -0.040, 0.0)
+    front_position_m: tuple[float, ...] = (1.30, -0.80, 1.55)
+    front_fovy_deg: float = 58.0
+    left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
+    left_wrist_target_m: tuple[float, ...] = (0.0, 0.245, 0.085)
+    right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, -0.085)
+    right_wrist_target_m: tuple[float, ...] = (0.0, -0.245, -0.085)
     wrist_fovy_deg: float = 70.0
 
 
@@ -63,21 +44,29 @@ class CookieSceneConfig:
     """Prototype cookie-transfer values copied from the working example."""
 
     calibration_status: str = "prototype_estimate"
-    cookie_half_size_m: tuple[float, ...] = (0.025, 0.0095, 0.025)
-    cookie_mass_kg: float = 0.035
+    base_height_m: float = 1.10
+    box_lift_m: float = 0.030
+    box_tilt_deg: float = 8.0
+    left_gripper_kp: float = 400.0
+    right_gripper_kp: float = 2000.0
+    right_grasp_pitch_deg: float = 0.0
+    cookie_half_size_m: tuple[float, ...] = COOKIE_HALF_SIZE
+    cookie_mass_kg: float = 0.035 / 6
     cookie_friction: tuple[float, ...] = (2.0, 0.03, 0.002)
     cookie_source_positions_m: tuple[tuple[float, ...], ...] = COOKIE_SOURCE_POSITIONS
-    cookie_model_z_m: float = 0.781
-    cookie_reset_z_m: float = 0.791
+    cookie_model_z_m: float = 0.7685
+    cookie_reset_z_m: float = 0.7688
     bin_wall_thickness_m: float = 0.006
     bin_friction: tuple[float, ...] = (1.2, 0.02, 0.001)
-    source_bin_center_m: tuple[float, ...] = (0.175, 0.415)
-    source_bin_half_size_m: tuple[float, ...] = (0.143, 0.093)
-    source_bin_wall_height_m: float = 0.035
+    source_bin_center_m: tuple[float, ...] = (0.175, 0.315)
+    source_bin_half_size_m: tuple[float, ...] = (0.1096, 0.07613333333333333)
+    source_bin_wall_height_m: float = 0.036
     source_floor_z_m: float = 0.753
     source_wall_base_z_m: float = 0.750
-    target_bin_half_size_m: tuple[float, ...] = (0.068, 0.075)
-    target_bin_wall_height_m: float = 0.025
+    target_bin_half_size_m: tuple[float, ...] = (0.0562, 0.022633333333333333)
+    target_bin_wall_height_m: float = 0.031
+    # Match source columns 0/1 and the same row lattice, across the box gap.
+    target_bin_world_position_m: tuple[float, ...] = (0.1246, -0.01156666666666667, 0.753)
     target_bin_attach_position_m: tuple[float, ...] = (-0.284576, -0.120338, 0.077169)
     target_bin_attach_quaternion: tuple[float, ...] = (
         0.368302,
@@ -87,24 +76,24 @@ class CookieSceneConfig:
     )
     target_floor_z_m: float = 0.003
     target_slots_local_m: tuple[tuple[float, ...], ...] = TARGET_SLOTS_LOCAL
-    target_slot_tolerance_m: tuple[float, ...] = (0.020, 0.0095)
+    target_slot_tolerance_m: tuple[float, ...] = (0.010, 0.0025)
     deployment_home: tuple[float, ...] = (
-        0.971886,
-        1.102756,
-        -0.640447,
-        -0.77668,
-        -0.798451,
-        0.05216,
-        -1.5699,
-        0.28,
-        -1.805,
-        -1.499,
-        1.543,
-        0.54,
-        -2.247,
-        -0.058,
-        0.041,
-        0.6,
+        1.046019,
+        1.494815,
+        -0.398286,
+        -0.866287,
+        1.894449,
+        -0.248025,
+        1.285323,
+        1.0,
+        -1.046019,
+        -1.494815,
+        0.398286,
+        0.866287,
+        -1.894449,
+        0.248025,
+        -1.285323,
+        1.0,
     )
 
 
@@ -152,10 +141,11 @@ class SimConfig:
             or len(self.cameras.left_wrist_position_m) != 3
             or len(self.cameras.left_wrist_target_m) != 3
             or len(self.cameras.right_wrist_position_m) != 3
+            or len(self.cameras.right_wrist_target_m) != 3
         ):
             raise ValueError("camera positions must contain three values")
-        if len(self.cookie_transfer.cookie_source_positions_m) != 30:
-            raise ValueError("cookie_transfer must contain exactly 30 source positions")
+        if len(self.cookie_transfer.cookie_source_positions_m) < 10:
+            raise ValueError("cookie_transfer must contain at least 10 source positions")
         if len(self.cookie_transfer.target_slots_local_m) != 10:
             raise ValueError("cookie_transfer must contain exactly 10 target slots")
         if len(self.cookie_transfer.deployment_home) != 16:
@@ -178,48 +168,35 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         grippers=tuple(float(v) for v in home_raw.get("grippers", HomeConfig.grippers)),
     )
     cameras = CameraConfig(
-        calibration_status=str(
-            camera_raw.get("calibration_status", "prototype_estimate")
-        ),
-        workspace_target_m=_float_tuple(
-            camera_raw, "workspace_target_m", (0.15, 0.34, 0.80)
-        ),
-        front_position_m=_float_tuple(
-            camera_raw, "front_position_m", (0.95, -0.55, 1.28)
-        ),
+        calibration_status=str(camera_raw.get("calibration_status", "prototype_estimate")),
+        workspace_target_m=_float_tuple(camera_raw, "workspace_target_m", (0.15, 0.34, 0.80)),
+        front_position_m=_float_tuple(camera_raw, "front_position_m", (0.95, -0.55, 1.28)),
         front_fovy_deg=float(camera_raw.get("front_fovy_deg", 52.0)),
         left_wrist_position_m=_float_tuple(
-            camera_raw, "left_wrist_position_m", (0.0, 0.040, 0.110)
+            camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
         ),
-        left_wrist_target_m=_float_tuple(
-            camera_raw, "left_wrist_target_m", (0.0, 0.170, -0.015)
-        ),
+        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", (0.0, 0.160, -0.010)),
         right_wrist_position_m=_float_tuple(
-            camera_raw, "right_wrist_position_m", (-0.120, -0.040, 0.0)
+            camera_raw, "right_wrist_position_m", (0.0, -0.045, -0.085)
+        ),
+        right_wrist_target_m=_float_tuple(
+            camera_raw, "right_wrist_target_m", (0.0, -0.160, 0.010)
         ),
         wrist_fovy_deg=float(camera_raw.get("wrist_fovy_deg", 70.0)),
     )
     defaults = CookieSceneConfig()
     cookie_transfer = CookieSceneConfig(
-        calibration_status=str(
-            cookie_raw.get("calibration_status", defaults.calibration_status)
-        ),
+        calibration_status=str(cookie_raw.get("calibration_status", defaults.calibration_status)),
         cookie_half_size_m=_float_tuple(
             cookie_raw, "cookie_half_size_m", defaults.cookie_half_size_m
         ),
         cookie_mass_kg=float(cookie_raw.get("cookie_mass_kg", defaults.cookie_mass_kg)),
-        cookie_friction=_float_tuple(
-            cookie_raw, "cookie_friction", defaults.cookie_friction
-        ),
+        cookie_friction=_float_tuple(cookie_raw, "cookie_friction", defaults.cookie_friction),
         cookie_source_positions_m=_nested_float_tuple(
             cookie_raw, "cookie_source_positions_m", defaults.cookie_source_positions_m
         ),
-        cookie_model_z_m=float(
-            cookie_raw.get("cookie_model_z_m", defaults.cookie_model_z_m)
-        ),
-        cookie_reset_z_m=float(
-            cookie_raw.get("cookie_reset_z_m", defaults.cookie_reset_z_m)
-        ),
+        cookie_model_z_m=float(cookie_raw.get("cookie_model_z_m", defaults.cookie_model_z_m)),
+        cookie_reset_z_m=float(cookie_raw.get("cookie_reset_z_m", defaults.cookie_reset_z_m)),
         bin_wall_thickness_m=float(
             cookie_raw.get("bin_wall_thickness_m", defaults.bin_wall_thickness_m)
         ),
@@ -231,13 +208,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             cookie_raw, "source_bin_half_size_m", defaults.source_bin_half_size_m
         ),
         source_bin_wall_height_m=float(
-            cookie_raw.get(
-                "source_bin_wall_height_m", defaults.source_bin_wall_height_m
-            )
+            cookie_raw.get("source_bin_wall_height_m", defaults.source_bin_wall_height_m)
         ),
-        source_floor_z_m=float(
-            cookie_raw.get("source_floor_z_m", defaults.source_floor_z_m)
-        ),
+        source_floor_z_m=float(cookie_raw.get("source_floor_z_m", defaults.source_floor_z_m)),
         source_wall_base_z_m=float(
             cookie_raw.get("source_wall_base_z_m", defaults.source_wall_base_z_m)
         ),
@@ -245,9 +218,18 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             cookie_raw, "target_bin_half_size_m", defaults.target_bin_half_size_m
         ),
         target_bin_wall_height_m=float(
-            cookie_raw.get(
-                "target_bin_wall_height_m", defaults.target_bin_wall_height_m
-            )
+            cookie_raw.get("target_bin_wall_height_m", defaults.target_bin_wall_height_m)
+        ),
+        base_height_m=float(cookie_raw.get("base_height_m", defaults.base_height_m)),
+        box_lift_m=float(cookie_raw.get("box_lift_m", defaults.box_lift_m)),
+        box_tilt_deg=float(cookie_raw.get("box_tilt_deg", defaults.box_tilt_deg)),
+        left_gripper_kp=float(cookie_raw.get("left_gripper_kp", defaults.left_gripper_kp)),
+        right_gripper_kp=float(cookie_raw.get("right_gripper_kp", defaults.right_gripper_kp)),
+        right_grasp_pitch_deg=float(cookie_raw.get("right_grasp_pitch_deg", defaults.right_grasp_pitch_deg)),
+        target_bin_world_position_m=_float_tuple(
+            cookie_raw,
+            "target_bin_world_position_m",
+            defaults.target_bin_world_position_m,
         ),
         target_bin_attach_position_m=_float_tuple(
             cookie_raw,
@@ -259,25 +241,19 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             "target_bin_attach_quaternion",
             defaults.target_bin_attach_quaternion,
         ),
-        target_floor_z_m=float(
-            cookie_raw.get("target_floor_z_m", defaults.target_floor_z_m)
-        ),
+        target_floor_z_m=float(cookie_raw.get("target_floor_z_m", defaults.target_floor_z_m)),
         target_slots_local_m=_nested_float_tuple(
             cookie_raw, "target_slots_local_m", defaults.target_slots_local_m
         ),
         target_slot_tolerance_m=_float_tuple(
             cookie_raw, "target_slot_tolerance_m", defaults.target_slot_tolerance_m
         ),
-        deployment_home=_float_tuple(
-            cookie_raw, "deployment_home", defaults.deployment_home
-        ),
+        deployment_home=_float_tuple(cookie_raw, "deployment_home", defaults.deployment_home),
     )
     return SimConfig(home=home, cameras=cameras, cookie_transfer=cookie_transfer, **raw)
 
 
-def _float_tuple(
-    values: dict[str, Any], key: str, default: tuple[float, ...]
-) -> tuple[float, ...]:
+def _float_tuple(values: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(float(value) for value in values.get(key, default))
 
 
@@ -286,6 +262,4 @@ def _nested_float_tuple(
     key: str,
     default: tuple[tuple[float, ...], ...],
 ) -> tuple[tuple[float, ...], ...]:
-    return tuple(
-        tuple(float(value) for value in row) for row in values.get(key, default)
-    )
+    return tuple(tuple(float(value) for value in row) for row in values.get(key, default))

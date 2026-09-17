@@ -94,6 +94,25 @@ def test_cookie_scene_and_camera_values_come_from_config() -> None:
 
     assert front is not None and front.attrib["fovy"] == "61"
     assert cookie is not None and cookie.attrib["mass"] == "0.041"
-    assert cookie.attrib["size"] == "0.025 0.0095 0.025"
+    np.testing.assert_allclose(
+        np.fromstring(cookie.attrib["size"], sep=" "), [0.025, 0.0095 / 3, 0.0125]
+    )
     assert base.cameras.calibration_status == "prototype_estimate"
     assert base.cookie_transfer.calibration_status == "prototype_estimate"
+
+
+def test_wrist_cameras_are_symmetric() -> None:
+    config = load_config()
+    root = ET.fromstring(build_model(config, scene="cookie_transfer").xml)
+    left_cam = root.find(".//camera[@name='left_wrist']")
+    right_cam = root.find(".//camera[@name='right_wrist']")
+    assert left_cam is not None
+    assert right_cam is not None
+    assert left_cam.attrib["pos"] == "0 0.045 0.085"
+    assert right_cam.attrib["pos"] == "0 -0.045 -0.085"
+    left_target = root.find(".//body[@name='L_wrist_camera_target']")
+    right_target = root.find(".//body[@name='R_wrist_camera_target']")
+    assert left_target is not None
+    assert right_target is not None
+    assert left_target.attrib["pos"] == "0 0.245 0.085"
+    assert right_target.attrib["pos"] == "0 -0.245 -0.085"

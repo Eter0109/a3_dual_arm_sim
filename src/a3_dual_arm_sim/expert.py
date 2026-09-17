@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 from scipy.optimize import least_squares
 
+from .box_support import BoxSupportController
 from .contracts import LEFT_JOINTS, RIGHT_JOINTS, STATE, ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv
 from .grasp import A3GraspEnv
@@ -23,6 +24,7 @@ class GraspPhase(Enum):
 
 
 class CookiePhase(Enum):
+    SUPPORT_BOX = auto()
     SELECT_COOKIE = auto()
     APPROACH = auto()
     ALIGN = auto()
@@ -92,9 +94,7 @@ class A3GraspExpert:
         approach_target = object_position + np.asarray([0.0, 0.0, self.approach_height_m])
         grasp_target = object_position + np.asarray([0.0, 0.0, self.grasp_eef_offset_m])
         lift_target = grasp_target.copy()
-        lift_target[2] = (
-            self.env.initial_object_z + self.lift_height_m + self.grasp_eef_offset_m
-        )
+        lift_target[2] = self.env.initial_object_z + self.lift_height_m + self.grasp_eef_offset_m
         approach = self._solve(approach_target, self.APPROACH_GUESS)
         grasp = self._solve(grasp_target, self.GRASP_GUESS)
         lift = self._solve(lift_target, approach)
@@ -118,9 +118,7 @@ class A3GraspExpert:
             current_quaternion = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(current_quaternion, work.site_xmat[self._site_id])
             rotation_error = np.empty(3, dtype=np.float64)
-            mujoco.mju_subQuat(
-                rotation_error, self._target_quaternion, current_quaternion
-            )
+            mujoco.mju_subQuat(rotation_error, self._target_quaternion, current_quaternion)
             return np.r_[
                 work.site_xpos[self._site_id] - target_position,
                 0.03 * rotation_error,
@@ -196,8 +194,7 @@ class A3GraspExpert:
 
     def _reached(self, joints: np.ndarray) -> bool:
         return bool(
-            np.max(np.abs(joints - self._waypoints[self.phase]))
-            <= self.joint_tolerance_rad
+            np.max(np.abs(joints - self._waypoints[self.phase])) <= self.joint_tolerance_rad
         )
 
     def _advance(self, phase: GraspPhase) -> None:
@@ -206,6 +203,30 @@ class A3GraspExpert:
 
     def close(self) -> None:
         return None
+
+
+# How far below the Cookie's top face the jaws are meant to pinch.  Only this
+# depth is a real design choice; the rest of the offset follows
+# ``scene.cookie_half_size_m[2]`` (see ``_pinch_offset_from_cookie_centre``).
+_PINCH_DEPTH_BELOW_TOP_M = 0.002
+
+
+def _pinch_offset_from_cookie_centre(half_size_z: float) -> float:
+    """Offset from a Cookie's centre up to the height where the jaws pinch.
+
+    The jaws grip just below the Cookie's top face, so the offset has to be
+    derived from ``scene.cookie_half_size_m[2]`` -- it is *not* a free tuning
+    knob.  Whenever that half-size changes, this offset changes with it; keeping
+    them in sync is what makes the tool reach the Cookie instead of closing on
+    empty space above it.
+
+    This used to be the bare literal ``0.023``.  That was only correct while the
+    Cookie was 50 mm tall (half-size 25 mm, so the jaws sat 2 mm below the top
+    face).  When the Cookie was shortened to 25 mm tall the same literal aimed
+    the jaws ~10.5 mm *above* the top face, i.e. at empty space rather than at
+    the Cookie.
+    """
+    return float(half_size_z) - _PINCH_DEPTH_BELOW_TOP_M
 
 
 @dataclass
@@ -219,11 +240,11 @@ class A3CookieTransferExpert:
 
     env: A3CookieTransferEnv
     action_mode: ActionMode = "joint_position"
-    max_joint_step_rad: float = 0.040
+    max_joint_step_rad: float = 0.020
     max_gripper_step: float = 0.060
     joint_tolerance_rad: float = 0.055
     open_gripper: float = 0.28
-    closed_gripper: float = 0.10
+    closed_gripper: float = 0.0
     release_gripper: float = 0.25
     close_steps: int = 18
     grasp_stable_steps: int = 8
@@ -281,12 +302,8 @@ class A3CookieTransferExpert:
         self._target_quat_tilted = np.empty(4, dtype=np.float64)
         mujoco.mju_mat2Quat(self._target_quat_tilted, rot_tilted.reshape(-1))
 
-        self.q_branch_seed = np.array(
-            [1.28, 1.119, -1.127, -0.999, -0.252, 0.478, -1.535]
-        )
-        self.q_r_hold = np.array(
-            [-1.805, -1.499, 1.543, 0.54, -2.247, -0.058, 0.041]
-        )
+        self.q_branch_seed = np.array([1.28, 1.119, -1.127, -0.999, -0.252, 0.478, -1.535])
+        self.q_r_hold = np.array([-1.805, -1.499, 1.543, 0.54, -2.247, -0.058, 0.041])
         self.q_transit = self.q_branch_seed.copy()
         self.phase = CookiePhase.SELECT_COOKIE
         self.phase_steps = 0
@@ -318,10 +335,13 @@ class A3CookieTransferExpert:
         )
         self._initial_target_position = self.data.xpos[self._tb_id].copy()
         self._initial_target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()
-        self._cookie_preference = (0, 5, 1, 6, 2, 7, 3, 8, 9, 4) + tuple(
-            range(10, self.env.task_config.cookie_count)
+        self._cookie_preference = tuple(
+            sorted(
+                range(self.env.task_config.cookie_count),
+                key=lambda i: (self.env.SOURCE_POSITIONS[i][1], self.env.SOURCE_POSITIONS[i][0]),
+            )
         )
-        self._slot_order = (0, 1, 2, 3, 4, 5, 6, 7, 9, 8)
+        self._slot_order = (8, 9, 6, 7, 4, 5, 2, 3, 0, 1)
 
     def _solve_l(self, pos: np.ndarray, quat: np.ndarray, q0: np.ndarray) -> np.ndarray:
         work = mujoco.MjData(self.model)
@@ -334,7 +354,7 @@ class A3CookieTransferExpert:
             mujoco.mju_mat2Quat(cur_quat, work.site_xmat[self._l_site])
             err = np.empty(3, dtype=np.float64)
             mujoco.mju_subQuat(err, quat, cur_quat)
-            return np.r_[work.site_xpos[self._l_site] - pos, 0.3 * err, 0.005 * (q - q0)]
+            return np.r_[work.site_xpos[self._l_site] - pos, 0.12 * err, 0.001 * (q - q0)]
 
         res = least_squares(
             residual,
@@ -343,6 +363,24 @@ class A3CookieTransferExpert:
             max_nfev=500,
         )
         position_error = float(np.linalg.norm(residual(res.x)[:3]))
+        if position_error > 0.012:
+            rng = np.random.default_rng(0)
+            for seed in [
+                self.data.qpos[self._l_qpos],
+                self.env.DEPLOYMENT_HOME[:7],
+                *rng.uniform(self._l_ranges[:, 0], self._l_ranges[:, 1], (4, 7)),
+            ]:
+                candidate = least_squares(
+                    residual,
+                    np.clip(seed, self._l_ranges[:, 0] + 1e-3, self._l_ranges[:, 1] - 1e-3),
+                    bounds=(self._l_ranges[:, 0] + 1e-4, self._l_ranges[:, 1] - 1e-4),
+                    max_nfev=300,
+                )
+                if np.linalg.norm(candidate.fun[:6]) < np.linalg.norm(res.fun[:6]):
+                    res = candidate
+                position_error = float(np.linalg.norm(residual(res.x)[:3]))
+                if position_error < 0.012:
+                    break
         if not res.success or position_error > 0.016:
             raise RuntimeError(
                 "cookie expert IK failed: "
@@ -361,6 +399,7 @@ class A3CookieTransferExpert:
         self.target_slot_index = None
         self.retry_counts = [0] * self.env.task_config.required_cookies
         self.completed_cookie_indices = []
+        self._packed_positions: dict[int, np.ndarray] = {}
         self.skipped_cookie_indices = []
         self.transition_history = [self.phase]
         self.failure_reason = None
@@ -383,16 +422,55 @@ class A3CookieTransferExpert:
         )
         self._initial_target_position = self.data.xpos[self._tb_id].copy()
         self._initial_target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()
+        self.box_support = BoxSupportController(self.env)
+        self.phase = CookiePhase.SUPPORT_BOX
+        self.transition_history = [self.phase]
+        self.right_gripper = 1.0
 
     def act(self, observation: dict[str, Any] | None = None, task: str = "") -> np.ndarray:
         del observation, task
+        if self.phase is CookiePhase.SUPPORT_BOX:
+            action = self.box_support.act()
+            if self.box_support.failed:
+                self._fail(self.box_support.failed)
+            elif self.box_support.ready:
+                self.q_r_hold = action[8:15].copy()
+                self.right_gripper = action[15]
+                self._initial_target_position = self.data.xpos[self._tb_id].copy()
+                self._initial_target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()
+                rot_canonical = np.empty(9)
+                mujoco.mju_quat2Mat(rot_canonical, self._target_quat_canonical)
+                mujoco.mju_mat2Quat(
+                    self._target_quat_tilted,
+                    (self._initial_target_rotation @ rot_canonical.reshape(3, 3)).ravel(),
+                )
+                self._advance(CookiePhase.SELECT_COOKIE)
+            return action
+        if self.phase not in (CookiePhase.DONE, CookiePhase.FAILED) and not np.all(
+            self.box_support.contact_forces() > 0.1
+        ):
+            self._fail("right gripper lost box support")
+        if self.phase not in (CookiePhase.DONE, CookiePhase.FAILED):
+            for index, placed_position in self._packed_positions.items():
+                displacement = np.linalg.norm(
+                    self.env.privileged_cookie_target_position(index) - placed_position
+                )
+                rotation = (
+                    self.data.xmat[self._tb_id].reshape(3, 3).T
+                    @ self.data.xmat[self.env._cookie_bodies[index]].reshape(3, 3)
+                )
+                if displacement > 0.006 or abs(rotation[2, 2]) < np.cos(np.deg2rad(12)):
+                    self._fail(f"packed Cookie {index} disturbed; holding position")
+                    break
         # SELECT_COOKIE has no physical action. Resolve it immediately so every
         # returned command belongs to a meaningful motion/verification phase.
         if self.phase is CookiePhase.SELECT_COOKIE:
             self._select_cookie()
 
         self.phase_steps += 1
-        if self.phase in (CookiePhase.DONE, CookiePhase.FAILED):
+        if self.phase is CookiePhase.FAILED:
+            return self.env.last_applied_action.copy()
+        if self.phase is CookiePhase.DONE:
             return self._hold_command(self.q_transit, self.open_gripper)
 
         if self.phase is CookiePhase.APPROACH:
@@ -410,38 +488,29 @@ class A3CookieTransferExpert:
             self._advance(CookiePhase.DESCEND)
 
         if self.phase is CookiePhase.DESCEND:
-            action = self._trajectory_command(
-                self._waypoints["grasp"], self.open_gripper
-            )
+            action = self._trajectory_command(self._waypoints["grasp"], self.open_gripper)
             if self._motion_done:
                 self._advance(CookiePhase.CLOSE)
             return action
 
         if self.phase is CookiePhase.CLOSE:
-            action = self._trajectory_command(
-                self._waypoints["grasp"], self.closed_gripper
-            )
+            action = self._trajectory_command(self._waypoints["grasp"], self.closed_gripper)
             if self._motion_done:
                 self._advance(CookiePhase.VERIFY_GRASP)
             return action
 
         if self.phase is CookiePhase.VERIFY_GRASP:
-            action = self._hold_command(
-                self._waypoints["grasp"], self.closed_gripper
-            )
+            action = self._hold_command(self._waypoints["grasp"], self.closed_gripper)
             grasped = self._has_verified_grasp()
             self._grasp_stable_count = self._grasp_stable_count + 1 if grasped else 0
-            if (
-                self._grasp_stable_count >= self.grasp_stable_steps
-                or self.phase_steps >= 8
-            ):
+            if self._grasp_stable_count >= self.grasp_stable_steps:
                 self._advance(CookiePhase.LIFT)
+            elif self._timed_out(30):
+                self._retry("bilateral cookie grasp was not verified")
             return action
 
         if self.phase is CookiePhase.LIFT:
-            action = self._trajectory_command(
-                self._waypoints["lift"], self.closed_gripper
-            )
+            action = self._trajectory_command(self._waypoints["lift"], self.closed_gripper)
             if self._motion_done:
                 self._advance(CookiePhase.VERIFY_LIFT)
             elif self._cookie_dropped():
@@ -452,20 +521,21 @@ class A3CookieTransferExpert:
 
         if self.phase is CookiePhase.VERIFY_LIFT:
             if self._has_verified_lift():
+                try:
+                    self._plan_place_from_grasp()
+                except RuntimeError as exc:
+                    self._fail(f"held Cookie placement IK: {exc}")
+                    return self._hold_command(self._waypoints["lift"], self.closed_gripper)
                 self._advance(CookiePhase.MOVE_TO_SLOT)
             else:
-                action = self._hold_command(
-                    self._waypoints["lift"], self.closed_gripper
-                )
+                action = self._hold_command(self._waypoints["lift"], self.closed_gripper)
                 if self._timed_out(30):
                     self._retry("Cookie did not follow the gripper")
                 return action
 
         if self.phase is CookiePhase.MOVE_TO_SLOT:
             target = (
-                self.q_transit
-                if self._move_stage == "transit"
-                else self._waypoints["preplace"]
+                self.q_transit if self._move_stage == "transit" else self._waypoints["preplace"]
             )
             action = self._trajectory_command(target, self.closed_gripper)
             if self._cookie_dropped():
@@ -480,15 +550,48 @@ class A3CookieTransferExpert:
             return action
 
         if self.phase is CookiePhase.DESCEND_TO_PLACE:
-            action = self._trajectory_command(
-                self._waypoints["place"], self.closed_gripper
+            action = self.env.last_applied_action.copy()
+            action[7] = self.closed_gripper
+            action[8:15] = self.q_r_hold
+            action[15] = self.right_gripper
+            local_position = self.env.privileged_cookie_target_position(self._current_cookie())
+            target_xy = np.asarray(self.env.TARGET_SLOTS_LOCAL[self._current_slot()])
+            body = self.env._cookie_bodies[self._current_cookie()]
+            box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
+            cookie_rotation = self.data.xmat[body].reshape(3, 3)
+            relative_rotation = box_rotation.T @ cookie_rotation
+            position_error = box_rotation @ (
+                np.r_[target_xy, self._placement_height] - local_position
             )
-            if self._motion_done:
+            rotation_error = (
+                sum(np.cross(cookie_rotation[:, i], box_rotation[:, i]) for i in range(3)) * 0.5
+            )
+            jacp = np.zeros((3, self.model.nv))
+            jacr = np.zeros((3, self.model.nv))
+            mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self._l_site)
+            dofs = [self.env._dof_ids[name] for name in LEFT_JOINTS]
+            jac = np.vstack((jacp[:, dofs], jacr[:, dofs]))
+            dq = jac.T @ np.linalg.solve(
+                jac @ jac.T + 0.02**2 * np.eye(6), np.r_[position_error, rotation_error] * 0.15
+            )
+            action[:7] = self.data.qpos[self._l_qpos] + np.clip(dq, -0.008, 0.008)
+            self._waypoints["place"] = action[:7].copy()
+            aligned = (
+                np.linalg.norm(local_position[:2] - target_xy) < 0.004
+                and abs(relative_rotation[2, 2]) > np.cos(np.deg2rad(8))
+                and abs(local_position[2] - self._placement_height) < 0.004
+            )
+            self._settle_count = self._settle_count + 1 if aligned else 0
+            if self._settle_count >= 8:
                 self._advance(CookiePhase.OPEN)
             elif self._cookie_dropped():
-                self._retry("Cookie released before reaching its slot")
+                self._fail("Cookie released before reaching its slot; holding position")
+                return self.env.last_applied_action.copy()
             elif self._timed_out():
-                self._retry("placement descent timed out")
+                self._fail(
+                    "placement descent timed out; holding position to protect packed Cookies"
+                )
+                return self.env.last_applied_action.copy()
             return action
 
         if self.phase is CookiePhase.OPEN:
@@ -500,32 +603,22 @@ class A3CookieTransferExpert:
             return action
 
         if self.phase is CookiePhase.VERIFY_RELEASE:
-            action = self._hold_command(
-                self._waypoints["place"], self.release_gripper
-            )
-            contacts = self.env.privileged_left_finger_contacts(
-                self._current_cookie()
-            )
+            action = self._hold_command(self._waypoints["place"], self.release_gripper)
+            contacts = self.env.privileged_left_finger_contacts(self._current_cookie())
             # A released thin Cookie may still brush one finger while it settles;
             # only bilateral contact means it is still pinched by the gripper.
             released = not all(contacts)
-            self._release_stable_count = (
-                self._release_stable_count + 1 if released else 0
-            )
+            self._release_stable_count = self._release_stable_count + 1 if released else 0
             if self.phase_steps >= 5:
                 self._advance(CookiePhase.RETRACT)
             return action
 
         if self.phase is CookiePhase.RETRACT:
             target = (
-                self._waypoints["preplace"]
-                if self._retract_stage == "preplace"
-                else self.q_transit
+                self._waypoints["preplace"] if self._retract_stage == "preplace" else self.q_transit
             )
             gripper = (
-                self.release_gripper
-                if self._retract_stage == "preplace"
-                else self.open_gripper
+                self.release_gripper if self._retract_stage == "preplace" else self.open_gripper
             )
             action = self._trajectory_command(target, gripper)
             # Packing is sequential: later Cookies compact earlier ones into the
@@ -540,13 +633,17 @@ class A3CookieTransferExpert:
                     self.phase_steps = 0
                     self._reset_motion()
                 else:
-                    if not self.env.privileged_cookie_in_target_region(
-                        self._current_cookie()
-                    ):
-                        self._retry("Cookie left the target bin after release")
+                    if self._settle_count < 20:
+                        if self._timed_out(100):
+                            self._fail(
+                                "released Cookie did not remain upright and stable in target"
+                            )
                         return action
                     if self._current_cookie() not in self.completed_cookie_indices:
                         self.completed_cookie_indices.append(self._current_cookie())
+                        self._packed_positions[self._current_cookie()] = (
+                            self.env.privileged_cookie_target_position(self._current_cookie()).copy()
+                        )
                     self._advance(CookiePhase.SELECT_COOKIE)
             return action
 
@@ -582,6 +679,9 @@ class A3CookieTransferExpert:
                 continue
             if not self.env.privileged_cookie_in_source(cookie_index):
                 continue
+            cookie_rotation = self.data.xmat[self.env._cookie_bodies[cookie_index]].reshape(3, 3)
+            if abs(cookie_rotation[2, 2]) < np.cos(np.deg2rad(12)):
+                continue
             self.current_cookie_index = cookie_index
             try:
                 self._plan_current_cookie()
@@ -595,49 +695,69 @@ class A3CookieTransferExpert:
             + (f": {last_error}" if last_error is not None else "")
         )
 
+    def _grasp_height_offset(self) -> float:
+        """Height above the Cookie centre at which the jaws should close.
+
+        Read from ``COOKIE_HALF_SIZE`` on every call instead of cached at
+        construction time, because the environment's scene config -- and hence
+        the Cookie size -- is what this must track.  Both ``grasp_position`` and
+        the preliminary reachability ``tool_height`` in ``_plan_current_cookie``
+        must use this same value.
+        """
+        return _pinch_offset_from_cookie_centre(self.env.COOKIE_HALF_SIZE[2])
+
     def _plan_current_cookie(self) -> None:
-        # Preserve the proven example trajectory for each first attempt.  If a
-        # verification fails, re-plan from the live simulator state instead.
-        first_attempt = self.retry_counts[self._current_slot()] == 0
-        cookie_position = (
-            self._initial_cookie_positions[self._current_cookie()].copy()
-            if first_attempt
-            else self.env.privileged_cookie_position(self._current_cookie())
-        )
+        cookie_position = self.env.privileged_cookie_position(self._current_cookie()).copy()
         approach_position = np.array(
             [cookie_position[0], cookie_position[1], 0.86], dtype=np.float64
         )
         grasp_position = cookie_position.copy()
-        grasp_position[2] -= 0.008
+        # Pinch the upper edge: deep grasps collide with adjacent upright
+        # cookies when lowering into tightly spaced rows.  The offset is derived
+        # from the Cookie height, not hard-coded, so it stays correct when
+        # ``COOKIE_HALF_SIZE[2]`` changes; see ``_pinch_offset_from_cookie_centre``.
+        grasp_position[2] += self._grasp_height_offset()
         lift_position = approach_position.copy()
-        target_position = (
-            self._initial_target_position.copy()
-            if first_attempt
-            else self.data.xpos[self._tb_id].copy()
+        target_position = self.data.xpos[self._tb_id].copy()
+        target_rotation = self.data.xmat[self._tb_id].reshape(3, 3).copy()
+        canonical_rotation = np.empty(9)
+        mujoco.mju_quat2Mat(canonical_rotation, self._target_quat_canonical)
+        mujoco.mju_mat2Quat(
+            self._target_quat_tilted, (target_rotation @ canonical_rotation.reshape(3, 3)).ravel()
         )
-        target_rotation = (
-            self._initial_target_rotation.copy()
-            if first_attempt
-            else self.data.xmat[self._tb_id].reshape(3, 3).copy()
+        tool_xy = self.env.TARGET_SLOTS_LOCAL[self._current_slot()]
+        # Preliminary reachability must use the same top-edge grasp height as
+        # the post-lift, measured-transform planner below, so it has to take the
+        # grasp offset from the same source rather than repeating a literal.
+        tool_height = (
+            self.env.config.cookie_transfer.target_floor_z_m
+            + self.env.config.cookie_transfer.bin_wall_thickness_m
+            + self.env.COOKIE_HALF_SIZE[2]
+            + 0.008
+            + self._grasp_height_offset()
         )
-        tool_xy = self.TOOL_SLOT_TARGETS_LOCAL[self._current_slot()]
         slot_place = target_position + target_rotation @ np.asarray(
-            [tool_xy[0], tool_xy[1], 0.020]
+            [tool_xy[0], tool_xy[1], tool_height]
         )
-        slot_pre = target_position + target_rotation @ np.asarray(
-            [tool_xy[0], tool_xy[1], 0.080]
-        )
+        slot_pre = slot_place + target_rotation[:, 2] * 0.07
         q_approach = self._solve_l(
             approach_position, self._target_quat_canonical, self.q_branch_seed
         )
-        q_grasp = self._solve_l(
-            grasp_position, self._target_quat_canonical, q_approach
-        )
+        q_grasp = self._solve_l(grasp_position, self._target_quat_canonical, q_approach)
         q_lift = self._solve_l(lift_position, self._target_quat_canonical, q_grasp)
-        q_pre = self._solve_l(
-            slot_pre, self._target_quat_tilted, self.q_branch_seed
-        )
-        q_place = self._solve_l(slot_place, self._target_quat_tilted, q_pre)
+        place_quat = self._target_quat_tilted.copy()
+        try:
+            q_pre = self._solve_l(slot_pre, place_quat, self.q_branch_seed)
+        except RuntimeError:
+            # A rectangular cookie and parallel jaws permit a half-turn about
+            # the tool axis, which can avoid a wrist-limit IK branch.
+            rotation = np.empty(9)
+            mujoco.mju_quat2Mat(rotation, place_quat)
+            mujoco.mju_mat2Quat(
+                place_quat, (rotation.reshape(3, 3) @ np.diag([-1.0, 1.0, -1.0])).ravel()
+            )
+            q_pre = self._solve_l(slot_pre, place_quat, self.q_branch_seed)
+        q_place = self._solve_l(slot_place, place_quat, q_pre)
         self._waypoints = {
             "approach": q_approach,
             "grasp": q_grasp,
@@ -645,6 +765,34 @@ class A3CookieTransferExpert:
             "preplace": q_pre,
             "place": q_place,
         }
+
+    def _plan_place_from_grasp(self) -> None:
+        """Account for the measured cookie-to-tool transform after pickup."""
+        tool_rotation = self.data.site_xmat[self._l_site].reshape(3, 3)
+        cookie_body = self.env._cookie_bodies[self._current_cookie()]
+        cookie_rotation = self.data.xmat[cookie_body].reshape(3, 3)
+        relative_rotation = tool_rotation.T @ cookie_rotation
+        relative_position = tool_rotation.T @ (
+            self.data.xpos[cookie_body] - self.data.site_xpos[self._l_site]
+        )
+        box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
+        xy = self.env.TARGET_SLOTS_LOCAL[self._current_slot()]
+        floor = (
+            self.env.config.cookie_transfer.target_floor_z_m
+            + self.env.config.cookie_transfer.bin_wall_thickness_m
+        )
+        object_z = floor + self.env.COOKIE_HALF_SIZE[2] + 0.008
+        self._placement_height = object_z
+        target_cookie = self.data.xpos[self._tb_id] + box_rotation @ np.r_[xy, object_z]
+        target_tool_rotation = box_rotation @ relative_rotation.T
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, target_tool_rotation.ravel())
+        target_tool = target_cookie - target_tool_rotation @ relative_position
+        pre_tool = target_tool + box_rotation[:, 2] * 0.07
+        pre = self._solve_l(pre_tool, quat, self.data.qpos[self._l_qpos])
+        place = self._solve_l(target_tool, quat, pre)
+        self._waypoints["preplace"] = pre
+        self._waypoints["place"] = place
 
     def _trajectory_command(
         self, target: np.ndarray, gripper: float, *, min_steps: int = 12
@@ -665,7 +813,7 @@ class A3CookieTransferExpert:
                 action[:7] = (1.0 - alpha) * start[:7] + alpha * target
                 action[7] = (1.0 - alpha) * start[7] + alpha * gripper
                 action[8:15] = self.q_r_hold
-                action[15] = 0.6
+                action[15] = self.right_gripper
                 self._motion_actions.append(action)
             self._motion_key = key
             self._motion_done = not self._motion_actions
@@ -682,7 +830,7 @@ class A3CookieTransferExpert:
         action[:7] = target
         action[7] = gripper
         action[8:15] = self.q_r_hold
-        action[15] = 0.6
+        action[15] = self.right_gripper
         return action
 
     def _reset_motion(self) -> None:
@@ -709,13 +857,31 @@ class A3CookieTransferExpert:
         lifted = cookie_position[2] >= self.env.SOURCE_FLOOR_TOP_Z + 0.055
         return bool(lifted and follows_gripper)
 
+    def _cookie_rest_height(self) -> float:
+        """World z of an upright Cookie standing on the source bin floor.
+
+        This is the reference for "is the Cookie back on the bin floor?", so it
+        is derived from ``COOKIE_HALF_SIZE`` for the same reason the grasp height
+        is: it is a function of the Cookie's size, not a free tuning knob.  A
+        Cookie that has shrunk must not have to rise the old, taller Cookie's
+        height before a drop is noticed.
+        """
+        return self.env.SOURCE_FLOOR_TOP_Z + self.env.COOKIE_HALF_SIZE[2]
+
     def _cookie_dropped(self) -> bool:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie())
         eef_position = self.data.site_xpos[self._l_site]
         # Contact flags can flicker while a thin object remains securely held.
         # Separation from the end effector is the robust transfer-time signal.
         separated = np.linalg.norm(cookie_position - eef_position) > 0.085
-        fell_back = cookie_position[2] <= self.env.SOURCE_FLOOR_TOP_Z + 0.025
+        # ``0.025`` used to stand here.  It was only correct while the Cookie was
+        # 50 mm tall, because it is the Cookie's *half height* -- the height of an
+        # upright Cookie's centre above the bin floor, i.e. exactly
+        # ``COOKIE_HALF_SIZE[2]``.  Once the Cookie was shortened to 25 mm, the
+        # stale literal sat 12.5 mm above the real rest height, so any Cookie
+        # that rose by less than that was still reported as back on the floor.
+        # Derive it instead.
+        fell_back = cookie_position[2] <= self._cookie_rest_height()
         return bool(self.phase_steps > 5 and (separated or fell_back))
 
     def _retry(self, reason: str) -> None:

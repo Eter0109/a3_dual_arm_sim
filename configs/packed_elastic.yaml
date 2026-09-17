@@ -1,0 +1,8 @@
+# Dense 4x20 upright source / 2x5 target, using current default geometry.
+# Optional lower-friction variant; sizes, mass and home inherit CookieSceneConfig.
+physics_hz: 500
+control_hz: 20
+horizon: 6000
+cookie_transfer:
+  cookie_friction: [0.8, 0.02, 0.001]
+  bin_friction: [0.8, 0.015, 0.001]
