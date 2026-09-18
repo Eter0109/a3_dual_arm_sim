@@ -6,8 +6,9 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 ## 中文快速上手
 
-当前新增的是 **倒角饼干的 5＋5 批量搬运基线**：左臂一次夹起五块，分两次放进桌面上的
-小盒，右臂停在外侧。固定布局已完成整轮验证，但还不是随机场景下的可靠采集系统。
+现保留两条 **倒角饼干 5＋5 基线**：原版先抓 0–4，再抓 20–24；同列版先抓 0–4，
+再抓 5–9。两者都是左臂一次夹五块、分两次装满单个小盒，右臂停在外侧。
+固定布局各有整轮验证，但还不是随机场景下的可靠采集系统。
 这是读取仿真真值的闭环规则 Expert，**不是 VLA，也不是通过相机识别饼干**。
 
 ### 先选对入口
@@ -15,7 +16,8 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 | 想做什么 | 入口 | 是否录制训练数据 |
 | --- | --- | --- |
 | 查看双小盒新场景 | `a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 否 |
-| 看新版一次五块、两次共十块 | `examples/run_cookie_batch.py --render` | 否 |
+| 看原版跨列 5＋5（0–4、20–24） | `examples/run_cookie_batch.py --render` | 否 |
+| 看同列版 5＋5（0–4、5–9） | `examples/run_cookie_same_column.py --render` | 否 |
 | 看旧版右臂托盒、左臂逐块搬运 | `examples/run_cookie_transfer.py --config configs/cookie_cooperative.yaml --render` | 否；当前 80 块布局未验证完整成功 |
 | 自己遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 否 |
 | 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 是；需要相机和数据集依赖 |
@@ -57,9 +59,12 @@ a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml \
 ```bash
 python -m pip install -e ".[dev]"
 
-# 打开新版 5＋5 演示；默认读取 configs/cookie_batch.yaml，不录制数据。
+# 原版跨列 5＋5；默认读取 configs/cookie_batch.yaml，不录制数据。
 unset MUJOCO_GL
 python -u examples/run_cookie_batch.py --render --max-steps 6000
+
+# 同列 5＋5；使用独立的 configs/cookie_same_column.yaml。
+python -u examples/run_cookie_same_column.py --render --max-steps 6000
 ```
 
 窗口中鼠标左键拖动旋转视角，右键拖动平移，滚轮缩放。
@@ -69,15 +74,15 @@ python -u examples/run_cookie_batch.py --render --max-steps 6000
 ### 不开窗口，保存结果
 
 ```bash
-python -u examples/run_cookie_batch.py --seed 0 --max-steps 6000 \
+python -u examples/run_cookie_same_column.py --seed 0 --max-steps 6000 \
   --output artifacts/my_cookie_batch_eval.json
 
 # 可选：阶段截图，用于诊断，不是训练数据。
-MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
   --snapshots artifacts/batch_snapshots --debug
 
 # 查看所有可用参数。
-python examples/run_cookie_batch.py --help
+python examples/run_cookie_same_column.py --help
 ```
 
 成功应同时看到 `success: true`、`phase: DONE`、目标盒 10 块、源盒 70 块，
@@ -85,6 +90,9 @@ python examples/run_cookie_batch.py --help
 仅“夹起来了”或“曾经放进去过”不算最终成功。
 
 ### 这次具体改了什么
+
+以下改动指独立的同列版本；原 `run_cookie_batch.py`、`cookie_batch.yaml`
+和原批次专家保留为跨列基线。
 
 - **模型**：饼干约 50 × 6.333 × 25 mm；上缘保留 2.5 mm 倒角供夹爪导入，
   batch 下缘改为 1 mm 倒角以扩大落地支撑面。箱体核心＋上下倒角碰撞体保留真实接触，
@@ -124,15 +132,19 @@ python examples/run_cookie_batch.py --help
 
 | 文件 | 主要作用 |
 | --- | --- |
-| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 新版 5＋5 的场景、接触和控制参数 |
+| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 原跨列 5＋5 场景配置 |
+| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列 5＋5 的薄指垫、下倒角等配置 |
 | [configs/cookie_two_box.yaml](configs/cookie_two_box.yaml) | 缩窄工作盒并加入可推动备用盒的独立场景配置 |
-| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 演示入口、结果 JSON、诊断截图 |
-| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 五块选择、闭环状态机、抬升／释放验证 |
+| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 原跨列 0–4、20–24 演示入口 |
+| [examples/run_cookie_same_column.py](examples/run_cookie_same_column.py) | 同列 0–4、5–9 演示、结果 JSON、诊断截图 |
+| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 原跨列批次专家 |
+| [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家与倾斜抓取实验逻辑 |
 | [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 场景与倒角碰撞模型生成 |
 | [src/a3_dual_arm_sim/cookie_transfer.py](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干任务、接触查询、计数与成功判定 |
 | [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与原场景默认参数 |
 | [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 原逐块 Expert 与共享运动规划 |
-| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 新版选取、接触链、失败保护等回归测试 |
+| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 原跨列批次专家回归测试 |
+| [tests/test_cookie_same_column.py](tests/test_cookie_same_column.py) | 同列版选取、接触链、失败保护等回归测试 |
 
 ```bash
 python -m pytest tests/test_cookie_batch.py tests/test_model.py tests/test_cookie_transfer.py \
@@ -507,7 +519,8 @@ action mode, canonical stored action mode, seed, task, frame count, and optional
 
 ## Beveled-Cookie batch expert (experimental)
 
-`run_cookie_batch.py` is the separate five-at-a-time controller; the original
+`run_cookie_batch.py` preserves the original 0–4 then 20–24 five-at-a-time
+baseline. `run_cookie_same_column.py` is the separate 0–4 then 5–9 version;
 `run_cookie_transfer.py` still runs the single-Cookie expert.
 
 ```bash
@@ -515,18 +528,21 @@ action mode, canonical stored action mode, seed, task, frame count, and optional
 unset MUJOCO_GL
 python -u examples/run_cookie_batch.py --render
 
+# Same source column, with its own expert and config.
+python -u examples/run_cookie_same_column.py --render
+
 # Headless evaluation; write only the requested JSON result.
-python -u examples/run_cookie_batch.py --seed 0 --output artifacts/batch_eval_seed0.json
+python -u examples/run_cookie_same_column.py --seed 0 --output artifacts/batch_eval_seed0.json
 
 # Controlled parameter comparison; the coefficient stays constant throughout.
-python -u examples/run_cookie_batch.py --sliding-friction 0.8 --physics-hz 1000
+python -u examples/run_cookie_same_column.py --sliding-friction 0.8 --physics-hz 1000
 
 # Optional diagnostic screenshots (not training observations).
-MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
   --snapshots artifacts/batch_snapshots --debug
 ```
 
-The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions are
+The same-column configuration is `configs/cookie_same_column.yaml`. Cookie dimensions are
 unchanged. The upper bevel remains 2.5 mm; the lower bevel is 1 mm to widen
 the uniform support base. Only this batch configuration uses a 1 mm left
 fingertip; the other grippers retain their original pad geometry. The source
