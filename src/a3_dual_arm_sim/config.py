@@ -116,6 +116,13 @@ class SimConfig:
     horizon: int = 1000
     image_width: int = 256
     image_height: int = 256
+    # Per-light shadow and reflection passes dominate frame time on software
+    # rasterizers (no GPU), and their cost is independent of camera resolution.
+    # Disabling them trades lighting fidelity for roughly four times the frame
+    # rate while keeping geometry, materials, and colours intact.  `env.use_fast_render()`
+    # turns both off; see the `--fast-render` CLI flag.
+    render_shadows: bool = True
+    render_reflections: bool = True
     max_joint_step_rad: float = 0.05
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025
