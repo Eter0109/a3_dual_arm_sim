@@ -129,3 +129,63 @@ def test_plough_requires_a_sustained_upright_read():
     """One upright sample is not enough: a Cookie falling past vertical reads as
     upright for a step, which is how the first prototype declared victory early."""
     assert A3CookieRecoveryExpert.SETTLE_STEPS >= 5
+
+
+def test_plough_step_actually_commands_motion():
+    """The creep must move the blade, not just count the travel.
+
+    ``_servo`` ignores its ``position`` argument at ``speed=0`` and advances its
+    own ``_servo_pos`` instead, so a creep that only updates a local goal leaves
+    the blade hovering while ``plough_advanced_m`` runs to the travel limit --
+    a stroke that looks like it ran and moved nothing.  Pin the command itself.
+    """
+    env = _env()
+    try:
+        expert = A3CookieRecoveryExpert(env)
+        expert.reset()
+        _lean(env, 9, 30.0)
+        expert._begin_recovery(9)
+        # Jump straight to the creep, as if the descent had landed.
+        expert._advance_stage(RecoveryStage.PLOUGH)
+        start_site = env.data.site_xpos[expert._l_site].copy()
+        for _ in range(4):
+            expert._plough_step()
+        assert expert._plough_advanced > 0.0
+        # The commanded goal has to have moved, and by the creep distance.
+        commanded = expert._servo_pos[1] - start_site[1]
+        assert commanded < 0.0, "the creep drives the blade toward -y"
+        assert abs(commanded + expert._plough_advanced) < 1e-9, (
+            "the commanded position must follow the travel counter, not lag it"
+        )
+    finally:
+        env.close()
+
+
+def test_recovered_but_packed_column_is_not_offered_as_a_batch():
+    """A stroke rights the row and closes its gaps; the insertion needs one.
+
+    Measured pitch after a stroke is 6.336 mm against the layout's 8.833 mm, and
+    the pads then press on the 1.35 mm-wide flat tops instead of entering a bevel
+    (9.90 N jam with the layout pitch, 9.05 N aiming at the live pitch).  So the
+    recovered column has to drop out of the candidate list rather than be tried.
+    """
+    env = _env()
+    try:
+        expert = A3CookieRecoveryExpert(env)
+        expert.reset()
+        pristine = [0, 1, 2, 3, 4]
+        assert expert._insertion_gap_fits(pristine), "the laid-out row must stay graspable"
+        # Close the row the way a stroke does: pack the centres to one Cookie
+        # thickness apart, so the gap is zero.  Write qpos (`xpos` is derived).
+        thickness = 2.0 * float(env.COOKIE_HALF_SIZE[1])
+        first_y = float(env.SOURCE_POSITIONS[pristine[0]][1])
+        for row, index in enumerate(pristine):
+            joint = env.model.body_jntadr[env._cookie_bodies[index]]
+            address = env.model.jnt_qposadr[joint]
+            env.data.qpos[address + 1] = first_y + row * thickness
+        mujoco.mj_forward(env.model, env.data)
+        live = env.cookie_positions[pristine][:, 1]
+        assert abs(float(np.median(np.diff(live))) - thickness) < 1e-6
+        assert not expert._insertion_gap_fits(pristine), "a packed row must be rejected"
+    finally:
+        env.close()

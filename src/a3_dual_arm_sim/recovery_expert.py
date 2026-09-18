@@ -9,9 +9,26 @@ tilted past the batch expert's upright test, so the column can never supply
 another batch while they stay that way.
 
 This expert adds one recovery stroke after each batch that leaves damage behind.
-It is a *thin blade* move: the two pads closed together are a 20.0 x 6.35 x 33.5
-mm plate, and the space a batch of five just vacated is wide open, so the tool can
-descend behind the back-most leaning Cookie and creep forward into it.
+It is a *thin blade* move: the two pads closed together are a 20.0 x 12.7 x 33.5
+mm plate, and it descends behind the back-most leaning Cookie and creeps through
+it.
+
+Pushing from the vacancy instead is the obvious alternative, and it is wrong,
+which is worth recording because the argument for it is good.  A push into the
+front face does produce a righting torque about the bottom *back* edge, whatever
+its height, so the low push really does rotate the front Cookie back (measured:
+44.2 -> 21.8 deg).  But the chain cannot then unfold: the stroke drives the front
+face toward +y while the unfolding needs the row's back edge to move toward -y,
+and the back edge is already against the bin wall.  Measured on the same state
+with the same gripper and the same creep:
+
+    push the back-most Cookie, -y      -> 15/15 upright
+    push the front Cookie, +y, low     -> 0/15, the row packs into 21.8 deg
+    push the front Cookie, +y, high    -> 0/15, the front Cookie tips further
+
+So the vacancy is where the row *goes*, not where the push comes from.  It is only
+available as swing space: the row's back edge travels 36 mm toward it during a
+successful stroke.
 
 Which surface the blade meets decides whether the Cookie straightens or launches,
 and the difference is 4 mm:
@@ -27,12 +44,19 @@ and its chamfer cap begins -- and driven at a regulated 2.5 N.  A stiff position
 servo would report nothing until the pad is already buried, and the ~7 N that
 takes lifts the blade onto the top face instead of pushing the Cookie over.
 
-Measured on the post-batch state (seed 0): one stroke rights 13 of the 15 leaning
-Cookies.  The two that do not come back are the front-most pair, which have the
-whole vacated column in front of them and tip past vertical once the chain
-unfolds; they end up flat, and no later stroke can reach them because a flat
-Cookie has no back face left to push.  That is why the recovery reports what it
-recovered instead of retrying, and why it runs as its own expert rather than as
+One consequence of the target leaning on the wall is that the blade has no room
+behind it and comes in over the wall's top edge, touching it at the descent pose
+(eight wall contacts, which is the 0.3 N floor under the force reading).  Cookie 19
+rests at y 411.0 against a wall whose inner face is at 410.1.
+
+Measured on the post-batch state (seed 0): one stroke rights 12 of the 15 leaning
+Cookies, reproducibly, in ~120 control steps.  The three that do not come back are
+the ones next to the blade, driven 36.9 deg forward once the wave has passed: the
+wave that unfolds the row works by standing a Cookie up and then leaning it onto
+the next, so the last few are carried past vertical against the packed row.  They
+end up leaning forward rather than flat, and the stroke is not retried -- a second
+stroke pushes them further over.  That is why the recovery reports what it
+recovered instead of looping, and why it runs as its own expert rather than as
 another batch phase: ``A3CookieBatchExpert`` keeps its exact behaviour, this class
 only adds a stroke in front of its ``SELECT_COOKIE``.
 """
@@ -73,8 +97,16 @@ class A3CookieRecoveryExpert(A3CookieBatchExpert):
     #: Regulated push force along -y.  2 N rights the row; the margin below the
     #: 6 N guard leaves room for the chain to gather.
     PLOUGH_FORCE_N = 2.5
-    #: How far the blade creeps into the row.  The emptying batch leaves ~44 mm.
-    PLOUGH_TRAVEL_M = 0.055
+    #: Upper bound on the creep.  The emptying batch leaves ~44 mm; the sweep put
+    #: the useful range at 29..44 mm and 55 mm drove the back three past vertical.
+    #: The signed-tilt stop below normally ends the creep well before this.
+    PLOUGH_TRAVEL_M = 0.044
+    #: Give up on the creep once the touched Cookie is this far past vertical.
+    #: A safety net, not a stopping rule: the wave that unfolds the row carries
+    #: that Cookie forward by design, since leaning it onto the next one is what
+    #: passes the motion down the row.  Tightening this to 15 deg was measured and
+    #: cut the wave off early -- 8/15 against 12/15 at the full travel.
+    OVERSHOOT_LIMIT_DEG = 60.0
     #: Control steps the whole row must stay upright before the stroke is called
     #: done.  One step is not enough: a Cookie crossing vertical on its way down
     #: reads as upright for a step, which is how the first prototype stopped with
@@ -120,14 +152,23 @@ class A3CookieRecoveryExpert(A3CookieBatchExpert):
         self._source_positions = np.asarray(self.env.SOURCE_POSITIONS)
         # The compound collision Cookie is a box core with chamfered caps, and
         # the push has to land on the corner where the core ends.
-        self._core_half_z = float(self.env.COOKIE_HALF_SIZE[2]) - float(
-            self.env.config.cookie_transfer.cookie_edge_bevel_m
-        )
+        self._bevel = float(self.env.config.cookie_transfer.cookie_edge_bevel_m)
+        self._core_half_z = float(self.env.COOKIE_HALF_SIZE[2]) - self._bevel
 
     # ------------------------------------------------------------------ recovery
     def _tilt_deg(self, index: int) -> float:
         rotation = self.data.xmat[self.env._cookie_bodies[index]].reshape(3, 3)
         return float(np.degrees(np.arccos(np.clip(rotation[2, 2], -1.0, 1.0))))
+
+    def _signed_tilt_deg(self, index: int) -> float:
+        """Tilt with a sign: positive leans toward +y, negative toward the vacancy.
+
+        ``_tilt_deg`` cannot tell the two apart, and the difference is the whole
+        overshoot: a Cookie the blade has pushed past vertical reads as 27 deg of
+        lean again, indistinguishable from the 27 deg it had before the stroke.
+        """
+        rotation = self.data.xmat[self.env._cookie_bodies[index]].reshape(3, 3)
+        return float(np.degrees(np.arctan2(rotation[1, 2], rotation[2, 2])))
 
     def leaning_cookies(self) -> list[int]:
         """Source-bin Cookies that are neither upright nor already finished."""
@@ -213,6 +254,10 @@ class A3CookieRecoveryExpert(A3CookieBatchExpert):
             self._plough_stall = 0
             self._upright_streak = 0
         if stage is RecoveryStage.RETRACT:
+            # Straight up.  Pulling back as well was tried and measured worse
+            # (8/15 against 12/15), even though it looks like the gentler exit:
+            # the row has already been left in the state the stroke produced, and
+            # the exit path does not change it.
             self._retract_site = self.data.site_xpos[self._l_site].copy() + [0.0, 0.0, 0.100]
 
     def _recovery_step(self) -> np.ndarray:
@@ -264,21 +309,69 @@ class A3CookieRecoveryExpert(A3CookieBatchExpert):
         return action
 
     def _plough_step(self) -> np.ndarray:
-        """Creep -y under a measured force limit until the row stands up."""
+        """Creep -y while the row is still improving, then stop.
+
+        The blade must keep pushing while the chain unfolds and stop the moment it
+        has: the back-most Cookies stand up first, and every further millimetre
+        rocks them forward over the top of the ones in front (measured: three of
+        them ended up leaning 39 deg forward when the creep ran its full 55 mm,
+        against 15/15 upright at 44 mm).
+
+        The signal is the Cookie the blade is touching, not the row's upright
+        count: the front-most Cookie of a long chain is the last to rise, so a
+        creep that runs until *everything* is upright is still pushing after the
+        back of the row is straight and tips it over, while one that stops at the
+        first upright reading stops on a transient crossing.
+
+        ``_servo`` ignores its ``position`` argument at ``speed=0`` -- it advances
+        its own ``_servo_pos`` by the rate limit and uses that, so a zero speed
+        means "hold exactly here".  The creep therefore has to place the goal in
+        ``_servo_pos`` itself; setting only a local variable commands nothing and
+        the blade hovers on the spot while the travel counter runs out.
+        """
         force = self._blade_force()
-        if force <= self.PLOUGH_FORCE_N and self._plough_advanced < self.PLOUGH_TRAVEL_M:
+        leaning = len(self.leaning_cookies())
+        if leaning == 0:
+            self._upright_streak += 1
+        else:
+            self._upright_streak = 0
+
+        # Advance on the force limit alone, to a fixed travel.
+        #
+        # This is the rule the probes measured, and the two cleverer ones both
+        # made it worse, which is worth recording because they look obviously
+        # right:
+        #   * stop once every Cookie reads upright -- the front-most one is the
+        #     last to rise, so this keeps pushing 26 mm past the point where the
+        #     back of the row is straight and tips those three over
+        #   * stop once the touched Cookie reads upright -- it does so at 11 mm and
+        #     then falls back, because standing that Cookie up is not what unfolds
+        #     the chain: it unfolds by the standing Cookie continuing forward onto
+        #     the next one, so the stroke has to carry on through it
+        # A fixed travel is also the honest description of the motion: the stroke
+        # is a wave that propagates down the row, and stopping rules that look at
+        # any single Cookie's tilt cut the wave off mid-flight.
+        target = self._recovery_target_index
+        target_tilt = (
+            self._signed_tilt_deg(target) if target is not None else 0.0
+        )
+        may_advance = (
+            force <= self.PLOUGH_FORCE_N
+            and self._plough_advanced < self.PLOUGH_TRAVEL_M
+            and target_tilt > -self.OVERSHOOT_LIMIT_DEG
+        )
+        if may_advance:
             self._plough_goal[1] -= self.PLOUGH_SPEED_M
             self._plough_advanced += self.PLOUGH_SPEED_M
             self._plough_stall = 0
         else:
             self._plough_stall += 1
+
+        self._servo_pos = self._plough_goal.copy()
         action = self._recovery_servo(self._plough_goal, 0.0)
         if action is None:
             return self._finish_recovery(self._aborted)
         self._plough_goal = self._servo_pos.copy()
-        self._upright_streak = (
-            self._upright_streak + 1 if not self.leaning_cookies() else 0
-        )
         if self._upright_streak >= self.SETTLE_STEPS:
             self._advance_stage(RecoveryStage.RETRACT)
         elif self._plough_advanced >= self.PLOUGH_TRAVEL_M or self._plough_stall > 80:
@@ -319,6 +412,36 @@ class A3CookieRecoveryExpert(A3CookieBatchExpert):
         return self.env.last_applied_action.copy()
 
     # ------------------------------------------------------------------ hook
+    def _candidate_batches(self):
+        """Batch-expert candidates, minus any column a stroke has packed shut.
+
+        The bevel insertion needs a gap to enter.  A stroke leaves the row at
+        zero gap (measured: pitch 8.833 -> 6.336 mm), so a recovered column looks
+        upright and available while being impossible to grasp, and the batch
+        expert then drives the pads onto the recovered neighbours and jams at
+        ~9.9 N.  Filtering here keeps it on the untouched column instead, which
+        is what the baseline would have used.
+        """
+        for batch in super()._candidate_batches():
+            if self._insertion_gap_fits(batch):
+                yield batch
+
+    def _insertion_gap_fits(self, batch: list[int]) -> bool:
+        """Whether a pad can still enter this row's outer gaps.
+
+        A row is at its narrowest at the Cookie top faces, where the 45 deg
+        bevels leave only ``2 * (half_y - bevel)`` of full thickness.  A pad that
+        does not fit into that gap lands on flat top faces and presses instead of
+        wedging, which is the difference between a grasp and a jam.
+        """
+        positions = self.env.cookie_positions[batch][:, 1]
+        pitch = float(np.median(np.diff(positions)))
+        entry_width = (
+            2.0 * (float(self.env.COOKIE_HALF_SIZE[1]) - self._bevel)
+            + float(self.env.PAD_THICKNESS_M)
+        )
+        return pitch >= entry_width
+
     def _act_step(self, observation=None, task=""):
         if not self.finished and self._stage is RecoveryStage.IDLE:
             if self.phase is CookiePhase.SELECT_COOKIE:
