@@ -26,6 +26,12 @@ def main():
     parser.add_argument("--snapshots", type=Path, help="Optional diagnostic PNGs, not a dataset")
     parser.add_argument("--physics-hz", type=int, help="Override simulation rate for comparison")
     parser.add_argument("--sliding-friction", type=float, help="Constant Cookie sliding friction")
+    parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="Experimental: plough the Cookies a batch left leaning back upright before "
+        "selecting the next batch (see a3_dual_arm_sim.recovery_expert)",
+    )
     args = parser.parse_args()
     if args.max_steps < 1:
         parser.error("--max-steps must be positive")
@@ -55,7 +61,12 @@ def main():
     renderer = None
     try:
         obs, info = env.reset(seed=args.seed, options={"randomize_cookies": False})
-        expert = A3CookieBatchExpert(env)
+        if args.recover:
+            from a3_dual_arm_sim.recovery_expert import A3CookieRecoveryExpert
+
+            expert = A3CookieRecoveryExpert(env)
+        else:
+            expert = A3CookieBatchExpert(env)
         expert.reset()
         if args.snapshots:
             import mujoco
@@ -143,6 +154,10 @@ def main():
             "success_criterion": "exactly 10 released, upright, settled, contained; 70 remain in source",
             "training_data_recorded": False,
         }
+        # Only present with --recover; the batch expert has no recovery to report.
+        recovery = getattr(expert, "recovery_reports", None)
+        if recovery is not None:
+            result["recovery"] = recovery
         print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
