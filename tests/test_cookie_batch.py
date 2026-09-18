@@ -17,14 +17,37 @@ CONFIG = Path(__file__).resolve().parents[1] / "configs" / "cookie_batch.yaml"
 def test_batch_layout_has_uniform_small_gaps_not_finger_lanes():
     config = load_config(CONFIG)
     positions = np.asarray(config.cookie_transfer.cookie_source_positions_m)
-    gaps = np.diff(positions[:20, 1]) - 2 * config.cookie_transfer.cookie_half_size_m[1]
-    np.testing.assert_allclose(gaps, 0.0025, atol=1e-8)
-    assert np.all(gaps < 0.00635)
+    for column in positions.reshape(4, 20, 2):
+        gaps = np.diff(column[:, 1]) - 2 * config.cookie_transfer.cookie_half_size_m[1]
+        np.testing.assert_allclose(gaps, 0.0025, atol=1e-8)
+        assert np.all(gaps < 0.00635)
+    assert config.cookie_transfer.left_finger_pad_half_thickness_m == 0.0005
     assert config.cookie_transfer.cookie_edge_bevel_m == 0.0025
+    assert config.cookie_transfer.cookie_bottom_edge_bevel_m == 0.001
     assert len(positions) == 80
 
 
-def test_next_batch_skips_fallen_neighbor_and_uses_opposite_exposed_end():
+def test_batch_thin_pad_is_left_only_and_configurable():
+    from dataclasses import replace
+
+    from a3_dual_arm_sim.model import build_model
+
+    config = load_config(CONFIG)
+    batch_model = build_model(config, scene="cookie_transfer").model
+    assert batch_model.geom("L_finger_inner_geom").size[1] == pytest.approx(0.0005)
+    assert batch_model.geom("R_finger_inner_geom").size[1] == pytest.approx(0.003175)
+
+    default_config = replace(
+        config,
+        cookie_transfer=replace(
+            config.cookie_transfer, left_finger_pad_half_thickness_m=0.003175
+        ),
+    )
+    default_model = build_model(default_config, scene="cookie_transfer").model
+    assert default_model.geom("L_finger_inner_geom").size[1] == pytest.approx(0.003175)
+
+
+def test_next_batch_stays_in_same_column_despite_tilt():
     source = load_config(CONFIG).cookie_transfer.cookie_source_positions_m
     expert = object.__new__(A3CookieBatchExpert)
     expert.env = SimpleNamespace(
@@ -37,19 +60,20 @@ def test_next_batch_skips_fallen_neighbor_and_uses_opposite_exposed_end():
     expert.completed_cookie_indices = list(range(5))
     assert next(expert._candidate_batches()) == [5, 6, 7, 8, 9]
     expert.data.xmat[5, 8] = 0.0
-    assert next(expert._candidate_batches()) == [15, 16, 17, 18, 19]
-    expert.data.xmat[15, 8] = 0.0
-    assert next(expert._candidate_batches()) == [20, 21, 22, 23, 24]
+    assert next(expert._candidate_batches()) == [5, 6, 7, 8, 9]
+    expert.env.privileged_cookie_in_source = lambda i: i != 5
+    assert next(expert._candidate_batches(), None) is None
 
 
 def test_insertion_force_limit_ignores_one_spike_but_stops_sustained_jam():
     expert = object.__new__(A3CookieBatchExpert)
     expert._jam_count = 0
-    assert not expert._insertion_jammed([12, 0])
+    spike = expert.MAX_INSERTION_FORCE_N + 1
+    assert not expert._insertion_jammed([spike, 0])
     assert not expert._insertion_jammed([1, 1])
-    assert not expert._insertion_jammed([12, 0])
-    assert not expert._insertion_jammed([12, 0])
-    assert expert._insertion_jammed([12, 0])
+    assert not expert._insertion_jammed([spike, 0])
+    assert not expert._insertion_jammed([spike, 0])
+    assert expert._insertion_jammed([spike, 0])
 
 
 def test_compound_collision_preserves_mass_and_inertia():

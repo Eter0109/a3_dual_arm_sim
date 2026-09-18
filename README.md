@@ -86,16 +86,19 @@ python examples/run_cookie_batch.py --help
 
 ### 这次具体改了什么
 
-- **模型**：饼干约 50 × 6.333 × 25 mm，上下边缘做 2.5 mm、45° 倒角，底部保留平面。
-  batch 使用箱体核心＋上下倒角碰撞体，保留外形和碰撞质量，不把饼干绑定到夹爪。
+- **模型**：饼干约 50 × 6.333 × 25 mm；上缘保留 2.5 mm 倒角供夹爪导入，
+  batch 下缘改为 1 mm 倒角以扩大落地支撑面。箱体核心＋上下倒角碰撞体保留真实接触，
+  不把饼干绑定到夹爪。仅 batch 配置把左指垫厚度改为 1 mm；其他场景仍用原尺寸。
 - **场景**：仍为 4 × 20 共 80 块；batch 的间隙改为 2.5 mm，未预留整根手指宽的通道。
   目标盒加宽并移到左臂可达位置，放在桌上；原默认场景的 0.4 mm 间隙保留。
-- **闭环控制**：读取实际位置、姿态、接触和抬升情况，选择露出端连续直立的五块，
+- **闭环控制**：读取实际位置、姿态、接触和抬升情况，依次选择同一列的 0–4、5–9，
   先保持张开接近抓取点上方，再把夹爪预闭合到批次宽度并确认实测开度稳定，随后插入、
   夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
-  邻近饼干倾倒时跳过受阻端，而不是继续向下硬压；没有自动扶正功能。
+  第二批若倾斜，会先尝试低力拨正，再使夹爪沿实测倾角进入；后侧指垫以第 9、10 块
+  间的实测缝隙为基准保持位置，由前侧指垫收拢。若缝隙实际小于指垫厚度则停止，
+  不穿模、不预留专门空道，也不自动切换到另一列冒充同列成功。
 - **物理参数**：batch 默认物理 1000 Hz、控制 20 Hz、滑动摩擦系数 0.8。
-  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 8 N 会失败退出。
+  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 20 N 会失败退出。
   这些均为仿真参数，并非真实硬件的标定值或安全保证。
 - **判定**：要求十块释放后直立、稳定、完整进入小盒，源盒仍有七十块；
   不再要求 batch 满足旧任务的精确槽位／四面贴壁条件。
@@ -104,8 +107,11 @@ python examples/run_cookie_batch.py --help
 
 `artifacts/cookie_batch_baseline_seed0.json` 保存的是此前固定布局 seed 0 的 5＋5
 基线：1844 个控制步、目标盒 10 块、源盒 70 块；两批为 ID 0–4 与 20–24，最大指垫力
-约 4.48 N。当前版本改变了初始姿态与抓取阶段，已验证模型、预闭合状态机和短程无头运行，
-**尚未重新完成整轮 5＋5 长程验收**；在新的报告出现前，不应把旧基线当作本版本的成功证明。
+约 4.48 N。当前同列版本的 seed 0 无窗口实测见
+`artifacts/cookie_batch_same_column_seed0.json`：1860 控制步、目标盒 10 块、源盒
+70 块，先抓 ID 0–4，再抓同列 ID 5–9；两批均 `lifted: 5`、`released: true`，
+最大指垫力约 1.37 N。第一批后剩余饼干保持直立，因而**这轮验证的是同列搬运，
+不是倾倒后的倾角抓取成功**。倾斜抓取分支目前仍属于实验性功能。
 
 ![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
 
@@ -520,18 +526,23 @@ MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
   --snapshots artifacts/batch_snapshots --debug
 ```
 
-The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions and
-2.5 mm bevels are unchanged. The source has 80 Cookies, with a uniform 2.5 mm gap
-instead of 0.4 mm; there are **no pre-cut finger-width lanes**. The left gripper
+The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions are
+unchanged. The upper bevel remains 2.5 mm; the lower bevel is 1 mm to widen
+the uniform support base. Only this batch configuration uses a 1 mm left
+fingertip; the other grippers retain their original pad geometry. The source
+has 80 Cookies, with a uniform initial 2.5 mm gap instead of 0.4 mm; there are
+**no pre-cut finger-width lanes**. The left gripper
 first reaches the pose above the Cookies with fully open jaws, then pre-closes
 to the computed five-Cookie width and waits for the measured opening to settle.
 It descends slowly through the bevels, compresses five neighbouring Cookies, checks
 a contact chain through all five, and verifies that each actually rises. The
-second batch prefers the same column after the first five are removed. If a
-neighbour tips during extraction, the expert skips that obstructed end and
-selects five upright Cookies at the opposite exposed end (then another column
-if necessary). It does not keep pushing into the fallen Cookie.
-Insertion stops if either pad exceeds 8 N for three consecutive control ticks;
+second batch must take the next five from the same source column. If they tip,
+the controller first attempts low-force base straightening, then aligns the
+gripper with the measured tilt and descends along the Cookie axis. It measures
+the actual gap after the fifth Cookie and anchors the far pad in that gap while
+closing the near pad. If the gap is narrower than the pad, it reports failure
+instead of penetrating the neighbour or quietly switching columns.
+Insertion stops if either pad exceeds 20 N for three consecutive control ticks;
 this is a simulation guard, not a calibrated real-hardware force limit.
 The target box is widened to leave space for the fingers to open and retract.
 Its table position is moved to (0.095, 0.100, 0.753) m so both columns are
@@ -573,8 +584,15 @@ remaining ends of the first column had tilted. Maximum measured pad force was
 Thirty relevant model/contact/task tests passed; this is not a full legacy-expert
 suite pass or a randomized-layout success-rate result.
 
-Known limitations: neighbouring Cookies can still tip and are skipped, not
-restored. Throughput is not yet optimized: the development headless replay took
+Current same-column validation (fixed layout, seed 0):
+`artifacts/cookie_batch_same_column_seed0.json` reports success at step
+1860 with IDs 0–4 and then 5–9, both lifted and released, ten upright/settled
+in the target, seventy left in the source, and maximum pad force 1.37 N.
+The wider lower support prevented the remaining Cookies from tipping in this
+replay, so this is **not** evidence that a fallen five-Cookie batch can yet be
+recovered. The angled insertion branch is guarded by measured gap and contact
+force, but still needs a physically tilted successful replay. Throughput is
+not yet optimized: the earlier development headless replay took
 about 21 minutes for roughly 92 seconds of simulated control, with another
 diagnostic replay running concurrently. Do not expect real-time playback or
 start large dataset collection on the basis of this one fixed-layout baseline.

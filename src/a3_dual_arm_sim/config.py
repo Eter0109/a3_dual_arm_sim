@@ -49,10 +49,12 @@ class CookieSceneConfig:
     box_lift_m: float = 0.030
     box_tilt_deg: float = 8.0
     left_gripper_kp: float = 400.0
+    left_finger_pad_half_thickness_m: float = 0.003175
     right_gripper_kp: float = 2000.0
     right_grasp_pitch_deg: float = 0.0
     cookie_half_size_m: tuple[float, ...] = COOKIE_HALF_SIZE
     cookie_edge_bevel_m: float = COOKIE_EDGE_BEVEL_M
+    cookie_bottom_edge_bevel_m: float | None = None
     cookie_collision_mode: str = "mesh"
     cookie_mass_kg: float = 0.035 / 6
     cookie_friction: tuple[float, ...] = (2.0, 0.03, 0.002)
@@ -202,7 +204,18 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         cookie_edge_bevel_m=float(
             cookie_raw.get("cookie_edge_bevel_m", defaults.cookie_edge_bevel_m)
         ),
+        cookie_bottom_edge_bevel_m=(
+            None
+            if cookie_raw.get("cookie_bottom_edge_bevel_m") is None
+            else float(cookie_raw["cookie_bottom_edge_bevel_m"])
+        ),
         cookie_mass_kg=float(cookie_raw.get("cookie_mass_kg", defaults.cookie_mass_kg)),
+        left_finger_pad_half_thickness_m=float(
+            cookie_raw.get(
+                "left_finger_pad_half_thickness_m",
+                defaults.left_finger_pad_half_thickness_m,
+            )
+        ),
         cookie_collision_mode=str(
             cookie_raw.get("cookie_collision_mode", defaults.cookie_collision_mode)
         ),
