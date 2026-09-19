@@ -223,6 +223,13 @@ def _add_gripper(
         ("inner", -0.0326011, 1.0, "0 0 0 1"),
         ("outer", 0.0326011, -1.0, "1 0 0 0"),
     )
+    pad_half_thickness = (
+        config.cookie_transfer.left_finger_pad_half_thickness_m
+        if cookie_scene and side == "left"
+        else 0.003175
+    )
+    if pad_half_thickness <= 0:
+        raise ValueError("left finger pad half-thickness must be positive")
     for finger_name, y, axis, assembly_quat in jaw_specs:
         moving = ET.SubElement(
             gripper,
@@ -279,7 +286,7 @@ def _add_gripper(
             name=f"{prefix}_finger_{finger_name}_geom",
             type="box",
             pos="0 -0.0245203 0.03242",
-            size="0.010 0.003175 0.01675",
+            size=f"0.010 {pad_half_thickness:.8f} 0.01675",
             rgba="0.08 0.08 0.08 1",
             contype="2",
             conaffinity="1",
@@ -296,7 +303,7 @@ def _add_gripper(
             name=f"{prefix}_finger_{finger_name}_pad_visual",
             type="box",
             pos="0 -0.0245203 0.03242",
-            size="0.010 0.003175 0.01675",
+            size=f"0.010 {pad_half_thickness:.8f} 0.01675",
             rgba="0.08 0.08 0.08 1",
             contype="0",
             conaffinity="0",
@@ -308,7 +315,7 @@ def _add_gripper(
             name=f"{prefix}_finger_{finger_name}_touch",
             type="box",
             pos="0 -0.0245203 0.03242",
-            size="0.0105 0.0035 0.017",
+            size=f"0.0105 {pad_half_thickness + 0.000325:.8f} 0.017",
             rgba="0 0 0 0",
         )
 
@@ -428,13 +435,18 @@ def _add_beveled_cookie_mesh(
     name: str,
     half_size: tuple[float, ...],
     bevel: float,
+    bottom_bevel: float | None = None,
 ) -> None:
     """Extrude an octagonal y-z profile along x for real sloped contacts."""
     if len(half_size) != 3 or any(value <= 0 for value in half_size):
         raise ValueError("cookie half-size must contain three positive values")
     hx, hy, hz = half_size
+    if bottom_bevel is None:
+        bottom_bevel = bevel
     if not 0 < bevel < min(hy, hz):
         raise ValueError("cookie edge bevel must be positive and smaller than y/z half-size")
+    if not 0 < bottom_bevel < min(hy, hz):
+        raise ValueError("cookie bottom bevel must be positive and smaller than y/z half-size")
 
     # Keep the overall x width unchanged. Four long x-direction edges are
     # cut away so a descending finger meets a ramp rather than a square corner.
@@ -442,10 +454,10 @@ def _add_beveled_cookie_mesh(
         (-hy + bevel, hz),
         (hy - bevel, hz),
         (hy, hz - bevel),
-        (hy, -hz + bevel),
-        (hy - bevel, -hz),
-        (-hy + bevel, -hz),
-        (-hy, -hz + bevel),
+        (hy, -hz + bottom_bevel),
+        (hy - bottom_bevel, -hz),
+        (-hy + bottom_bevel, -hz),
+        (-hy, -hz + bottom_bevel),
         (-hy, hz - bevel),
     )
     vertices = tuple((x, y, z) for x in (-hx, hx) for y, z in profile)
@@ -477,11 +489,18 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
     # Keep visual and collision envelopes coincident.  A smaller visual mesh
     # made a correctly contacting Cookie look detached from the finger pads.
     visual_half_size = scene.cookie_half_size_m
-    _add_beveled_cookie_mesh(
-        assets, "cookie_collision_mesh", scene.cookie_half_size_m, scene.cookie_edge_bevel_m
+    bottom_bevel = (
+        scene.cookie_edge_bevel_m
+        if scene.cookie_bottom_edge_bevel_m is None
+        else scene.cookie_bottom_edge_bevel_m
     )
     _add_beveled_cookie_mesh(
-        assets, "cookie_visual_mesh", visual_half_size, scene.cookie_edge_bevel_m
+        assets, "cookie_collision_mesh", scene.cookie_half_size_m,
+        scene.cookie_edge_bevel_m, bottom_bevel,
+    )
+    _add_beveled_cookie_mesh(
+        assets, "cookie_visual_mesh", visual_half_size,
+        scene.cookie_edge_bevel_m, bottom_bevel,
     )
     if scene.cookie_collision_mode not in ("mesh", "compound"):
         raise ValueError("cookie_collision_mode must be mesh or compound")
@@ -490,11 +509,11 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         bevel = scene.cookie_edge_bevel_m
         # Exact non-overlapping decomposition of the same octagonal solid.
         # Flat side contacts use box-box collision; ramps remain real meshes.
-        for label, sign in (("top", 1), ("bottom", -1)):
+        for label, sign, edge in (("top", 1, bevel), ("bottom", -1, bottom_bevel)):
             vertices = [
                 (x, y, sign * z)
                 for x in (-hx, hx)
-                for z, width in ((hz - bevel, hy), (hz, hy - bevel))
+                for z, width in ((hz - edge, hy), (hz, hy - edge))
                 for y in (-width, width)
             ]
             ET.SubElement(
@@ -538,6 +557,33 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         floor_z=scene.target_floor_z_m,
         wall_z=scene.target_bin_wall_height_m / 2,
     )
+    if scene.spare_target_bin_world_position_m is not None:
+        spare_bin = ET.SubElement(
+            world,
+            "body",
+            name="spare_target_bin",
+            pos=_vec(scene.spare_target_bin_world_position_m),
+        )
+        ET.SubElement(spare_bin, "freejoint", name="spare_target_bin_free")
+        ET.SubElement(
+            spare_bin,
+            "inertial",
+            pos="0 0 0.01",
+            mass="0.10",
+            diaginertia="0.0002 0.0002 0.0003",
+        )
+        _add_open_bin(
+            spare_bin,
+            name="spare_target_bin",
+            center=(0.0, 0.0),
+            half_size=scene.target_bin_half_size_m,
+            height=scene.target_bin_wall_height_m,
+            rgba=BIN_RGBA,
+            thickness=scene.bin_wall_thickness_m,
+            friction=scene.bin_friction,
+            floor_z=scene.target_floor_z_m,
+            wall_z=scene.target_bin_wall_height_m / 2,
+        )
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})
     rows = sorted({p[1] for p in scene.cookie_source_positions_m})
@@ -575,21 +621,28 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         )
         if scene.cookie_collision_mode == "compound":
             hx, hy, hz = scene.cookie_half_size_m
-            bevel = scene.cookie_edge_bevel_m
-            core_volume = 8 * hx * hy * (hz - bevel)
-            cap_volume = 2 * hx * bevel * (2 * hy - bevel)
-            volume = core_volume + 2 * cap_volume
+            top_bevel = scene.cookie_edge_bevel_m
+            core_half_height = hz - (top_bevel + bottom_bevel) / 2
+            core_center_z = (bottom_bevel - top_bevel) / 2
+            core_volume = 8 * hx * hy * core_half_height
+            cap_volumes = {
+                "top": 2 * hx * top_bevel * (2 * hy - top_bevel),
+                "bottom": 2 * hx * bottom_bevel * (2 * hy - bottom_bevel),
+            }
+            volume = core_volume + sum(cap_volumes.values())
             collision.attrib.pop("mesh")
             collision.set("type", "box")
-            collision.set("size", _vec((hx, hy, hz - bevel)))
+            collision.set("pos", _vec((0, 0, core_center_z)))
+            collision.set("size", _vec((hx, hy, core_half_height)))
             collision.set("mass", str(scene.cookie_mass_kg * core_volume / volume))
             for label in ("top", "bottom"):
                 attributes = dict(collision.attrib)
                 attributes.pop("size")
+                attributes.pop("pos")
                 attributes.update(
                     name=f"cookie_{index}_{label}_geom",
                     type="mesh", mesh=f"cookie_{label}_mesh",
-                    mass=str(scene.cookie_mass_kg * cap_volume / volume),
+                    mass=str(scene.cookie_mass_kg * cap_volumes[label] / volume),
                 )
                 ET.SubElement(cookie, "geom", **attributes)
         column, row = columns.index(x), rows.index(y)

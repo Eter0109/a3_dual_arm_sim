@@ -1,0 +1,71 @@
+{
+  "seed": 0,
+  "success": true,
+  "steps": 1860,
+  "wall_seconds": 738.17,
+  "cookies_in_target": 10,
+  "cookies_in_source": 70,
+  "phase": "DONE",
+  "failure_phase": null,
+  "failure_reason": null,
+  "safety_reason": null,
+  "completed_cookies": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "batches": [
+    {
+      "cookies": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "lifted": 5,
+      "lift_heights_m": [
+        0.1033968712258353,
+        0.10339288627176646,
+        0.10340959224996726,
+        0.10342572875938394,
+        0.10344060193175475
+      ],
+      "released": true
+    },
+    {
+      "cookies": [
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "lifted": 5,
+      "lift_heights_m": [
+        0.10348560947216268,
+        0.1034768623969109,
+        0.10345015283352355,
+        0.10344055691567877,
+        0.10344132487249502
+      ],
+      "released": true
+    }
+  ],
+  "max_pad_force_n": 1.374327148638357,
+  "max_contact_penetration_mm": 0.10880350436902551,
+  "physics_hz": 1000,
+  "release_physics_hz": null,
+  "sliding_friction": 0.8,
+  "cookie_collision_mode": "compound",
+  "target_support": "tabletop; right arm parked",
+  "success_criterion": "exactly 10 released, upright, settled, contained; 70 remain in source",
+  "training_data_recorded": false
+}

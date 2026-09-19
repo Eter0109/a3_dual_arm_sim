@@ -6,15 +6,19 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 ## 中文快速上手
 
-当前新增的是 **倒角饼干的 5＋5 批量搬运基线**：左臂一次夹起五块，分两次放进桌面上的
-小盒，右臂停在外侧。固定布局已完成整轮验证，但还不是随机场景下的可靠采集系统。
+现保留两条 **倒角饼干 5＋5 基线**：原版先抓 0–4，再抓 20–24；同列版先抓 0–4，
+再抓 5–9。两者都是左臂一次夹五块、分两次装满单个小盒，右臂停在外侧。
+固定布局各有整轮验证，但还不是随机场景下的可靠采集系统。
 这是读取仿真真值的闭环规则 Expert，**不是 VLA，也不是通过相机识别饼干**。
 
 ### 先选对入口
 
 | 想做什么 | 入口 | 是否录制训练数据 |
 | --- | --- | --- |
-| 看新版一次五块、两次共十块 | `examples/run_cookie_batch.py --render` | 否 |
+| 查看双小盒新场景 | `a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 否 |
+| 看原版跨列 5＋5（0–4、20–24） | `examples/run_cookie_batch.py --render` | 否 |
+| 看同列版 5＋5（0–4、5–9） | `examples/run_cookie_same_column.py --render` | 否 |
+| 试验双盒接力（A 装满推出，B 移入再装） | `examples/run_cookie_two_box_batch.py --render --debug` | 否；固定布局已由操作者完整试跑 |
 | 看旧版右臂托盒、左臂逐块搬运 | `examples/run_cookie_transfer.py --config configs/cookie_cooperative.yaml --render` | 否；当前 80 块布局未验证完整成功 |
 | 自己遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 否 |
 | 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 是；需要相机和数据集依赖 |
@@ -22,6 +26,72 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 **JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 新版 batch 脚本不自动录制，
 也不支持 `--record`；旧版 `evaluate_cookie_transfer.py` 评估的是逐块 Expert，不是新版 batch。
+
+### 双小盒场景（环境预览）
+
+`configs/cookie_two_box.yaml` 基于 5＋5 的场景参数，仅把目标小盒沿五块饼干排列方向
+（局部 Y）的外半宽从 35 mm 缩到 28 mm；另一维、饼干尺寸和源盒布局不变。
+盒内该方向的净宽从 58 mm 变为 44 mm。第二个同尺寸空盒放在
+`(0.245, 0.100, 0.753)` m，工作盒仍在 `(0.095, 0.100, 0.753)` m。
+两个盒子都有独立自由关节，可被机械臂通过接触推动；第二盒与工作盒之间留有间距，
+工作盒朝桌前方（负 Y）移出的路径保持空出。
+
+```bash
+unset MUJOCO_GL
+a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml \
+  --policy a3_dual_arm_sim.policy:make_hold_policy \
+  --render --no-camera-render --steps 1000
+```
+
+这条命令只让机械臂保持原位以观察环境，不录制数据。当前通用任务统计和成功判定仍针对
+`target_bin` 这个工作盒；备用盒名称为 `spare_target_bin`。独立的双盒批量实验见下节。
+原 `configs/cookie_batch.yaml` 保留作为此前单盒基线；不要用它的历史验收报告
+推断双盒场景的搬运成功率。
+
+保存三路相机画面时运行
+`MUJOCO_GL=egl python examples/preview_cameras.py --config configs/cookie_two_box.yaml --output outputs/two_box_cameras`。
+
+### 试验中的双盒批量流程与快速验证
+
+`configs/cookie_two_box_batch.yaml` 和 `examples/run_cookie_two_box_batch.py` 是独立实验，
+不会覆盖上面的单盒基线。左臂先向盒 A 搬两批各五块，右臂通过接触把 A 推出，
+再夹住空盒 B 的后壁滑入工作位，左臂再搬两批。没有实体导向边，也没有把盒子或饼干
+传送到目标位置。加大 A 的推出距离后，操作者已在当前固定布局上完整试跑成功；
+此前盒 B 第二批搬运超时是旧参数的历史失败。该次成功尚未保存可复核的 JSON
+报告到仓库，因此不列具体完成步数或成功率；也尚未验证随机布局的稳定性。
+
+在 WSL 项目根目录查看完整动作：
+
+```bash
+conda activate a3sim
+unset MUJOCO_GL
+python -u examples/run_cookie_two_box_batch.py \
+  --config configs/cookie_two_box_batch.yaml \
+  --render --debug --max-steps 6000
+```
+
+每次小改动先跑快速几何／可达性检查（不执行抓取，通常几十秒）：
+
+```bash
+python -m pytest -q tests/test_cookie_two_box_batch.py \
+  -k 'config_is_separate or coordinator_starts or pusher_can_reach or fast_exchange_geometry'
+```
+
+改右臂推盒或移盒时，再分别跑相应的局部真实物理测试；它们不需要先搬完 10 块：
+
+```bash
+python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_pusher_clears_a_without_moving_spare_box
+python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_gripper_carries_spare_box_into_station_without_rotation
+```
+
+最后才做完整验收。`--debug` 每 100 步打印一次状态；不加 `--render` 通常更快。
+`--max-steps` 只限制最长运行，不会跳过前面的动作。成功时应看到盒 A、B 各 10 块、
+源盒剩 60 块，以及最终 `success: true`。JSON 是评估报告，不是训练数据。
+
+```bash
+python -u examples/run_cookie_two_box_batch.py --debug --max-steps 6000 \
+  --output artifacts/cookie_two_box_batch_check.json
+```
 
 ### 安装与可视化
 
@@ -31,9 +101,12 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 ```bash
 python -m pip install -e ".[dev]"
 
-# 打开新版 5＋5 演示；默认读取 configs/cookie_batch.yaml，不录制数据。
+# 原版跨列 5＋5；默认读取 configs/cookie_batch.yaml，不录制数据。
 unset MUJOCO_GL
 python -u examples/run_cookie_batch.py --render --max-steps 6000
+
+# 同列 5＋5；使用独立的 configs/cookie_same_column.yaml。
+python -u examples/run_cookie_same_column.py --render --max-steps 6000
 ```
 
 窗口中鼠标左键拖动旋转视角，右键拖动平移，滚轮缩放。
@@ -43,15 +116,15 @@ python -u examples/run_cookie_batch.py --render --max-steps 6000
 ### 不开窗口，保存结果
 
 ```bash
-python -u examples/run_cookie_batch.py --seed 0 --max-steps 6000 \
+python -u examples/run_cookie_same_column.py --seed 0 --max-steps 6000 \
   --output artifacts/my_cookie_batch_eval.json
 
 # 可选：阶段截图，用于诊断，不是训练数据。
-MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
   --snapshots artifacts/batch_snapshots --debug
 
 # 查看所有可用参数。
-python examples/run_cookie_batch.py --help
+python examples/run_cookie_same_column.py --help
 ```
 
 成功应同时看到 `success: true`、`phase: DONE`、目标盒 10 块、源盒 70 块，
@@ -60,16 +133,22 @@ python examples/run_cookie_batch.py --help
 
 ### 这次具体改了什么
 
-- **模型**：饼干约 50 × 6.333 × 25 mm，上下边缘做 2.5 mm、45° 倒角，底部保留平面。
-  batch 使用箱体核心＋上下倒角碰撞体，保留外形和碰撞质量，不把饼干绑定到夹爪。
+以下改动指独立的同列版本；原 `run_cookie_batch.py`、`cookie_batch.yaml`
+和原批次专家保留为跨列基线。
+
+- **模型**：饼干约 50 × 6.333 × 25 mm；上缘保留 2.5 mm 倒角供夹爪导入，
+  batch 下缘改为 1 mm 倒角以扩大落地支撑面。箱体核心＋上下倒角碰撞体保留真实接触，
+  不把饼干绑定到夹爪。仅 batch 配置把左指垫厚度改为 1 mm；其他场景仍用原尺寸。
 - **场景**：仍为 4 × 20 共 80 块；batch 的间隙改为 2.5 mm，未预留整根手指宽的通道。
   目标盒加宽并移到左臂可达位置，放在桌上；原默认场景的 0.4 mm 间隙保留。
-- **闭环控制**：读取实际位置、姿态、接触和抬升情况，选择露出端连续直立的五块，
+- **闭环控制**：读取实际位置、姿态、接触和抬升情况，依次选择同一列的 0–4、5–9，
   先保持张开接近抓取点上方，再把夹爪预闭合到批次宽度并确认实测开度稳定，随后插入、
   夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
-  邻近饼干倾倒时跳过受阻端，而不是继续向下硬压；没有自动扶正功能。
+  第二批若倾斜，会先尝试低力拨正，再使夹爪沿实测倾角进入；后侧指垫以第 9、10 块
+  间的实测缝隙为基准保持位置，由前侧指垫收拢。若缝隙实际小于指垫厚度则停止，
+  不穿模、不预留专门空道，也不自动切换到另一列冒充同列成功。
 - **物理参数**：batch 默认物理 1000 Hz、控制 20 Hz、滑动摩擦系数 0.8。
-  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 8 N 会失败退出。
+  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 20 N 会失败退出。
   这些均为仿真参数，并非真实硬件的标定值或安全保证。
 - **判定**：要求十块释放后直立、稳定、完整进入小盒，源盒仍有七十块；
   不再要求 batch 满足旧任务的精确槽位／四面贴壁条件。
@@ -78,8 +157,11 @@ python examples/run_cookie_batch.py --help
 
 `artifacts/cookie_batch_baseline_seed0.json` 保存的是此前固定布局 seed 0 的 5＋5
 基线：1844 个控制步、目标盒 10 块、源盒 70 块；两批为 ID 0–4 与 20–24，最大指垫力
-约 4.48 N。当前版本改变了初始姿态与抓取阶段，已验证模型、预闭合状态机和短程无头运行，
-**尚未重新完成整轮 5＋5 长程验收**；在新的报告出现前，不应把旧基线当作本版本的成功证明。
+约 4.48 N。当前同列版本的 seed 0 无窗口实测见
+`artifacts/cookie_batch_same_column_seed0.json`：1860 控制步、目标盒 10 块、源盒
+70 块，先抓 ID 0–4，再抓同列 ID 5–9；两批均 `lifted: 5`、`released: true`，
+最大指垫力约 1.37 N。第一批后剩余饼干保持直立，因而**这轮验证的是同列搬运，
+不是倾倒后的倾角抓取成功**。倾斜抓取分支目前仍属于实验性功能。
 
 ![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
 
@@ -92,14 +174,23 @@ python examples/run_cookie_batch.py --help
 
 | 文件 | 主要作用 |
 | --- | --- |
-| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 新版 5＋5 的场景、接触和控制参数 |
-| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 演示入口、结果 JSON、诊断截图 |
-| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 五块选择、闭环状态机、抬升／释放验证 |
+| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 原跨列 5＋5 场景配置 |
+| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列 5＋5 的薄指垫、下倒角等配置 |
+| [configs/cookie_two_box.yaml](configs/cookie_two_box.yaml) | 缩窄工作盒并加入可推动备用盒的独立场景配置 |
+| [configs/cookie_two_box_batch.yaml](configs/cookie_two_box_batch.yaml) | 双盒批量接力的独立场景配置 |
+| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 原跨列 0–4、20–24 演示入口 |
+| [examples/run_cookie_same_column.py](examples/run_cookie_same_column.py) | 同列 0–4、5–9 演示、结果 JSON、诊断截图 |
+| [examples/run_cookie_two_box_batch.py](examples/run_cookie_two_box_batch.py) | 双盒接力演示、状态输出和 JSON 评估报告 |
+| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 原跨列批次专家 |
+| [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家与倾斜抓取实验逻辑 |
+| [src/a3_dual_arm_sim/two_box_batch.py](src/a3_dual_arm_sim/two_box_batch.py) | 双盒调度、右臂推满盒与夹移空盒 |
 | [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 场景与倒角碰撞模型生成 |
 | [src/a3_dual_arm_sim/cookie_transfer.py](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干任务、接触查询、计数与成功判定 |
 | [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与原场景默认参数 |
 | [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 原逐块 Expert 与共享运动规划 |
-| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 新版选取、接触链、失败保护等回归测试 |
+| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 原跨列批次专家回归测试 |
+| [tests/test_cookie_same_column.py](tests/test_cookie_same_column.py) | 同列版选取、接触链、失败保护等回归测试 |
+| [tests/test_cookie_two_box_batch.py](tests/test_cookie_two_box_batch.py) | 双盒几何、可达性和局部物理动作检查 |
 
 ```bash
 python -m pytest tests/test_cookie_batch.py tests/test_model.py tests/test_cookie_transfer.py \
@@ -649,7 +740,8 @@ action mode, canonical stored action mode, seed, task, frame count, and optional
 
 ## Beveled-Cookie batch expert (experimental)
 
-`run_cookie_batch.py` is the separate five-at-a-time controller; the original
+`run_cookie_batch.py` preserves the original 0–4 then 20–24 five-at-a-time
+baseline. `run_cookie_same_column.py` is the separate 0–4 then 5–9 version;
 `run_cookie_transfer.py` still runs the single-Cookie expert.
 
 ```bash
@@ -657,29 +749,37 @@ action mode, canonical stored action mode, seed, task, frame count, and optional
 unset MUJOCO_GL
 python -u examples/run_cookie_batch.py --render
 
+# Same source column, with its own expert and config.
+python -u examples/run_cookie_same_column.py --render
+
 # Headless evaluation; write only the requested JSON result.
-python -u examples/run_cookie_batch.py --seed 0 --output artifacts/batch_eval_seed0.json
+python -u examples/run_cookie_same_column.py --seed 0 --output artifacts/batch_eval_seed0.json
 
 # Controlled parameter comparison; the coefficient stays constant throughout.
-python -u examples/run_cookie_batch.py --sliding-friction 0.8 --physics-hz 1000
+python -u examples/run_cookie_same_column.py --sliding-friction 0.8 --physics-hz 1000
 
 # Optional diagnostic screenshots (not training observations).
-MUJOCO_GL=egl python -u examples/run_cookie_batch.py \
+MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
   --snapshots artifacts/batch_snapshots --debug
 ```
 
-The batch configuration is `configs/cookie_batch.yaml`. Cookie dimensions and
-2.5 mm bevels are unchanged. The source has 80 Cookies, with a uniform 2.5 mm gap
-instead of 0.4 mm; there are **no pre-cut finger-width lanes**. The left gripper
+The same-column configuration is `configs/cookie_same_column.yaml`. Cookie dimensions are
+unchanged. The upper bevel remains 2.5 mm; the lower bevel is 1 mm to widen
+the uniform support base. Only this batch configuration uses a 1 mm left
+fingertip; the other grippers retain their original pad geometry. The source
+has 80 Cookies, with a uniform initial 2.5 mm gap instead of 0.4 mm; there are
+**no pre-cut finger-width lanes**. The left gripper
 first reaches the pose above the Cookies with fully open jaws, then pre-closes
 to the computed five-Cookie width and waits for the measured opening to settle.
 It descends slowly through the bevels, compresses five neighbouring Cookies, checks
 a contact chain through all five, and verifies that each actually rises. The
-second batch prefers the same column after the first five are removed. If a
-neighbour tips during extraction, the expert skips that obstructed end and
-selects five upright Cookies at the opposite exposed end (then another column
-if necessary). It does not keep pushing into the fallen Cookie.
-Insertion stops if either pad exceeds 8 N for three consecutive control ticks;
+second batch must take the next five from the same source column. If they tip,
+the controller first attempts low-force base straightening, then aligns the
+gripper with the measured tilt and descends along the Cookie axis. It measures
+the actual gap after the fifth Cookie and anchors the far pad in that gap while
+closing the near pad. If the gap is narrower than the pad, it reports failure
+instead of penetrating the neighbour or quietly switching columns.
+Insertion stops if either pad exceeds 20 N for three consecutive control ticks;
 this is a simulation guard, not a calibrated real-hardware force limit.
 The target box is widened to leave space for the fingers to open and retract.
 Its table position is moved to (0.095, 0.100, 0.753) m so both columns are
@@ -721,8 +821,67 @@ remaining ends of the first column had tilted. Maximum measured pad force was
 Thirty relevant model/contact/task tests passed; this is not a full legacy-expert
 suite pass or a randomized-layout success-rate result.
 
-Known limitations: neighbouring Cookies can still tip and are skipped, not
-restored. Throughput is not yet optimized: the development headless replay took
+Current same-column validation (fixed layout, seed 0):
+`artifacts/cookie_batch_same_column_seed0.json` reports success at step
+1860 with IDs 0–4 and then 5–9, both lifted and released, ten upright/settled
+in the target, seventy left in the source, and maximum pad force 1.37 N.
+The wider lower support prevented the remaining Cookies from tipping in this
+replay, so this is **not** evidence that a fallen five-Cookie batch can yet be
+recovered. The angled insertion branch is guarded by measured gap and contact
+force, but still needs a physically tilted successful replay. Throughput is
+not yet optimized: the earlier development headless replay took
 about 21 minutes for roughly 92 seconds of simulated control, with another
 diagnostic replay running concurrently. Do not expect real-time playback or
 start large dataset collection on the basis of this one fixed-layout baseline.
+
+## Two-box batch relay (experimental)
+
+This is a separate workflow, using `configs/cookie_two_box_batch.yaml` and
+`examples/run_cookie_two_box_batch.py`; it does not replace either single-box
+baseline. The left arm fills box A in two five-Cookie batches. The right arm
+physically pushes full A away, grips the rear wall of empty B and slides B
+into the filling station. The left arm then fills B in two more batches.
+There are no physical guide rails and neither box nor Cookies are teleported
+during execution. This is a simulator-truth, rule-based expert, not a VLA.
+
+From the repository root in WSL, run the complete visual trial:
+
+```bash
+conda activate a3sim
+unset MUJOCO_GL
+python -u examples/run_cookie_two_box_batch.py \
+  --config configs/cookie_two_box_batch.yaml \
+  --render --debug --max-steps 6000
+```
+
+`--debug` reports progress every 100 control steps. For a faster headless
+trial and a JSON evaluation report, omit `--render` and add
+`--output artifacts/cookie_two_box_batch_check.json`. The report is **not**
+a training dataset, and the runner does not record demonstrations. A complete
+result requires 10 released upright Cookies in each box, 60 remaining in the
+source, full A pushed clear, and B within 8 mm of the filling station.
+Check `success`, `box_a_cookie_count`, `box_b_cookie_count`, and
+`failure_reason` in the final JSON.
+
+For small edits, run the fast geometry/reachability checks first:
+
+```bash
+python -m pytest -q tests/test_cookie_two_box_batch.py \
+  -k 'config_is_separate or coordinator_starts or pusher_can_reach or fast_exchange_geometry'
+```
+
+If the right-arm motion changes, run the isolated physical push and carry
+tests before repeating the full trial:
+
+```bash
+python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_pusher_clears_a_without_moving_spare_box
+python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_gripper_carries_spare_box_into_station_without_rotation
+```
+
+After extending A's push distance, the operator reported one complete visual
+run on the current fixed layout. No JSON report for that successful run has
+been committed, so this README does not claim a measured step count or a
+multi-seed success rate. A previous failure in B's second transfer was with
+older push parameters. Changing `--seed` alone does not randomize the Cookie
+layout; random-layout robustness and dataset-collection suitability remain
+unverified.

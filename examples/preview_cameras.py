@@ -29,15 +29,16 @@ def main() -> int:
     parser.add_argument(
         "--scene", choices=("sandbox", "cookie_transfer"), default="cookie_transfer"
     )
+    parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("outputs/camera_preview"))
     parser.add_argument("--show", action="store_true", help="Open the labeled camera preview")
     args = parser.parse_args()
 
     env = (
-        A3CookieTransferEnv(render_cameras=True)
+        A3CookieTransferEnv(config=args.config, render_cameras=True)
         if args.scene == "cookie_transfer"
-        else A3DualArmEnv(render_cameras=True)
+        else A3DualArmEnv(config=args.config, render_cameras=True)
     )
     try:
         options = {"randomize_cookies": False} if args.scene == "cookie_transfer" else None

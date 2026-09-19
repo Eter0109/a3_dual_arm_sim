@@ -49,10 +49,12 @@ class CookieSceneConfig:
     box_lift_m: float = 0.030
     box_tilt_deg: float = 8.0
     left_gripper_kp: float = 400.0
+    left_finger_pad_half_thickness_m: float = 0.003175
     right_gripper_kp: float = 2000.0
     right_grasp_pitch_deg: float = 0.0
     cookie_half_size_m: tuple[float, ...] = COOKIE_HALF_SIZE
     cookie_edge_bevel_m: float = COOKIE_EDGE_BEVEL_M
+    cookie_bottom_edge_bevel_m: float | None = None
     cookie_collision_mode: str = "mesh"
     cookie_mass_kg: float = 0.035 / 6
     cookie_friction: tuple[float, ...] = (2.0, 0.03, 0.002)
@@ -72,6 +74,7 @@ class CookieSceneConfig:
     target_bin_wall_height_m: float = 0.031
     # Match source columns 0/1 and the same row lattice, across the box gap.
     target_bin_world_position_m: tuple[float, ...] = (0.1246, -0.01156666666666667, 0.753)
+    spare_target_bin_world_position_m: tuple[float, ...] | None = None
     target_bin_attach_position_m: tuple[float, ...] = (-0.284576, -0.120338, 0.077169)
     target_bin_attach_quaternion: tuple[float, ...] = (
         0.368302,
@@ -160,6 +163,9 @@ class SimConfig:
             raise ValueError("cookie_transfer must contain at least 10 source positions")
         if len(self.cookie_transfer.target_slots_local_m) != 10:
             raise ValueError("cookie_transfer must contain exactly 10 target slots")
+        spare_position = self.cookie_transfer.spare_target_bin_world_position_m
+        if spare_position is not None and len(spare_position) != 3:
+            raise ValueError("spare_target_bin_world_position_m must contain three values")
         if len(self.cookie_transfer.deployment_home) != 16:
             raise ValueError("cookie_transfer.deployment_home must contain 16 values")
 
@@ -205,7 +211,18 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         cookie_edge_bevel_m=float(
             cookie_raw.get("cookie_edge_bevel_m", defaults.cookie_edge_bevel_m)
         ),
+        cookie_bottom_edge_bevel_m=(
+            None
+            if cookie_raw.get("cookie_bottom_edge_bevel_m") is None
+            else float(cookie_raw["cookie_bottom_edge_bevel_m"])
+        ),
         cookie_mass_kg=float(cookie_raw.get("cookie_mass_kg", defaults.cookie_mass_kg)),
+        left_finger_pad_half_thickness_m=float(
+            cookie_raw.get(
+                "left_finger_pad_half_thickness_m",
+                defaults.left_finger_pad_half_thickness_m,
+            )
+        ),
         cookie_collision_mode=str(
             cookie_raw.get("cookie_collision_mode", defaults.cookie_collision_mode)
         ),
@@ -250,6 +267,15 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             cookie_raw,
             "target_bin_world_position_m",
             defaults.target_bin_world_position_m,
+        ),
+        spare_target_bin_world_position_m=(
+            _float_tuple(
+                cookie_raw,
+                "spare_target_bin_world_position_m",
+                defaults.target_bin_world_position_m,
+            )
+            if cookie_raw.get("spare_target_bin_world_position_m") is not None
+            else None
         ),
         target_bin_attach_position_m=_float_tuple(
             cookie_raw,
