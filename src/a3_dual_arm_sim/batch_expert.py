@@ -148,8 +148,15 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.max_pad_force = max(self.max_pad_force, float(max(total_forces)))
         return nodes <= seen and bool(np.all(forces > 0.12)), forces
 
-    def _insertion_jammed(self, forces):
-        self._jam_count = self._jam_count + 1 if max(forces) > self.MAX_INSERTION_FORCE_N else 0
+    def _insertion_jammed(self, forces, limit=None):
+        """Whether the pads have been over ``limit`` newtons for three cycles.
+
+        ``limit`` lets a variant tighten the threshold for one specific move
+        (the same-column expert does this for its base-push, which meets the
+        Cookie edges side-on and would otherwise read as a normal insertion).
+        """
+        threshold = self.MAX_INSERTION_FORCE_N if limit is None else limit
+        self._jam_count = self._jam_count + 1 if max(forces) > threshold else 0
         return self._jam_count >= 3
 
     def _servo(self, position, rotation, opening, speed=0.0015):

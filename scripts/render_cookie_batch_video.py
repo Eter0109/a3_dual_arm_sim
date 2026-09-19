@@ -130,12 +130,6 @@ def main() -> int:
     parser.add_argument("--fps", type=int, default=0, help="0 derives fps from --every")
     parser.add_argument("--crf", type=int, default=23)
     parser.add_argument("--no-fast-render", action="store_true")
-    parser.add_argument(
-        "--recover",
-        action="store_true",
-        help="Record the experimental recovery expert instead of the batch expert "
-        "(it ploughs the Cookies a batch left leaning back upright)",
-    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -147,20 +141,8 @@ def main() -> int:
     fps = args.fps or max(1, control_hz // max(args.every, 1))
 
     observation, _ = env.reset(seed=args.seed, options={"randomize_cookies": False})
-    if args.recover:
-        from a3_dual_arm_sim.recovery_expert import A3CookieRecoveryExpert
-
-        expert = A3CookieRecoveryExpert(env)
-    else:
-        expert = A3CookieBatchExpert(env)
+    expert = A3CookieBatchExpert(env)
     expert.reset()
-
-    def status_line() -> str:
-        """Batch status, or the stroke stage while a recovery is running."""
-        stage = getattr(expert, "_stage", None)
-        if stage is not None and stage.name != "IDLE":
-            return expert.recovery_status
-        return expert.status
 
     font_big = load_font(19)
     font_small = load_font(15)
@@ -189,13 +171,13 @@ def main() -> int:
                     for name in PANEL_CAMERAS
                 }
                 encoder.add(build_frame(
-                    view, panels, step=step, status=status_line(), info=info,
+                    view, panels, step=step, status=expert.status, info=info,
                     font_big=font_big, font_small=font_small,
                 ))
                 rendered += 1
                 if rendered % 40 == 0:
                     done = time.time() - started
-                    print(f"  step {step:5d} {status_line()} "
+                    print(f"  step {step:5d} {expert.status} "
                           f"({done:.0f}s, {rendered} frames)", flush=True)
 
             if terminated or truncated or expert.failed:
