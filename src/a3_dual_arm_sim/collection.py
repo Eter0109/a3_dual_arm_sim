@@ -156,9 +156,10 @@ def collect_dataset(
       call, and the summary records the ranges that were in force.  Every batch
       scene wants this on: moving the source box translates the whole Cookie
       layout rigidly, so the 2.5 mm gaps the five-Cookie insertion enters are
-      preserved exactly (measured: per-Cookie deviation from the applied offset
-      is 0.000000 mm), and both batch experts still complete on randomized seeds
-      (measured: 3/3 seeds, 1855-1857 steps, against 1860 for the exact layout).
+      preserved (measured: per-Cookie deviation from the applied offset is
+      2.8e-17 m, float64 rounding of the same nominal numbers), and both batch
+      experts still complete on randomized seeds (measured: 3/3 seeds,
+      1855-1857 steps, against 1860 for the exact layout).
 
     * *Cookie* jitter (`position_noise_m` / `yaw_noise_rad`) moves each Cookie on
       its own, on top of the scene variation.  Only a scene with

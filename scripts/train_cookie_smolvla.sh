@@ -34,8 +34,9 @@ set -uo pipefail
 STEPS="${1:-20000}"
 BATCH_SIZE="${2:-4}"
 
-# Derived, not hardcoded, so a checkout anywhere works. Sibling collection scripts
-# use the same expression.
+# Derived, not hardcoded, so a checkout anywhere works. `collect_cookie.sh` uses
+# the same expression, and the dataset path below is what its default output name
+# produces.
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATASET="${PROJECT}/outputs/datasets/a3_cookie_overnight"
 BASE_MODEL="${PROJECT}/.runtime/smolvla_base"

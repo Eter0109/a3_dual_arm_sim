@@ -174,13 +174,16 @@ python examples/run_cookie_same_column.py --help
 
 | 文件 | 主要作用 |
 | --- | --- |
+| [scripts/README.md](scripts/README.md) | 按流程阶段索引全部运维脚本，以及它们共同遵守的约定 |
 | [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 原跨列 5＋5 场景配置 |
-| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列 5＋5 的薄指垫、下倒角等配置 |
+| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列 5＋5 的薄指垫、下倒角，以及 `randomization` 随机幅度 |
 | [configs/cookie_two_box.yaml](configs/cookie_two_box.yaml) | 缩窄工作盒并加入可推动备用盒的独立场景配置 |
 | [configs/cookie_two_box_batch.yaml](configs/cookie_two_box_batch.yaml) | 双盒批量接力的独立场景配置 |
 | [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 原跨列 0–4、20–24 演示入口 |
 | [examples/run_cookie_same_column.py](examples/run_cookie_same_column.py) | 同列 0–4、5–9 演示、结果 JSON、诊断截图 |
 | [examples/run_cookie_two_box_batch.py](examples/run_cookie_two_box_batch.py) | 双盒接力演示、状态输出和 JSON 评估报告 |
+| [src/a3_dual_arm_sim/tasks.py](src/a3_dual_arm_sim/tasks.py) | 任务词表（名称、提示词、成功契约），不依赖 MuJoCo |
+| [src/a3_dual_arm_sim/collection.py](src/a3_dual_arm_sim/collection.py) | 场景注册表与唯一的数据采集驱动 |
 | [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 原跨列批次专家 |
 | [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家与倾斜抓取实验逻辑 |
 | [src/a3_dual_arm_sim/two_box_batch.py](src/a3_dual_arm_sim/two_box_batch.py) | 双盒调度、右臂推满盒与夹移空盒 |
@@ -554,27 +557,85 @@ On the current host PyTorch reports no usable CUDA driver, so long CPU training 
 presented as the recommended workflow. TorchCodec may also warn on this installation; the recorder
 and trainer explicitly use the available PyAV image path.
 
+## Scene variation
+
+Every cookie scene varies itself between episodes, sized by a `randomization` section in its config:
+
+```yaml
+randomization:
+  source_bin_xy_m: [0.006, 0.006]    # half-range, so +/-6 mm; the Cookies follow the bin
+  target_bin_xy_m: [0.004, 0.004]
+  target_bin_yaw_rad: 0.05
+  spare_bin_xy_m: [0.0, 0.0]         # two-box scene only
+  spare_bin_yaw_rad: 0.0
+  arm_home_rad: 0.015                # per-joint jitter on both arms' start pose
+```
+
+All-zero restores the exact layout, and every scene behaved that way before this existed. Two kinds
+of variation are configured separately because they cost different things:
+
+* **Scene variation** moves the three boxes and jitters the arm's start pose. It is what makes a
+  dataset worth training on: with it at zero, every episode is the same picture and the same joint
+  trajectory, so a policy can reach a very low loss by memorising one trajectory instead of learning
+  to correct. Translating the source box carries the whole Cookie layout with it, so the 2.5 mm gaps
+  the five-Cookie insertion is aimed at are preserved: the per-Cookie deviation from the applied
+  offset is at the float64 epsilon (measured 2.8e-17 m, i.e. 2.8e-14 mm — rounding of the same
+  nominal numbers, not a changed gap). Both batch experts still complete on randomised seeds —
+  3/3 seeds in 1855–1857 steps, against 1860 for the exact layout.
+* **Per-Cookie jitter** (`position_noise_m` / `yaw_noise_rad`, passed to collection as
+  `--position-noise` / `--yaw-noise`) moves each Cookie on its own. The batch scenes turn it off: a
+  2 mm jitter is wider than the 2.5 mm gaps their insertion needs, and with it on both batch experts
+  fail immediately (measured: 0 accepted in 2 attempts). The single-Cookie scene uses it.
+
+The source box deliberately has **no yaw**. The batch experts find a row by grouping the configured
+layout on `x` (`np.isclose(source[:, 0], x)`), so a rotated layout would silently stop matching its
+own rows. Translating the box is free; rotating it needs that grouping rewritten first.
+
+The magnitudes are bounded by what the expert can absorb, not by the driver: the insertion is aimed
+at measured clearances, and the placement is solved against the target box's live frame. Widening a
+range therefore costs a validation run rather than an edit, and three facts have to hold before a
+new value can be trusted: the boxes must move by no more than asked, the Cookie layout must stay a
+rigid translation of the nominal one, and every Cookie must still register as inside the moved bin.
+`tests/test_collection_scenes.py` pins the last two, and
+`tests/test_cookie_collection.py` covers the collection wrapper they feed.
+
+`collection_summary.json` records the ranges actually in force, not the ones a caller asked for, so
+a dataset explains its own variation.
+
 ## Cookie-transfer VLA pipeline
 
 The cookie task has a complete collect → merge → train → evaluate → record loop under `scripts/`.
 These are standalone scripts rather than CLI subcommands because the later stages run on a Slurm GPU
 node, where MuJoCo cannot be imported at all - see the package docstring for why.
+`scripts/README.md` indexes every script by pipeline stage and lists the conventions they share.
 
 ### 1. Collect demonstrations in parallel shards
 
 ```bash
-# Default: 8 shards x 6 episodes, one dataset per shard.
-bash scripts/collect_cookie_nightly.sh
+# 8 shards x 6 episodes of the same-column scene, one dataset per shard.
+bash scripts/collect_cookie.sh a3_cookie_overnight a3_cookie_same_column
 
-# A second batch while the first still runs (separate output tree, separate seeds).
-bash scripts/collect_cookie_batch.sh a3_cookie_overnight_b 8 6 480
+# A second run while the first still goes needs its own output name and a
+# disjoint seed base, or the two sweeps overlap.
+bash scripts/collect_cookie.sh a3_cookie_second a3_cookie_same_column 8 6 480
 ```
 
 Each shard must own its output directory: LeRobot writes one parquet file and one video set per
 dataset, so concurrent writers cannot share a root. Seeds are interleaved across shards
-(`shard_index + attempt * shard_count`), so the union of shards is still one clean seed sweep. The
-underlying command is `a3-sim collect-cookie`, which also takes `--position-noise`, `--yaw-noise`,
-`--hold-steps`, and `--fast-render`.
+(`shard_index + attempt * shard_count`), so the union of shards is still one clean seed sweep.
+
+The second argument names a **registered scene**, not a config file. A scene bundles the environment,
+the scripted expert, and the dataset's success contract, so `a3-sim collect --scene <name>` is the
+only collection command and a new layout is a registry entry rather than another driver. Which
+scenes can actually collect is worth checking rather than assuming: the batch scenes do, while
+`a3_cookie_transfer` no longer does on the dense layout. `registered_scenes()` in
+`src/a3_dual_arm_sim/collection.py` lists them and each builder's docstring says what it needs.
+
+The underlying command is `a3-sim collect`, which also takes `--position-noise`, `--yaw-noise`,
+`--hold-steps`, `--shard-index`, `--shard-count`, and `--fast-render`. It writes a
+`collection_summary.json` recording the task, the success contract, the prompt, and the
+randomisation ranges that were in force, so a dataset explains itself without the script that made
+it.
 
 ### 2. Merge the shards into one training dataset
 
@@ -808,9 +869,10 @@ This batch trial intentionally uses a **tabletop target box**, with the right
 arm parked. Two top-down 2F85 housings interfere around the small box opening;
 continuous right-arm box holding is therefore not part of this baseline.
 The original cooperative single-Cookie example remains available separately.
-The runner currently fixes the Cookie layout: changing the seed alone is not a
-random-layout robustness test. This is an experimental contact-control baseline,
-not a guarantee of reliable demonstrations or a calibrated real-world model.
+The layout is randomised between episodes by the config's `randomization`
+section; see [Scene variation](#scene-variation). This is an experimental
+contact-control baseline, not a guarantee of reliable demonstrations or a
+calibrated real-world model.
 
 Reference validation (2026-09-17, fixed layout, seed 0): two full replays
 completed 5 + 5 in 1844 control steps, with 10 released/upright/settled Cookies
@@ -882,6 +944,7 @@ After extending A's push distance, the operator reported one complete visual
 run on the current fixed layout. No JSON report for that successful run has
 been committed, so this README does not claim a measured step count or a
 multi-seed success rate. A previous failure in B's second transfer was with
-older push parameters. Changing `--seed` alone does not randomize the Cookie
-layout; random-layout robustness and dataset-collection suitability remain
-unverified.
+older push parameters. The two-box scene has its own `randomization` ranges,
+including for the spare box; see [Scene variation](#scene-variation).
+Random-layout robustness at a wider range, and dataset-collection suitability,
+remain unverified.
