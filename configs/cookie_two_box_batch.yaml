@@ -2,6 +2,24 @@
 physics_hz: 1000
 control_hz: 20
 horizon: 12000
+# Scene randomization: all three boxes and the arm start pose move between
+# episodes.  The two tabletop boxes are only 86 mm apart, so it is their mutual
+# clearance rather than the arm that bounds the ranges here, and the spare box has
+# its own range and yaw.  The right arm grips the spare box's rear wall and slides
+# it into the station, so a rotated spare changes that grasp; its yaw is kept at
+# the same modest size as the working box's.
+randomization:
+  source_bin_x_m: [-0.060, 0.030]
+  source_bin_y_m: [-0.050, 0.050]
+  source_bin_yaw_rad: 0.05
+  target_bin_x_m: [-0.060, 0.020]
+  target_bin_y_m: [-0.030, 0.040]
+  target_bin_yaw_rad: 0.10
+  spare_bin_x_m: [-0.040, 0.040]
+  spare_bin_y_m: [-0.040, 0.040]
+  spare_bin_yaw_rad: 0.10
+  arm_home_rad: 0.04
+  min_box_clearance_m: 0.025
 cookie_transfer:
   left_gripper_kp: 1200.0
   left_finger_pad_half_thickness_m: 0.0005

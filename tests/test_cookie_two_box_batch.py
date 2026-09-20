@@ -18,6 +18,12 @@ from a3_dual_arm_sim.two_box_batch import (
 
 ROOT = Path(__file__).resolve().parents[1]
 DUAL_CONFIG = ROOT / "configs" / "cookie_two_box_batch.yaml"
+
+# These tests isolate a single controller against a known layout.  The two-box
+# scene randomises its boxes and the spare box's yaw between episodes, which would
+# make an assertion about absolute pose or reach depend on the seed, so every reset
+# here turns both switches off and gets the nominal layout back.
+FIXED_SCENE = {"randomize_cookies": False, "randomize_scene": False}
 SINGLE_CONFIG = ROOT / "configs" / "cookie_batch.yaml"
 
 
@@ -35,7 +41,7 @@ def test_dual_box_config_is_separate_from_single_box_reference():
 def test_dual_box_coordinator_starts_with_a_and_counts_boxes_independently():
     env = A3CookieTransferEnv(DUAL_CONFIG, render_cameras=False)
     try:
-        env.reset(seed=0, options={"randomize_cookies": False})
+        env.reset(seed=0, options=FIXED_SCENE)
         expert = TwoBoxBatchExpert(env)
         expert.reset()
         assert expert.stage == "FILL_A"
@@ -52,7 +58,7 @@ def test_dual_box_coordinator_starts_with_a_and_counts_boxes_independently():
 def test_right_pusher_can_reach_both_ends_of_both_lanes():
     env = A3CookieTransferEnv(DUAL_CONFIG, render_cameras=False)
     try:
-        env.reset(seed=0, options={"randomize_cookies": False})
+        env.reset(seed=0, options=FIXED_SCENE)
         for name, destination in (("target_bin", 0.120), ("spare_target_bin", 0.030)):
             pusher = RightBoxPushController(env, env.model.body(name).id, destination)
             for y in (pusher.start_y, destination - 0.040):
@@ -77,7 +83,7 @@ def test_right_pusher_clears_a_without_moving_spare_box():
         task_config=CookieTransferTaskConfig(cookie_count=20, terminate_on_success=False),
     )
     try:
-        env.reset(seed=0, options={"randomize_cookies": False})
+        env.reset(seed=0, options=FIXED_SCENE)
         b_id = env.model.body("spare_target_bin").id
         b_initial = env.data.xpos[b_id].copy()
         box_id = env.model.body("target_bin").id
@@ -113,7 +119,7 @@ def test_right_gripper_carries_spare_box_into_station_without_rotation():
         task_config=CookieTransferTaskConfig(cookie_count=20, terminate_on_success=False),
     )
     try:
-        env.reset(seed=0, options={"randomize_cookies": False})
+        env.reset(seed=0, options=FIXED_SCENE)
         a_joint = env.model.joint("target_bin_free")
         env.data.qpos[a_joint.qposadr + 1] = 0.105
         mujoco.mj_forward(env.model, env.data)
@@ -145,7 +151,7 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
     """A synthetic pose check in seconds; it is not an end-to-end rollout."""
     env = A3CookieTransferEnv(DUAL_CONFIG, render_cameras=False)
     try:
-        env.reset(seed=0, options={"randomize_cookies": False})
+        env.reset(seed=0, options=FIXED_SCENE)
         a_id = env.model.body("target_bin").id
         b_id = env.model.body("spare_target_bin").id
         a_addr = int(env.model.joint("target_bin_free").qposadr[0])

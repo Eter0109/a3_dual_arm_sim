@@ -13,6 +13,37 @@ from .contracts import ARM_JOINTS, ActionMode
 from .env import A3DualArmEnv
 
 
+def _yaw_quaternion(yaw: float) -> list[float]:
+    """A rotation about z only, so a box never tips or lifts."""
+
+    return [math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)]
+
+
+def _rotated_half_extent(half: np.ndarray, yaw: float) -> np.ndarray:
+    """Half extent of a rectangle's axis-aligned bounding box after a yaw.
+
+    A yawed box needs a wider berth than its unrotated half size, and the boxes
+    are only tens of millimetres apart, so ignoring this would let the clearance
+    check pass while the corners actually overlapped.
+    """
+
+    cos, sin = abs(math.cos(yaw)), abs(math.sin(yaw))
+    return np.array(
+        [cos * half[0] + sin * half[1], sin * half[0] + cos * half[1]],
+        dtype=np.float64,
+    )
+
+
+def _rotate_xy(vector: np.ndarray, yaw: float) -> np.ndarray:
+    """Rotate a 2-D offset about z, so a Cookie can follow its bin's yaw."""
+
+    cos, sin = math.cos(yaw), math.sin(yaw)
+    return np.array(
+        [cos * vector[0] - sin * vector[1], sin * vector[0] + cos * vector[1]],
+        dtype=np.float64,
+    )
+
+
 @dataclass(frozen=True)
 class CookieTransferTaskConfig:
     cookie_count: int = 80
@@ -120,6 +151,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
         #: still reads a sane pose.
         self._randomized_deployment_home = self.DEPLOYMENT_HOME.copy()
         self._scene_offset = np.zeros(2, dtype=np.float64)
+        #: Source-bin yaw for this episode, so the Cookies can follow it.
+        self._scene_yaw = 0.0
         self._scene_randomization_applied = False
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
         self._source_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "source_bin")
@@ -275,8 +308,16 @@ class A3CookieTransferEnv(A3DualArmEnv):
         drawn in an order that does not change the rest of the reset, so a config
         with all-zero ranges is byte-identical to one without this feature.
 
-        The target box keeps its floor contact: only XY and yaw are drawn, so it
-        never starts floating or sunk.  Same for the spare box.
+        All three boxes are drawn together and then checked as a set, because the
+        constraint that matters is between them rather than on any one of them: the
+        source and target boxes are only tens of millimetres apart, and a draw that
+        puts them into each other is discarded and redrawn.  The source box is a
+        mocap body with infinite mass, so such a collision would shove the target
+        box out of the pose the expert planned for instead of being resolved
+        between them.
+
+        Only XY and yaw are drawn, so every box keeps its configured height and
+        never starts floating or sunk.
 
         ``_randomized_deployment_home`` is stored rather than applied here, because
         ``reset`` writes the home after this returns.
@@ -285,75 +326,146 @@ class A3CookieTransferEnv(A3DualArmEnv):
         scene = self.config.randomization
         self._randomized_deployment_home = self.DEPLOYMENT_HOME.copy()
         self._scene_randomization_applied = scene.enabled
+        self._scene_yaw = 0.0
         if not scene.enabled:
             return np.zeros(2)
 
         rng = self.np_random
-        # 1. Source bin.  Translating it is enough to vary the reach, and its yaw
-        #    is deliberately not drawn: the experts group the layout by `x` to find
-        #    a row, which a rotation would break.
-        source_range = np.asarray(scene.source_bin_xy_m, dtype=np.float64)
-        offset = np.asarray(rng.uniform(-source_range, source_range, size=2), dtype=np.float64)
+        spare_nominal = self.config.cookie_transfer.spare_target_bin_world_position_m
+        has_spare = self._spare_bin_body >= 0 and spare_nominal is not None
+        for attempt in range(1, scene.max_clearance_attempts + 1):
+            source_offset = np.array(
+                [scene.source_bin_x_m.draw(rng), scene.source_bin_y_m.draw(rng)]
+            )
+            source_yaw = scene.source_bin_yaw_rad.draw(rng)
+            target = np.asarray(
+                self.config.cookie_transfer.target_bin_world_position_m[:2],
+                dtype=np.float64,
+            ) + np.array([scene.target_bin_x_m.draw(rng), scene.target_bin_y_m.draw(rng)])
+            target_yaw = scene.target_bin_yaw_rad.draw(rng)
+            spare = None
+            spare_yaw = 0.0
+            if has_spare:
+                spare = np.asarray(spare_nominal[:2], dtype=np.float64) + [
+                    scene.spare_bin_x_m.draw(rng),
+                    scene.spare_bin_y_m.draw(rng),
+                ]
+                spare_yaw = scene.spare_bin_yaw_rad.draw(rng)
+            if self._boxes_are_clear(
+                source_offset, source_yaw, target, target_yaw, spare, spare_yaw
+            ):
+                break
+        else:
+            raise RuntimeError(
+                f"no layout with {scene.min_box_clearance_m * 1000:.1f} mm of box "
+                f"clearance in {scene.max_clearance_attempts} draws; the "
+                f"randomization ranges ask for a layout that cannot exist. Narrow "
+                f"the box ranges or lower min_box_clearance_m."
+            )
+
+        # 1. Source bin.  Cookies are placed relative to the live body, so this
+        #    also carries them; `reset` adds the offset to every layout position.
         mocap_id = int(self.model.body_mocapid[self._source_bin_body])
         if mocap_id < 0:
             raise RuntimeError("the source_bin body is not a mocap body")
         nominal = self.SOURCE_NOMINAL_CENTER
-        self.data.mocap_pos[mocap_id] = [nominal[0] + offset[0], nominal[1] + offset[1], 0.0]
-        self.data.mocap_quat[mocap_id] = [1.0, 0.0, 0.0, 0.0]
+        self.data.mocap_pos[mocap_id] = [
+            nominal[0] + source_offset[0],
+            nominal[1] + source_offset[1],
+            0.0,
+        ]
+        self.data.mocap_quat[mocap_id] = _yaw_quaternion(source_yaw)
+        self._scene_yaw = float(source_yaw)
 
-        # 2. Working box: XY plus yaw, about its own centre.
-        self._place_free_box(
-            self._target_bin_body,
-            np.asarray(self.config.cookie_transfer.target_bin_world_position_m[:2]),
-            scene.target_bin_xy_m,
-            scene.target_bin_yaw_rad,
-        )
-        # 3. Spare box, when the scene has one.
-        spare_nominal = self.config.cookie_transfer.spare_target_bin_world_position_m
-        if self._spare_bin_body >= 0 and spare_nominal is not None:
-            self._place_free_box(
-                self._spare_bin_body,
-                np.asarray(spare_nominal[:2]),
-                scene.spare_bin_xy_m,
-                scene.spare_bin_yaw_rad,
-            )
+        # 2. Working box, and 3. the spare when the scene has one.
+        self._place_free_box(self._target_bin_body, target, target_yaw)
+        if spare is not None:
+            self._place_free_box(self._spare_bin_body, spare, spare_yaw)
 
         # 4. Arm start pose.  This is the variation that matters most for a policy:
         #    with it at zero every episode begins from a byte-identical pose, so a
         #    policy can score well by memorising one trajectory.
-        if scene.arm_home_rad:
-            jitter = rng.uniform(-scene.arm_home_rad, scene.arm_home_rad, size=7)
+        if scene.arm_home_rad.movable:
+            jitter = np.array(
+                [scene.arm_home_rad.draw(rng) for _ in range(7)], dtype=np.float64
+            )
             for side, base in (("left", 0), ("right", 8)):
                 self._randomized_deployment_home[base : base + 7] += jitter
-        return offset
+        return source_offset
 
-    def _place_free_box(
+    @property
+    def _source_bin_half_xy(self) -> np.ndarray:
+        """Source bin half size in XY, walls included, from the config.
+
+        The config rather than the geoms: the clearance check runs before the body
+        has been moved into place, so the live extents would describe the previous
+        episode's pose.
+        """
+
+        scene = self.config.cookie_transfer
+        return np.asarray(scene.source_bin_half_size_m, dtype=np.float64) + float(
+            scene.bin_wall_thickness_m
+        )
+
+    @property
+    def _target_bin_half_xy(self) -> np.ndarray:
+        """Half size in XY of a tabletop box, walls included."""
+
+        scene = self.config.cookie_transfer
+        return np.asarray(scene.target_bin_half_size_m, dtype=np.float64) + float(
+            scene.bin_wall_thickness_m
+        )
+
+    def _boxes_are_clear(
         self,
-        body: int,
-        nominal_xy: np.ndarray,
-        xy_half_range: tuple[float, float],
-        yaw_half_range: float,
-    ) -> None:
+        source_offset: np.ndarray,
+        source_yaw: float,
+        target: np.ndarray,
+        target_yaw: float,
+        spare: np.ndarray | None,
+        spare_yaw: float,
+    ) -> bool:
+        """Whether the drawn layout leaves every pair of boxes far enough apart.
+
+        A yawed box needs a bigger berth than its half size suggests, so each pair
+        is checked against the axis-aligned extent of the *rotated* rectangle.  Two
+        boxes are apart if they are apart on either axis, which is the largest
+        per-axis gap rather than the smallest -- boxes side by side in y are not
+        overlapping merely because they share an x range.
+        """
+
+        clearance = self.config.randomization.min_box_clearance_m
+        source_half = self._source_bin_half_xy
+        target_half = self._target_bin_half_xy
+        boxes = [
+            (self.SOURCE_NOMINAL_CENTER + source_offset, source_half, source_yaw),
+            (target, target_half, target_yaw),
+        ]
+        if spare is not None:
+            boxes.append((spare, target_half, spare_yaw))
+        for index, (centre, half, yaw) in enumerate(boxes):
+            for other_centre, other_half, other_yaw in boxes[index + 1 :]:
+                extent = _rotated_half_extent(half, yaw)
+                other_extent = _rotated_half_extent(other_half, other_yaw)
+                gap = np.maximum(
+                    (centre - extent) - (other_centre + other_extent),
+                    (other_centre - other_extent) - (centre + extent),
+                )
+                if float(np.max(gap)) < clearance:
+                    return False
+        return True
+
+    def _place_free_box(self, body: int, xy: np.ndarray, yaw: float) -> None:
         """Write a free box's pose, keeping its configured height and roll/pitch."""
 
         joint = self.model.body_jntadr[body]
         address = self.model.jnt_qposadr[joint]
         nominal_z = float(self.data.qpos[address + 2])
-        xy_range = np.asarray(xy_half_range, dtype=np.float64)
-        dx, dy = self.np_random.uniform(-xy_range, xy_range, size=2)
-        yaw = float(self.np_random.uniform(-yaw_half_range, yaw_half_range))
-        self.data.qpos[address : address + 3] = [
-            nominal_xy[0] + dx,
-            nominal_xy[1] + dy,
-            nominal_z,
-        ]
-        self.data.qpos[address + 3 : address + 7] = [
-            math.cos(yaw / 2.0),
-            0.0,
-            0.0,
-            math.sin(yaw / 2.0),
-        ]
-        self.data.qvel[self.model.jnt_dofadr[joint] : self.model.jnt_dofadr[joint] + 6] = 0.0
+        self.data.qpos[address : address + 3] = [xy[0], xy[1], nominal_z]
+        self.data.qpos[address + 3 : address + 7] = _yaw_quaternion(yaw)
+        self.data.qvel[
+            self.model.jnt_dofadr[joint] : self.model.jnt_dofadr[joint] + 6
+        ] = 0.0
 
     def reset(
         self,
@@ -395,10 +507,15 @@ class A3CookieTransferEnv(A3DualArmEnv):
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
-            # The layout is expressed in the source bin's own frame, so a moved bin
-            # carries its Cookies with it.
-            base_x = base_x + self._scene_offset[0]
-            base_y = base_y + self._scene_offset[1]
+            # The layout is expressed in the source bin's own frame, so the bin's
+            # drawn pose carries the Cookies: rotate about the bin centre first,
+            # then translate.  Rotating the container without its contents would
+            # leave the Cookies axis-aligned inside a skewed bin -- the rows the
+            # expert enters would no longer be the rows the bin is holding.
+            local = np.array([base_x, base_y]) - self.SOURCE_NOMINAL_CENTER
+            turned = _rotate_xy(local, self._scene_yaw)
+            base = self.SOURCE_NOMINAL_CENTER + turned + self._scene_offset
+            base_x, base_y = float(base[0]), float(base[1])
             if randomize:
                 dx, dy = self.np_random.uniform(
                     -self.task_config.position_noise_m,
@@ -413,7 +530,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
                 )
             else:
                 dx = dy = yaw = 0.0
-            quaternion = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
+            # A Cookie inherits the bin's yaw, plus its own jitter.
+            orientation = yaw + self._scene_yaw
+            quaternion = (np.cos(orientation / 2), 0.0, 0.0, np.sin(orientation / 2))
             self.set_cookie_pose(index, (base_x + dx, base_y + dy, self.COOKIE_RESET_Z), quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)

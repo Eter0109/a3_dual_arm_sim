@@ -563,41 +563,60 @@ Every cookie scene varies itself between episodes, sized by a `randomization` se
 
 ```yaml
 randomization:
-  source_bin_xy_m: [0.006, 0.006]    # half-range, so +/-6 mm; the Cookies follow the bin
-  target_bin_xy_m: [0.004, 0.004]
-  target_bin_yaw_rad: 0.05
-  spare_bin_xy_m: [0.0, 0.0]         # two-box scene only
-  spare_bin_yaw_rad: 0.0
-  arm_home_rad: 0.015                # per-joint jitter on both arms' start pose
+  source_bin_x_m: [-0.060, 0.030]    # [low, high] offsets in metres
+  source_bin_y_m: [-0.050, 0.050]
+  source_bin_yaw_rad: 0.05           # a bare number means [-v, +v]
+  target_bin_x_m: [-0.100, 0.020]
+  target_bin_y_m: [-0.040, 0.060]
+  target_bin_yaw_rad: 0.10
+  spare_bin_x_m: [-0.040, 0.040]     # two-box scene only, with its own yaw
+  spare_bin_y_m: [-0.040, 0.040]
+  spare_bin_yaw_rad: 0.10
+  arm_home_rad: 0.04                 # per-joint jitter on both arms' start pose
+  min_box_clearance_m: 0.020         # a draw that closes this is redrawn
 ```
 
-All-zero restores the exact layout, and every scene behaved that way before this existed. Two kinds
-of variation are configured separately because they cost different things:
+All-zero restores the exact layout, and every scene behaved that way before this existed.
 
-* **Scene variation** moves the three boxes and jitters the arm's start pose. It is what makes a
-  dataset worth training on: with it at zero, every episode is the same picture and the same joint
+**The ranges are measured, not chosen.** The arm's workspace sets a limit per direction, and the
+offset at which the expert's own reachability check starts refusing is:
+
+| | +x | −x | +y | −y |
+| --- | --- | --- | --- | --- |
+| target box | 30 mm | 140 mm | 90 mm | 55 mm |
+| source box | 80 mm | 170 mm | 230 mm | 245 mm |
+
+The target box is the binding one, and it is far from centred: it can move 30 mm away from the arm
+but 140 mm towards it, so a symmetric ±30 mm range would waste most of the space the arm can serve.
+That is why ranges are asymmetric `[low, high]` rather than a half-range. The configured spans reach
+about 9–12 cm per axis, which is roughly the reach limit minus a margin.
+
+The source and target boxes are only 66.9 mm apart, so what binds a *combined* move is their mutual
+clearance, not the arm: a draw that leaves them closer than `min_box_clearance_m` is discarded and
+redrawn, and ranges that cannot satisfy it raise instead of quietly falling back. The source box is
+a mocap body with infinite mass, so a collision would shove the target box out of the pose the
+expert planned for rather than being resolved between them.
+
+Yaw is available on all three boxes, including the source, and the Cookies inherit the source box's
+yaw — they are rotated about the bin centre and then translated, so the 2.5 mm gaps and the row
+pitch are preserved. Measured on randomised seeds: 4/4 complete, 1814–1855 steps.
+
+Two kinds of variation are configured separately because they cost different things:
+
+* **Scene variation** (the above) moves the boxes and jitters the arm's start pose. It is what makes
+  a dataset worth training on: with it at zero, every episode is the same picture and the same joint
   trajectory, so a policy can reach a very low loss by memorising one trajectory instead of learning
-  to correct. Translating the source box carries the whole Cookie layout with it, so the 2.5 mm gaps
-  the five-Cookie insertion is aimed at are preserved: the per-Cookie deviation from the applied
-  offset is at the float64 epsilon (measured 2.8e-17 m, i.e. 2.8e-14 mm — rounding of the same
-  nominal numbers, not a changed gap). Both batch experts still complete on randomised seeds —
-  3/3 seeds in 1855–1857 steps, against 1860 for the exact layout.
+  to correct.
 * **Per-Cookie jitter** (`position_noise_m` / `yaw_noise_rad`, passed to collection as
   `--position-noise` / `--yaw-noise`) moves each Cookie on its own. The batch scenes turn it off: a
   2 mm jitter is wider than the 2.5 mm gaps their insertion needs, and with it on both batch experts
   fail immediately (measured: 0 accepted in 2 attempts). The single-Cookie scene uses it.
 
-The source box deliberately has **no yaw**. The batch experts find a row by grouping the configured
-layout on `x` (`np.isclose(source[:, 0], x)`), so a rotated layout would silently stop matching its
-own rows. Translating the box is free; rotating it needs that grouping rewritten first.
-
-The magnitudes are bounded by what the expert can absorb, not by the driver: the insertion is aimed
-at measured clearances, and the placement is solved against the target box's live frame. Widening a
-range therefore costs a validation run rather than an edit, and three facts have to hold before a
-new value can be trusted: the boxes must move by no more than asked, the Cookie layout must stay a
-rigid translation of the nominal one, and every Cookie must still register as inside the moved bin.
-`tests/test_collection_scenes.py` pins the last two, and
-`tests/test_cookie_collection.py` covers the collection wrapper they feed.
+Each widening has to be paid for by a validation run — the insertion is aimed at measured clearances
+and the placement is solved against the target box's live frame, so both bound what a range can
+absorb. Three facts have to hold before a new value can be trusted: the boxes must move by no more
+than asked, the Cookie layout must stay a rigid transform of the nominal one, and every Cookie must
+still register as inside the moved bin. `tests/test_scene_randomization.py` pins all three.
 
 `collection_summary.json` records the ranges actually in force, not the ones a caller asked for, so
 a dataset explains its own variation.

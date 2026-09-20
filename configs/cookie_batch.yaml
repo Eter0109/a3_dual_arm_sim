@@ -1,4 +1,21 @@
 # Five-at-a-time bevel insertion. Uniform 2.5 mm gaps, no pre-cut finger lanes.
+#
+# Scene randomization: the two boxes and the arm start pose move between episodes.
+# Ranges are [low, high] offsets in metres (yaw in radians), asymmetric because the
+# arm's workspace is not centred on the nominal pose; see cookie_same_column.yaml
+# for the measured reach per direction that these stay inside.
+physics_hz: 1000
+control_hz: 20
+horizon: 6000
+randomization:
+  source_bin_x_m: [-0.060, 0.030]
+  source_bin_y_m: [-0.050, 0.050]
+  source_bin_yaw_rad: 0.05
+  target_bin_x_m: [-0.100, 0.020]
+  target_bin_y_m: [-0.040, 0.060]
+  target_bin_yaw_rad: 0.10
+  arm_home_rad: 0.04
+  min_box_clearance_m: 0.020
 physics_hz: 1000
 control_hz: 20
 horizon: 6000

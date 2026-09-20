@@ -223,15 +223,16 @@ def collect_dataset(
     accepted = 0
     # Read the scene's actual variation before the rollout loop, while the
     # environment is definitely alive: `runner.close()` shuts it down, and the
-    # summary has to state the ranges that were in force.
+    # summary has to state the ranges that were in force.  Each range is recorded
+    # as [low, high] in metres or radians, so a dataset says how far its boxes
+    # could move without anyone having to find the config.
+    randomization = env.config.randomization
     scene_randomization = {
-        "source_bin_xy": list(env.config.randomization.source_bin_xy_m),
-        "target_bin_xy": list(env.config.randomization.target_bin_xy_m),
-        "target_bin_yaw_rad": env.config.randomization.target_bin_yaw_rad,
-        "spare_bin_xy": list(env.config.randomization.spare_bin_xy_m),
-        "spare_bin_yaw_rad": env.config.randomization.spare_bin_yaw_rad,
-        "arm_home_rad": env.config.randomization.arm_home_rad,
+        name: [axis.low, axis.high]
+        for name, axis in randomization.axes().items()
+        if axis.movable
     }
+    scene_randomization["min_box_clearance_m"] = randomization.min_box_clearance_m
     try:
         for attempt in range(attempt_limit):
             seed = start_seed + shard_index + attempt * shard_count

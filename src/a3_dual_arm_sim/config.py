@@ -114,73 +114,156 @@ class HomeConfig:
 
 
 @dataclass(frozen=True)
+class AxisRange:
+    """A uniform draw over ``[low, high]`` for one axis of one thing.
+
+    Ranges are **asymmetric on purpose**.  The reachable region is not centred on
+    the nominal pose, and it is not symmetric: measured on the same-column scene,
+    the target box can move 30 mm away from the arm but 140 mm towards it, so a
+    symmetric +/-30 mm range would throw away 80% of the space the arm can
+    actually serve.  Stating both ends costs one more number and lets a range
+    follow the workspace.
+
+    ``(0.0, 0.0)`` means "do not move", which is what every scene did before
+    randomization existed, and what makes an all-zero config byte-identical to the
+    old behaviour.
+    """
+
+    low: float = 0.0
+    high: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.low) or not math.isfinite(self.high):
+            raise ValueError("range bounds must be finite")
+        if self.high < self.low:
+            raise ValueError(f"range high ({self.high}) is below low ({self.low})")
+        if self.high == self.low and self.low != 0.0:
+            raise ValueError(
+                f"degenerate range ({self.low}, {self.high}) is ambiguous: it would "
+                f"either mean 'never move' or 'always move by this much'. Write "
+                f"[{self.low}, {self.low} + something] for a fixed offset, or "
+                f"change the nominal pose instead."
+            )
+
+    @property
+    def movable(self) -> bool:
+        return self.high > self.low
+
+    @property
+    def midpoint(self) -> float:
+        return (self.low + self.high) / 2.0
+
+    @property
+    def half_span(self) -> float:
+        return (self.high - self.low) / 2.0
+
+    def draw(self, rng) -> float:
+        """One offset, or exactly zero when the range is empty."""
+
+        if not self.movable:
+            return 0.0
+        return float(rng.uniform(self.low, self.high))
+
+    def maximum_magnitude(self) -> float:
+        return max(abs(self.low), abs(self.high))
+
+
+@dataclass(frozen=True)
 class SceneRandomization:
     """How far each thing in the scene may move between episodes.
 
-    Every value is a **half-range**: the applied offset is drawn uniformly from
-    ``[-value, +value]``.  All-zero means "the exact layout", which is what every
-    scene did before this existed.
+    Every value is an :class:`AxisRange`: a uniform draw over ``[low, high]``,
+    where the offset is added to the nominal pose.  All-zero means "the exact
+    layout", which is what every scene did before this existed, and keeps an
+    episode byte-identical to one collected before the feature.
 
     This is *scene*-level variation, as opposed to the per-Cookie placement jitter
     in ``CookieTaskConfig``: the boxes move, and the Cookies move with the source
-    box because they are laid out relative to it.  The distinction matters for
-    what a policy can learn -- moving the arm, the source box and the target box
-    changes the whole picture and the whole motion, while jittering one Cookie by a
-    pixel does not.
+    box because they are laid out relative to it.  The distinction matters for what
+    a policy can learn -- moving the arm, the source box and the target box changes
+    the whole picture and the whole motion, while jittering one Cookie by a pixel
+    does not.
 
-    Why the source box has no yaw: the batch experts find a batch by grouping the
-    configured Cookie layout by ``x`` (``np.isclose(source[:, 0], x)``), so a
-    rotated source layout would silently stop matching its own rows.  Translating
-    the box is free; rotating it would need that grouping rewritten.
+    **Where the numbers come from.**  They are measured, not chosen: the arm's
+    workspace sets a limit per direction, and the boxes set another between them.
+    Measured reach on the same-column scene (offset at which the expert's own
+    check starts refusing):
+
+        target box   +x  30 mm   -x 140 mm   +y  90 mm   -y  55 mm
+        source box   +x  80 mm   -x 170 mm   +y 230 mm   -y 245 mm
+
+    and the source and target boxes are only 66.9 mm apart, so two ranges that
+    move them towards each other are bounded by that, not by the arm.  Configured
+    ranges stay well inside both, and :attr:`min_box_clearance_m` rejects a draw
+    that would close the gap anyway -- the source box is a mocap body with infinite
+    mass, so a collision would shove the target box out of the pose the expert
+    planned for rather than being resolved between them.
+
+    Yaw is available on all three boxes now, including the source.  It was
+    previously excluded because the batch experts group the layout by ``x``
+    (``np.isclose(source[:, 0], x)``); that grouping reads the *configured* layout
+    rather than the live poses, so it still resolves rows after a rotation -- what
+    needs checking is whether the insertion itself tolerates entering a rotated
+    row, which is measured rather than assumed.
     """
 
-    #: Source box translation, half-range per axis.  The Cookies follow it.
-    source_bin_xy_m: tuple[float, float] = (0.0, 0.0)
+    #: Source box translation, per axis in metres.  The Cookies follow it.
+    source_bin_x_m: AxisRange = field(default_factory=AxisRange)
+    source_bin_y_m: AxisRange = field(default_factory=AxisRange)
+    #: Source box yaw in radians, about its own centre.
+    source_bin_yaw_rad: AxisRange = field(default_factory=AxisRange)
     #: Working box translation and yaw.  Its slots rotate with it, and the experts
-    #: read the live box frame, so a modest yaw is safe.
-    target_bin_xy_m: tuple[float, float] = (0.0, 0.0)
-    target_bin_yaw_rad: float = 0.0
+    #: read the live box frame.
+    target_bin_x_m: AxisRange = field(default_factory=AxisRange)
+    target_bin_y_m: AxisRange = field(default_factory=AxisRange)
+    target_bin_yaw_rad: AxisRange = field(default_factory=AxisRange)
     #: Spare box translation and yaw.  Only present in the two-box scene.
-    spare_bin_xy_m: tuple[float, float] = (0.0, 0.0)
-    spare_bin_yaw_rad: float = 0.0
+    spare_bin_x_m: AxisRange = field(default_factory=AxisRange)
+    spare_bin_y_m: AxisRange = field(default_factory=AxisRange)
+    spare_bin_yaw_rad: AxisRange = field(default_factory=AxisRange)
     #: Per-joint jitter on the deployment home, giving each episode a different
     #: starting pose.  This is the variation the collection docstring used to call
     #: out as missing: with it at zero the arm starts byte-identical every episode,
     #: so a policy can memorise one joint trajectory.
-    arm_home_rad: float = 0.0
+    arm_home_rad: AxisRange = field(default_factory=AxisRange)
+    #: Smallest gap allowed between any two boxes' outer extents.  A draw that
+    #: would close it is discarded and redrawn; see :attr:`max_clearance_attempts`.
+    min_box_clearance_m: float = 0.015
+    #: How many draws to try before giving up.  Exhausting this is a configuration
+    #: error -- the ranges are asking for a layout that cannot exist -- and is
+    #: raised rather than silently falling back to a less varied episode.
+    max_clearance_attempts: int = 200
 
     @property
     def enabled(self) -> bool:
-        """Whether any of the above is non-zero."""
+        """Whether any range can actually move something."""
 
         return any(
-            (
-                any(self.source_bin_xy_m),
-                any(self.target_bin_xy_m),
-                self.target_bin_yaw_rad,
-                any(self.spare_bin_xy_m),
-                self.spare_bin_yaw_rad,
-                self.arm_home_rad,
-            )
+            axis.movable
+            for name, axis in self.axes().items()
         )
 
+    def axes(self) -> dict[str, AxisRange]:
+        """Every ranged quantity by name, for iteration and validation."""
+
+        return {
+            "source_bin_x_m": self.source_bin_x_m,
+            "source_bin_y_m": self.source_bin_y_m,
+            "source_bin_yaw_rad": self.source_bin_yaw_rad,
+            "target_bin_x_m": self.target_bin_x_m,
+            "target_bin_y_m": self.target_bin_y_m,
+            "target_bin_yaw_rad": self.target_bin_yaw_rad,
+            "spare_bin_x_m": self.spare_bin_x_m,
+            "spare_bin_y_m": self.spare_bin_y_m,
+            "spare_bin_yaw_rad": self.spare_bin_yaw_rad,
+            "arm_home_rad": self.arm_home_rad,
+        }
+
     def __post_init__(self) -> None:
-        if len(self.source_bin_xy_m) != 2 or len(self.target_bin_xy_m) != 2:
-            raise ValueError("box translation half-ranges must contain two values")
-        if len(self.spare_bin_xy_m) != 2:
-            raise ValueError("spare_bin_xy_m must contain two values")
-        for name in (
-            "source_bin_xy_m",
-            "target_bin_xy_m",
-            "target_bin_yaw_rad",
-            "spare_bin_xy_m",
-            "spare_bin_yaw_rad",
-            "arm_home_rad",
-        ):
-            values = getattr(self, name)
-            values = values if isinstance(values, tuple) else (values,)
-            if any(value < 0 or not math.isfinite(value) for value in values):
-                raise ValueError(f"{name} must be finite and non-negative")
+        if self.min_box_clearance_m < 0 or not math.isfinite(self.min_box_clearance_m):
+            raise ValueError("min_box_clearance_m must be finite and non-negative")
+        if self.max_clearance_attempts < 1:
+            raise ValueError("max_clearance_attempts must be positive")
 
 
 @dataclass(frozen=True)
@@ -253,31 +336,21 @@ def load_config(path: str | Path | None = None) -> SimConfig:
     home_raw = raw.pop("home", {})
     camera_raw = raw.pop("cameras", {})
     cookie_raw = raw.pop("cookie_transfer", {})
-    randomization_raw = {
-        # Defaults come from the dataclass, so a config only states what it wants
-        # to vary and an absent section means "the exact layout".
-        key: value
-        for key, value in (raw.pop("randomization", {}) or {}).items()
-    }
-    defaults_randomization = SceneRandomization()
+    randomization_raw = dict(raw.pop("randomization", {}) or {})
     randomization = SceneRandomization(
-        source_bin_xy_m=_float_tuple(
-            randomization_raw, "source_bin_xy_m", defaults_randomization.source_bin_xy_m
+        **{
+            name: _axis_range(randomization_raw, name)
+            for name in SceneRandomization().axes()
+        },
+        min_box_clearance_m=float(
+            randomization_raw.get(
+                "min_box_clearance_m", SceneRandomization().min_box_clearance_m
+            )
         ),
-        target_bin_xy_m=_float_tuple(
-            randomization_raw, "target_bin_xy_m", defaults_randomization.target_bin_xy_m
-        ),
-        target_bin_yaw_rad=float(
-            randomization_raw.get("target_bin_yaw_rad", defaults_randomization.target_bin_yaw_rad)
-        ),
-        spare_bin_xy_m=_float_tuple(
-            randomization_raw, "spare_bin_xy_m", defaults_randomization.spare_bin_xy_m
-        ),
-        spare_bin_yaw_rad=float(
-            randomization_raw.get("spare_bin_yaw_rad", defaults_randomization.spare_bin_yaw_rad)
-        ),
-        arm_home_rad=float(
-            randomization_raw.get("arm_home_rad", defaults_randomization.arm_home_rad)
+        max_clearance_attempts=int(
+            randomization_raw.get(
+                "max_clearance_attempts", SceneRandomization().max_clearance_attempts
+            )
         ),
     )
     home = HomeConfig(
@@ -407,6 +480,28 @@ def load_config(path: str | Path | None = None) -> SimConfig:
 
 def _float_tuple(values: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(float(value) for value in values.get(key, default))
+
+
+def _axis_range(values: dict[str, Any], key: str) -> AxisRange:
+    """Parse one randomization range, accepting either form.
+
+    ``[low, high]`` is the explicit form and what the configs use.  A bare number
+    is accepted as symmetric ``[-value, +value]`` because that is the natural thing
+    to write for the arm and yaw ranges, where the reachable region *is* centred
+    and a signed pair would be noise.
+    """
+
+    if key not in values:
+        return AxisRange()
+    raw = values[key]
+    if isinstance(raw, (int, float)):
+        return AxisRange(low=-abs(float(raw)), high=abs(float(raw)))
+    pair = tuple(float(value) for value in raw)
+    if len(pair) != 2:
+        raise ValueError(
+            f"randomization.{key} must be a number or [low, high], got {raw!r}"
+        )
+    return AxisRange(low=pair[0], high=pair[1])
 
 
 def _nested_float_tuple(

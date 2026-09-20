@@ -1,23 +1,41 @@
 # Five-at-a-time bevel insertion. Uniform 2.5 mm gaps and thin left fingertips.
 #
-# Scene randomization: the boxes and the arm start pose move between episodes.
-# These give a policy real variation -- with them at zero every episode is the same
-# picture and the same joint trajectory, which a policy can memorise instead of
-# learning.  The source box has no yaw on purpose: it carries the 80-Cookie layout,
-# and the batch experts find a row by grouping that layout on x.
+# Scene randomization: the two boxes and the arm start pose move between episodes,
+# giving a policy real variation instead of one memorisable trajectory.
 #
-# Sizes are half-ranges, so +/-6 mm means the draw is uniform in [-6, +6] mm.  They
-# are kept modest: the batch insertion is aimed at measured gaps in a 44 mm wide
-# workspace region, and a box moved too far stops being reachable at the
-# orientations the placement uses.
+# Ranges are [low, high] offsets in metres (yaw in radians), asymmetric because the
+# arm's workspace is not centred on the nominal pose.  Measured reach -- the offset
+# at which the expert's own reachability check starts refusing -- with the share of
+# it used here in brackets:
+#
+#              +x        -x        +y        -y
+#   target   30 mm     140 mm    90 mm     55 mm
+#   source   80 mm     170 mm   230 mm    245 mm
+#
+# The target box is the binding one: it can move 30 mm away from the arm but 140 mm
+# towards it, so a symmetric range could only be +/-30 mm and would waste most of
+# the space.  The shares below stay well inside every direction, and the source
+# range is dominated instead by clearance: source and target are only 66.9 mm
+# apart, and `min_box_clearance_m` rejects any draw that brings them closer than
+# 20 mm -- the source box is a mocap body with infinite mass, so a collision would
+# shove the target box out of the pose the expert planned for.
+#
+# Yaw is available on the source box as well as the target.  The batch experts find
+# a row by grouping the *configured* layout on x, which a rotation does not change,
+# so rows still resolve; the insertion itself is what tolerates or does not
+# tolerate entering a rotated row.
 physics_hz: 1000
 control_hz: 20
 horizon: 6000
 randomization:
-  source_bin_xy_m: [0.006, 0.006]
-  target_bin_xy_m: [0.004, 0.004]
-  target_bin_yaw_rad: 0.05
-  arm_home_rad: 0.015
+  source_bin_x_m: [-0.060, 0.030]
+  source_bin_y_m: [-0.050, 0.050]
+  source_bin_yaw_rad: 0.05
+  target_bin_x_m: [-0.100, 0.020]
+  target_bin_y_m: [-0.040, 0.060]
+  target_bin_yaw_rad: 0.10
+  arm_home_rad: 0.04
+  min_box_clearance_m: 0.020
 cookie_transfer:
   left_gripper_kp: 1200.0
   left_finger_pad_half_thickness_m: 0.0005
