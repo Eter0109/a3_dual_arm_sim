@@ -15,6 +15,10 @@ from .expert import A3CookieTransferExpert, CookiePhase
 class A3CookieBatchExpert(A3CookieTransferExpert):
     MAX_INSERTION_FORCE_N = 8.0
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.reset()
+
     def reset(self, context=None):
         super().reset(context)
         self.batch_index = 0

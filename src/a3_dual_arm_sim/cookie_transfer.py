@@ -104,6 +104,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.COOKIE_RESET_Z = scene_config.cookie_reset_z_m
         self.DEPLOYMENT_HOME = np.asarray(scene_config.deployment_home, dtype=np.float64)
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
+        self._source_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "source_bin")
         self._cookie_bodies = tuple(
             self._id(mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}")
             for index in range(self.task_config.cookie_count)
@@ -226,9 +227,37 @@ class A3CookieTransferEnv(A3DualArmEnv):
         mujoco.mj_forward(self.model, self.data)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
-        randomize = (options or {}).get("randomize_cookies", True)
+        options = options or {}
+        randomize_cookies = options.get("randomize_cookies", True)
+        randomize_boxes = options.get("randomize_boxes", False)
+        randomize_source = options.get("randomize_source_bin", randomize_boxes)
+        randomize_target = options.get("randomize_target_bin", randomize_boxes)
+
+        sdx, sdy = 0.0, 0.0
+        if hasattr(self, "_source_bin_body"):
+            if randomize_source:
+                source_noise = options.get("source_bin_noise_m", 0.001)
+                if source_noise > 0:
+                    sdx, sdy = self.np_random.uniform(-source_noise, source_noise, size=2)
+            self.model.body_pos[self._source_bin_body, 0] = self.config.cookie_transfer.source_bin_center_m[0] + sdx
+            self.model.body_pos[self._source_bin_body, 1] = self.config.cookie_transfer.source_bin_center_m[1] + sdy
+
+        if hasattr(self, "_target_bin_body") and randomize_target:
+            j_id = self._id(mujoco.mjtObj.mjOBJ_JOINT, "target_bin_free")
+            qpos_adr = int(self.model.jnt_qposadr[j_id])
+            dof_adr = int(self.model.jnt_dofadr[j_id])
+            target_noise = options.get("target_bin_noise_m", 0.002)
+            target_yaw_noise = options.get("target_bin_yaw_noise_rad", 0.015)
+            tdx, tdy = self.np_random.uniform(-target_noise, target_noise, size=2)
+            tyaw = float(self.np_random.uniform(-target_yaw_noise, target_yaw_noise))
+            self.data.qpos[qpos_adr] += tdx
+            self.data.qpos[qpos_adr + 1] += tdy
+            tquat = np.array([np.cos(tyaw / 2), 0.0, 0.0, np.sin(tyaw / 2)], dtype=np.float64)
+            self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = tquat
+            self.data.qvel[dof_adr : dof_adr + 6] = 0.0
+
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
-            if randomize:
+            if randomize_cookies:
                 dx, dy = self.np_random.uniform(
                     -self.task_config.position_noise_m,
                     self.task_config.position_noise_m,
@@ -243,17 +272,22 @@ class A3CookieTransferEnv(A3DualArmEnv):
             else:
                 dx = dy = yaw = 0.0
             quaternion = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
-            self.set_cookie_pose(index, (base_x + dx, base_y + dy, self.COOKIE_RESET_Z), quaternion)
+            self.set_cookie_pose(index, (base_x + sdx + dx, base_y + sdy + dy, self.COOKIE_RESET_Z), quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
         self.data.time = 0.0
         self._success_hold_count = 0
+        source_center = (
+            self.data.xpos[self._source_bin_body][:2]
+            if hasattr(self, "_source_bin_body")
+            else self.SOURCE_CENTER
+        )
         source_mask = tuple(
             self._cookie_inside_source(index) for index in range(self.task_config.cookie_count)
         )
         self._source_initially_filled = all(source_mask) and self._collection_touches_all_walls(
             source_mask,
-            self.SOURCE_CENTER,
+            source_center,
             self.SOURCE_INNER_HALF_SIZE,
         )
         observation = self._observation()
@@ -400,9 +434,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
         return footprint_inside and vertically_inside and upright and settled and released
 
     def _cookie_inside_source(self, index: int) -> bool:
+        source_center = (
+            self.data.xpos[self._source_bin_body][:2]
+            if hasattr(self, "_source_bin_body")
+            else self.SOURCE_CENTER
+        )
         return self._cookie_region_status(
             index,
-            self.SOURCE_CENTER,
+            source_center,
             self.SOURCE_INNER_HALF_SIZE,
             self.SOURCE_WALL_TOP_Z,
             floor_top_z=self.SOURCE_FLOOR_TOP_Z,

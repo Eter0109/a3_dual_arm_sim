@@ -521,10 +521,16 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 vertex=_vec(tuple(v for vertex in vertices for v in vertex)),
             )
     # Source bin: on table
-    _add_open_bin(
+    source_bin = ET.SubElement(
         world,
+        "body",
         name="source_bin",
-        center=scene.source_bin_center_m,
+        pos=_vec((scene.source_bin_center_m[0], scene.source_bin_center_m[1], 0.0)),
+    )
+    _add_open_bin(
+        source_bin,
+        name="source_bin",
+        center=(0.0, 0.0),
         half_size=scene.source_bin_half_size_m,
         height=scene.source_bin_wall_height_m,
         rgba=BIN_RGBA,
