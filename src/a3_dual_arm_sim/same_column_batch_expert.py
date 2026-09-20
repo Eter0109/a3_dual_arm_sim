@@ -162,10 +162,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             self._pick_center + pad_height_axis * 0.010
             - self._grasp_rotation @ self._pad_offset
         )
-        self._high_eef = self._pick_eef + [0, 0, 0.105]
+        self._high_eef = self._pick_eef + [0, 0, 0.082]
         self._approach_eef = self._high_eef
         if self._aligned_grasp:
-            self._approach_eef = self._pick_eef + self._grasp_rotation[:, 1] * -0.105
+            self._approach_eef = self._pick_eef + self._grasp_rotation[:, 1] * -0.082
 
         if self.batch_index == 1 and self._grasp_tilt_deg > 10 and self._base_push_attempts < 2:
             base_y = positions[0, 1] - rotations[0, 1, 2] * self.env.COOKIE_HALF_SIZE[2]
@@ -238,11 +238,11 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self.phase is CookiePhase.PRE_CLOSE:
             action, _ = self._servo(self._approach_eef, self._grasp_rotation, self._opening, speed=0.001)
             actual_opening = float(self.env.current_joint_action[7])
-            if abs(actual_opening - self._opening) <= 0.006:
+            if abs(actual_opening - self._opening) <= 0.008:
                 self._preclose_stable += 1
             else:
                 self._preclose_stable = 0
-            if self._preclose_stable >= 3:
+            if self._preclose_stable >= 2:
                 if self._aligned_gap_center is not None:
                     fingers = list(self.env._left_finger_geoms)
                     pad_projection = self.data.geom_xpos[fingers] @ self._rear_axis
@@ -283,7 +283,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
                 return self._hold_command(self._opening)
             dist = np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
-            descend_speed = 0.0024 if dist > 0.015 else 0.0006
+            descend_speed = 0.0035 if dist > 0.015 else 0.0010
             action, reached = self._servo(
                 self._pick_eef, self._grasp_rotation, self._opening, speed=descend_speed
             )
@@ -305,7 +305,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail("batch closure blocked by excessive pad force")
                 return self._hold_command(self._opening)
             chain, forces = self._contact_chain()
-            close_rate = 0.0030 if (not chain or min(forces) < 0.5) else 0.0015
+            close_rate = 0.0060 if (not chain or min(forces) < 0.5) else 0.0030
             if (
                 self.batch_index == 1 and self._opening > 0.33
             ) or not chain or min(forces) < 1.3:
@@ -338,8 +338,8 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     self._far_pad_anchor - far_projection, -0.0006, 0.0006
                 )
                 self._pick_eef += correction * self._rear_axis
-            action, _ = self._servo(self._pick_eef, self._grasp_rotation, self._opening, speed=0.0005)
-            if self._stable >= 5:
+            action, _ = self._servo(self._pick_eef, self._grasp_rotation, self._opening, speed=0.0008)
+            if self._stable >= 3:
                 self._grip_reference = self._positions().copy()
                 self._lift_start_eef = self.data.site_xpos[self._l_site].copy()
                 self._advance(CookiePhase.LIFT)
@@ -350,7 +350,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             if min(forces) < 1.0:
                 self._opening = max(0.28, self._opening - 0.001)
             dist_lifted = np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
-            lift_speed = 0.0010 if dist_lifted < 0.015 else 0.0024
+            lift_speed = 0.0018 if dist_lifted < 0.015 else 0.0035
             action, reached = self._servo(
                 self._high_eef, self._grasp_rotation, self._opening, speed=lift_speed
             )
@@ -386,13 +386,13 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail("Cookie slipped out of batch during transport")
                 return self._hold_command(self._opening)
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
-            clearance = 0.085 if moving else 0.0
+            clearance = 0.060 if moving else 0.0
             pos, rotation = self._place_pose(clearance)
             if moving:
-                servo_speed = 0.0030
+                servo_speed = 0.0050
             else:
                 dist_to_place = np.linalg.norm(pos - self.data.site_xpos[self._l_site])
-                servo_speed = 0.0020 if dist_to_place > 0.015 else 0.0008
+                servo_speed = 0.0030 if dist_to_place > 0.015 else 0.0012
             action, reached = self._servo(
                 pos,
                 rotation,
@@ -404,10 +404,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             return action
 
         if self.phase is CookiePhase.OPEN:
-            self._opening = min(0.49, self._opening + 0.006)
+            self._opening = min(0.49, self._opening + 0.015)
             pos, rotation = self._place_pose()
-            action, _ = self._servo(pos, rotation, self._opening, speed=0.0008)
-            if self._opening >= 0.49 and self.phase_steps >= 20:
+            action, _ = self._servo(pos, rotation, self._opening, speed=0.0010)
+            if self._opening >= 0.49 and self.phase_steps >= 8:
                 self._retract_pos = (
                     self.data.site_xpos[self._l_site].copy() + rotation[:, 1] * -0.085
                 )
@@ -417,7 +417,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
 
         if self.phase is CookiePhase.RETRACT:
             action, reached = self._servo(
-                self._retract_pos, self._retract_rotation, self._opening, speed=0.0035
+                self._retract_pos, self._retract_rotation, self._opening, speed=0.0050
             )
             if reached:
                 self._advance(CookiePhase.VERIFY_RELEASE)
@@ -439,7 +439,12 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
                 return self._hold_command(self._opening)
-            if self._stable >= 12:
+            required_stable = (
+                self.env.task_config.success_hold_steps
+                if self.batch_index == 1
+                else 6
+            )
+            if self._stable >= required_stable:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1

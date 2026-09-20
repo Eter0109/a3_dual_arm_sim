@@ -175,7 +175,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         delta_p = np.clip(delta_p, -1.0, 1.0)
 
         target_q = np.empty(4, dtype=np.float64)
-        mujoco.mju_mat2Quat(target_q, np.asarray(rotation, dtype=np.float64).ravel())
+        rot_arr = np.asarray(rotation, dtype=np.float64)
+        if rot_arr.size == 4:
+            target_q[:] = rot_arr.ravel()
+        else:
+            mujoco.mju_mat2Quat(target_q, rot_arr.ravel())
         cur_q = np.empty(4, dtype=np.float64)
         mujoco.mju_mat2Quat(cur_q, work.site_xmat[self._l_site])
 
@@ -255,7 +259,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._insert_opening = float(np.clip((5 * pitch - pad_thickness) / 0.085, 0, 1))
         self._opening = self._insert_opening
         self._pick_eef = self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
-        self._high_eef = self._pick_eef + [0, 0, 0.105]
+        self._high_eef = self._pick_eef + [0, 0, 0.082]
         self._advance(CookiePhase.APPROACH)
 
     def _place_pose(self, clearance=0.0, column_index=None):
@@ -301,11 +305,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if self.phase is CookiePhase.PRE_CLOSE:
             action, _ = self._servo(self._high_eef, self._canonical, self._opening, speed=0.001)
             actual_opening = float(self.env.current_joint_action[7])
-            if abs(actual_opening - self._opening) <= 0.006:
+            if abs(actual_opening - self._opening) <= 0.008:
                 self._preclose_stable += 1
             else:
                 self._preclose_stable = 0
-            if self._preclose_stable >= 3:
+            if self._preclose_stable >= 2:
                 self._advance(CookiePhase.DESCEND)
             elif self.phase_steps >= 120:
                 self._fail(
@@ -319,7 +323,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
                 return self._hold_command(self._opening)
             dist = np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
-            descend_speed = 0.0024 if dist > 0.015 else 0.0006
+            descend_speed = 0.0035 if dist > 0.015 else 0.0010
             action, reached = self._servo(
                 self._pick_eef, self._canonical, self._opening, speed=descend_speed
             )
@@ -328,12 +332,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return action
         if self.phase is CookiePhase.CLOSE:
             chain, forces = self._contact_chain()
-            close_rate = 0.0030 if (not chain or min(forces) < 0.5) else 0.0015
+            close_rate = 0.0060 if (not chain or min(forces) < 0.5) else 0.0030
             if not chain or min(forces) < 1.3:
                 self._opening = max(0.28, self._opening - close_rate)
             self._stable = self._stable + 1 if chain and min(forces) >= 1.0 else 0
-            action, _ = self._servo(self._pick_eef, self._canonical, self._opening, speed=0.0005)
-            if self._stable >= 5:
+            action, _ = self._servo(self._pick_eef, self._canonical, self._opening, speed=0.0008)
+            if self._stable >= 3:
                 self._grip_reference = self._positions().copy()
                 self._lift_start_eef = self.data.site_xpos[self._l_site].copy()
                 self._advance(CookiePhase.LIFT)
@@ -343,7 +347,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             if min(forces) < 1.0:
                 self._opening = max(0.28, self._opening - 0.001)
             dist_lifted = np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
-            lift_speed = 0.0010 if dist_lifted < 0.015 else 0.0024
+            lift_speed = 0.0018 if dist_lifted < 0.015 else 0.0035
             action, reached = self._servo(
                 self._high_eef, self._canonical, self._opening, speed=lift_speed
             )
@@ -378,13 +382,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._fail("Cookie slipped out of batch during transport")
                 return self._hold_command(self._opening)
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
-            clearance = 0.085 if moving else 0.0
+            clearance = 0.060 if moving else 0.0
             pos, rotation = self._place_pose(clearance)
             if moving:
-                servo_speed = 0.0030
+                servo_speed = 0.0050
             else:
                 dist_to_place = np.linalg.norm(pos - self.data.site_xpos[self._l_site])
-                servo_speed = 0.0020 if dist_to_place > 0.015 else 0.0008
+                servo_speed = 0.0030 if dist_to_place > 0.015 else 0.0012
             action, reached = self._servo(
                 pos,
                 rotation,
@@ -395,10 +399,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._advance(CookiePhase.DESCEND_TO_PLACE if moving else CookiePhase.OPEN)
             return action
         if self.phase is CookiePhase.OPEN:
-            self._opening = min(0.49, self._opening + 0.006)
+            self._opening = min(0.49, self._opening + 0.015)
             pos, rotation = self._place_pose()
-            action, _ = self._servo(pos, rotation, self._opening, speed=0.0008)
-            if self._opening >= 0.49 and self.phase_steps >= 20:
+            action, _ = self._servo(pos, rotation, self._opening, speed=0.0010)
+            if self._opening >= 0.49 and self.phase_steps >= 8:
                 self._retract_pos = (
                     self.data.site_xpos[self._l_site].copy() + rotation[:, 1] * -0.085
                 )
@@ -407,7 +411,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return action
         if self.phase is CookiePhase.RETRACT:
             action, reached = self._servo(
-                self._retract_pos, self._retract_rotation, self._opening, speed=0.0035
+                self._retract_pos, self._retract_rotation, self._opening, speed=0.0050
             )
             if reached:
                 self._advance(CookiePhase.VERIFY_RELEASE)
@@ -428,7 +432,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
                 return self._hold_command(self._opening)
-            if self._stable >= 12:
+            required_stable = (
+                self.env.task_config.success_hold_steps
+                if self.batch_index == 1
+                else 6
+            )
+            if self._stable >= required_stable:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1
