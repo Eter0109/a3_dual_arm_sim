@@ -353,6 +353,22 @@ class RightBoxCarryController:
 class TwoBoxBatchExpert:
     """Four five-cookie batches with a physical right-arm box exchange."""
 
+    #: How long a verify stage may wait for the carry's result to settle before the
+    #: state it sees is taken as final.  Both verify stages used to fail on a
+    #: threshold *looser* than the one they passed on, which left a band where
+    #: neither branch fired and the stage parked until the horizon ran out:
+    #:
+    #:   VERIFY_A   pass at y >= station + 85 mm, fail only below station + 50 mm
+    #:              -> parked for an A that overshot 50..85 mm
+    #:   VERIFY_B   pass within 8 mm, fail only beyond 12 mm
+    #:              -> parked for a B that stopped 8..12 mm out
+    #:
+    #: A band like that reads as "still running" rather than as a failure, and was
+    #: observed as a run reaching the 12000-step horizon where a successful one
+    #: takes 4798.  Waiting a bounded time instead of testing a second threshold
+    #: closes the gap by construction: every state either settles or times out.
+    VERIFY_SETTLE_STEPS = 200
+
     def __init__(self, env: A3CookieTransferEnv):
         self.env = env
         self.box_a = env.model.body("target_bin").id
@@ -369,6 +385,10 @@ class TwoBoxBatchExpert:
         self.fill_reports: list[dict] = []
         self.push_reports: list[dict] = []
         self._settled_steps = 0
+        #: Steps spent in the current verify stage, so it can time out rather than
+        #: wait forever when the carry's result is short of the pass condition but
+        #: not short enough to trip the old failure threshold.
+        self._verify_steps = 0
         self._a_indices: list[int] = []
         self._b_indices: list[int] = []
 
@@ -382,6 +402,7 @@ class TwoBoxBatchExpert:
         self._a_indices = []
         self._b_indices = []
         self._settled_steps = 0
+        self._verify_steps = 0
         self.pusher = None
         self.fill = A3SameColumnBatchExpert(self.env)
         self.fill.reset()
@@ -459,27 +480,32 @@ class TwoBoxBatchExpert:
                 )
                 self.stage = "VERIFY_A" if self.stage == "PUSH_A" else "VERIFY_B"
                 self._settled_steps = 0
+                self._verify_steps = 0
             return action
         if self.stage == "VERIFY_A":
             position = self.env.data.xpos[self.box_a]
-            good = (
-                position[1] >= self.station[1] + 0.085
-                and self._count(self.box_a, self._a_indices) == 10
-            )
+            clearance_mm = float(position[1] - self.station[1]) * 1000.0
+            held = self._count(self.box_a, self._a_indices)
+            good = position[1] >= self.station[1] + 0.085 and held == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
+            self._verify_steps += 1
             if self._settled_steps >= 15:
                 self._new_pusher(self.box_b, self.station[1], "CARRY_B")
-            elif self._settled_steps == 0 and self.pusher is not None:
-                if self.pusher.done and abs(position[1] - self.station[1]) < 0.050:
-                    self.failed = "filled box A did not clear the filling station"
+            elif self._verify_steps >= self.VERIFY_SETTLE_STEPS:
+                self.failed = (
+                    f"filled box A did not clear the filling station: "
+                    f"{clearance_mm:.1f} mm clear of it (needs 85.0) with "
+                    f"{held}/10 Cookies aboard"
+                )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_B":
             position = self.env.data.xpos[self.box_b]
-            good = (
-                np.linalg.norm(position[:2] - self.station) < 0.008
-                and self._count(self.box_a, self._a_indices) == 10
-            )
+            offset = position[:2] - self.station
+            distance_mm = float(np.linalg.norm(offset)) * 1000.0
+            held = self._count(self.box_a, self._a_indices)
+            good = distance_mm < 8.0 and held == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
+            self._verify_steps += 1
             if self._settled_steps >= 15:
                 self.env._target_bin_body = self.box_b
                 self.fill = A3SameColumnBatchExpert(self.env)
@@ -489,9 +515,13 @@ class TwoBoxBatchExpert:
                     self.failed = f"FILL_B setup: {exc}"
                 else:
                     self.stage = "FILL_B"
-            elif self._settled_steps == 0 and self.pusher is not None:
-                if self.pusher.done and np.linalg.norm(position[:2] - self.station) > 0.012:
-                    self.failed = "empty box B did not reach the filling station"
+            elif self._verify_steps >= self.VERIFY_SETTLE_STEPS:
+                self.failed = (
+                    f"empty box B did not reach the filling station: "
+                    f"{distance_mm:.1f} mm from it (needs under 8.0) at "
+                    f"x={offset[0] * 1000:+.1f} y={offset[1] * 1000:+.1f} mm, "
+                    f"with {held}/10 Cookies still in box A"
+                )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_BOTH":
             a, b = self.counts()

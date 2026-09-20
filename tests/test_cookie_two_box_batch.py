@@ -3,6 +3,8 @@
 from dataclasses import replace
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import mujoco
 import numpy as np
 
@@ -192,5 +194,169 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
                 )
                 for contact in work.contact[:work.ncon]
             )
+    finally:
+        env.close()
+
+
+def _push_a_clear_and_fill(env, expert) -> list[int]:
+    """Put the relay in the state `VERIFY_B` is meant to see.
+
+    Box A is placed clear of the station rather than pushed there -- the push is not
+    what these tests are about, and doing it physically would cost minutes.  The
+    order matters: the box moves first and the Cookies are laid into it afterwards,
+    because placing them first leaves them behind at the station, which both empties
+    A and gives box B something to collide with.
+    """
+
+    station = np.asarray(env.config.cookie_transfer.target_bin_world_position_m[:2])
+    joint = env.model.body_jntadr[expert.box_a]
+    address = env.model.jnt_qposadr[joint]
+    env.data.qpos[address] = station[0]
+    env.data.qpos[address + 1] = station[1] + 0.090
+    env.data.qpos[address + 2] = 0.753
+    env.data.qpos[address + 3 : address + 7] = [1.0, 0.0, 0.0, 0.0]
+    mujoco.mj_forward(env.model, env.data)
+
+    indices = list(range(10))
+    _fill_box(env, expert, indices)
+    return indices
+
+
+def _fill_box(env, expert, indices: list[int]) -> None:
+    """Lay `indices` Cookies into box A where it currently sits.
+
+    Separate from the placement above because anything that moves the box also
+    carries its Cookies out of it, so the two steps have to be repeatable in the
+    right order rather than fused into one helper.
+    """
+
+    previous = env._target_bin_body
+    env._target_bin_body = expert.box_a
+    try:
+        for index in indices:
+            position = env.privileged_target_slot_world(index, env._target_cookie_center_z)
+            env.set_cookie_pose(index, tuple(np.asarray(position[:3], dtype=float)))
+    finally:
+        env._target_bin_body = previous
+    mujoco.mj_forward(env.model, env.data)
+
+
+def _place_box_b(env, station: np.ndarray, offset_m: float) -> None:
+    joint = env.model.body_jntadr[env._spare_bin_body]
+    address = env.model.jnt_qposadr[joint]
+    env.data.qpos[address] = station[0]
+    env.data.qpos[address + 1] = station[1] + offset_m
+    env.data.qpos[address + 2] = 0.753
+    env.data.qpos[address + 3 : address + 7] = [1.0, 0.0, 0.0, 0.0]
+    env.data.qvel[:] = 0.0
+    mujoco.mj_forward(env.model, env.data)
+
+
+def test_verify_b_never_parks_between_its_pass_and_fail_thresholds():
+    """A box between 8 mm and 12 mm from the station must not stall the relay.
+
+    `VERIFY_B` used to pass within 8 mm and fail only beyond 12 mm, so a carry that
+    stopped in between satisfied neither branch and the stage waited until the
+    horizon ran out -- seen as a run reaching 12000 steps where a successful one
+    takes 4798.  `VERIFY_A` had the same shape (pass at 85 mm of clearance, fail
+    below 50 mm).  A bounded settle window replaces the second threshold, so every
+    state now either settles or times out.
+
+    Swept across the old dead zone and the ranges on either side of it, since only
+    the middle distances used to stall.
+    """
+
+    for offset_mm in (2.0, 7.0, 8.5, 10.0, 11.5, 16.0):
+        env = A3CookieTransferEnv(
+            DUAL_CONFIG,
+            render_cameras=False,
+            task_config=CookieTransferTaskConfig(
+                require_exact_slots=False, require_released=True, terminate_on_success=False
+            ),
+        )
+        try:
+            env.reset(seed=0, options=FIXED_SCENE)
+            expert = TwoBoxBatchExpert(env)
+            expert.reset()
+            station = np.asarray(env.config.cookie_transfer.target_bin_world_position_m[:2])
+            indices = _push_a_clear_and_fill(env, expert)
+            _place_box_b(env, station, offset_mm / 1000.0)
+
+            expert.stage = "VERIFY_B"
+            expert._settled_steps = 0
+            expert._verify_steps = 0
+            expert._a_indices = indices
+            expert.pusher = SimpleNamespace(done=True)
+
+            resolved = False
+            for _ in range(TwoBoxBatchExpert.VERIFY_SETTLE_STEPS + 10):
+                env.step(expert.act())
+                if expert.failed or expert.stage != "VERIFY_B":
+                    resolved = True
+                    break
+            assert resolved, (
+                f"box B at {offset_mm} mm parked in VERIFY_B: neither the pass "
+                f"condition nor the failure fired"
+            )
+            if offset_mm >= 8.0:
+                assert expert.failed is not None, (
+                    "a box beyond the pass threshold has to be reported as a failure"
+                )
+                assert f"{offset_mm:.1f} mm" in expert.failed, (
+                    f"the failure should quote the measured distance, got: {expert.failed}"
+                )
+            else:
+                assert expert.stage == "FILL_B", (
+                    f"a box inside the pass threshold should advance, got {expert.stage}"
+                )
+        finally:
+            env.close()
+
+
+def test_verify_a_never_parks_when_a_overshoots_its_failure_threshold():
+    """Box A pushed 50-85 mm used to stall `VERIFY_A` the same way.
+
+    The pass condition was 85 mm of clearance and the failure fired only below
+    50 mm, so an A that ended up in between parked the stage.
+    """
+
+    env = A3CookieTransferEnv(
+        DUAL_CONFIG,
+        render_cameras=False,
+        task_config=CookieTransferTaskConfig(
+            require_exact_slots=False, require_released=True, terminate_on_success=False
+        ),
+    )
+    try:
+        env.reset(seed=0, options=FIXED_SCENE)
+        expert = TwoBoxBatchExpert(env)
+        expert.reset()
+        station = np.asarray(env.config.cookie_transfer.target_bin_world_position_m[:2])
+        indices = _push_a_clear_and_fill(env, expert)
+        # Move A into the old dead band -- clear, but not clear enough -- and put
+        # its Cookies back in place afterwards, since moving the box carries them
+        # out of it again.
+        joint = env.model.body_jntadr[expert.box_a]
+        address = env.model.jnt_qposadr[joint]
+        env.data.qpos[address + 1] = station[1] + 0.065
+        mujoco.mj_forward(env.model, env.data)
+        _fill_box(env, expert, indices)
+
+        expert.stage = "VERIFY_A"
+        expert._settled_steps = 0
+        expert._verify_steps = 0
+        expert._a_indices = indices
+        expert.pusher = SimpleNamespace(done=True)
+
+        for _ in range(TwoBoxBatchExpert.VERIFY_SETTLE_STEPS + 10):
+            env.step(expert.act())
+            if expert.failed:
+                break
+        assert expert.failed is not None, (
+            "box A at 65 mm of clearance parked in VERIFY_A instead of being reported"
+        )
+        assert "65.0 mm" in expert.failed, (
+            f"the failure should quote the measured clearance, got: {expert.failed}"
+        )
     finally:
         env.close()
