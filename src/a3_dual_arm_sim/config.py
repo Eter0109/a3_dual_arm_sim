@@ -35,8 +35,8 @@ class CameraConfig:
     front_fovy_deg: float = 58.0
     left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
     left_wrist_target_m: tuple[float, ...] = (0.0, 0.245, 0.085)
-    right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, -0.085)
-    right_wrist_target_m: tuple[float, ...] = (0.0, -0.245, -0.085)
+    right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, 0.085)
+    right_wrist_target_m: tuple[float, ...] = (0.0, -0.245, 0.085)
     wrist_fovy_deg: float = 70.0
 
 
@@ -186,12 +186,12 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         left_wrist_position_m=_float_tuple(
             camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
         ),
-        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", (0.0, 0.160, -0.010)),
+        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", (0.0, 0.245, 0.085)),
         right_wrist_position_m=_float_tuple(
-            camera_raw, "right_wrist_position_m", (0.0, -0.045, -0.085)
+            camera_raw, "right_wrist_position_m", (0.0, -0.045, 0.085)
         ),
         right_wrist_target_m=_float_tuple(
-            camera_raw, "right_wrist_target_m", (0.0, -0.160, 0.010)
+            camera_raw, "right_wrist_target_m", (0.0, -0.245, 0.085)
         ),
         wrist_fovy_deg=float(camera_raw.get("wrist_fovy_deg", 70.0)),
     )

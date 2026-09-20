@@ -140,16 +140,27 @@ def test_gripper_visual_pads_match_hidden_collision_pads() -> None:
             assert visual.attrib["contype"] == "0"
 def test_wrist_cameras_are_symmetric() -> None:
     config = load_config()
-    root = ET.fromstring(build_model(config, scene="cookie_transfer").xml)
+    bundle = build_model(config, scene="cookie_transfer")
+    root = ET.fromstring(bundle.xml)
     left_cam = root.find(".//camera[@name='left_wrist']")
     right_cam = root.find(".//camera[@name='right_wrist']")
     assert left_cam is not None
     assert right_cam is not None
     assert left_cam.attrib["pos"] == "0 0.045 0.085"
-    assert right_cam.attrib["pos"] == "0 -0.045 -0.085"
+    assert right_cam.attrib["pos"] == "0 -0.045 0.085"
     left_target = root.find(".//body[@name='L_wrist_camera_target']")
     right_target = root.find(".//body[@name='R_wrist_camera_target']")
     assert left_target is not None
     assert right_target is not None
     assert left_target.attrib["pos"] == "0 0.245 0.085"
-    assert right_target.attrib["pos"] == "0 -0.245 -0.085"
+    assert right_target.attrib["pos"] == "0 -0.245 0.085"
+
+    # Verify world-space bilateral symmetry
+    data = mujoco.MjData(bundle.model)
+    mujoco.mj_forward(bundle.model, data)
+    l_cid = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_CAMERA, "left_wrist")
+    r_cid = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_CAMERA, "right_wrist")
+    l_pos = data.cam_xpos[l_cid]
+    r_pos = data.cam_xpos[r_cid]
+    np.testing.assert_allclose(l_pos, [r_pos[0], -r_pos[1], r_pos[2]], atol=1e-4)
+
