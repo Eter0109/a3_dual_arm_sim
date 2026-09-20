@@ -19,6 +19,7 @@ from .recording import LeRobotV3Recorder
 from .runner import EpisodeRunner
 from .same_column_batch_expert import A3SameColumnBatchExpert
 from .tasks import TASKS, TaskSpec
+from .two_box_batch import TwoBoxBatchExpert
 
 
 @dataclass
@@ -59,6 +60,71 @@ class CookieCollectionPolicy:
 
     def close(self) -> None:
         self.expert.close()
+
+
+@dataclass
+class TwoBoxCollectionPolicy:
+    """Drive the two-box relay, and declare success the way *it* defines it.
+
+    The relay's own criterion is ten Cookies in each box, sixty left in the source,
+    box A pushed clear and box B back in the station.  The environment cannot report
+    that: its task config checks one target bin against a ten-Cookie fill, so a run
+    that emptied two boxes would look like a failure to it.  ``success_override``
+    therefore comes from the expert, which is the only thing that knows.
+
+    ``act`` also bridges a signature difference: the relay expert takes no
+    observation (it reads the simulator directly, like every other scripted expert
+    here) while the runner passes one.
+    """
+
+    expert: TwoBoxBatchExpert
+    hold_steps: int = 40
+    action_mode: ActionMode = "joint_position"
+    _steps_since_done: int = 0
+
+    def reset(self, context: EpisodeContext | None = None) -> None:
+        self.expert.reset()
+        self._steps_since_done = 0
+
+    def act(self, observation: dict[str, Any], task: str = "") -> np.ndarray:
+        del observation, task
+        if self.expert.done:
+            self._steps_since_done += 1
+        return self.expert.act()
+
+    @property
+    def stop_requested(self) -> bool:
+        return bool(self.expert.failed) or self._steps_since_done >= self.hold_steps
+
+    @property
+    def success_override(self) -> bool:
+        """The relay's criterion, not the environment's; see the class docstring."""
+
+        return bool(self.expert.done and not self.expert.failed)
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        """What the relay knows that ``info`` does not.
+
+        The counts are per box, and the environment reports neither: it tracks one
+        target bin.  The stage and the failure reason are what make a rejected
+        episode diagnosable -- "0/1 accepted" says nothing about whether the fill,
+        the push, or the carry went wrong.
+        """
+
+        try:
+            box_a, box_b = self.expert.counts()
+        except Exception:  # noqa: BLE001 - a torn-down env must not mask the result
+            box_a = box_b = -1
+        return {
+            "stage": self.expert.stage,
+            "failure_reason": self.expert.failed,
+            "box_a_cookie_count": box_a,
+            "box_b_cookie_count": box_b,
+        }
+
+    def close(self) -> None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -248,12 +314,20 @@ def collect_dataset(
                 row[key] = result.final_info.get(key)
             results.append(row)
             accepted += int(result.success)
-            metrics = "".join(f" {key}={row[key]}" for key in scene.metric_keys)
+            metrics = "".join(
+                f" {key}={row[key]}" for key in scene.metric_keys if row[key] is not None
+            )
+            # A rejected episode's reason belongs on the progress line, not only in
+            # the summary: a long collection is watched as it runs, and "success=
+            # False" alone does not say whether to stop the run and fix something.
+            reason = ""
+            if not result.success and row.get("failure_reason"):
+                reason = f" reason={row['failure_reason']}"
             print(
                 f"{scene.task.name} shard={shard_index}/{shard_count} "
                 f"attempt={attempt + 1}/{attempt_limit} seed={seed} "
                 f"success={result.success} accepted={accepted}/{episodes} "
-                f"steps={result.steps}{metrics}",
+                f"steps={result.steps}{metrics}{reason}",
                 flush=True,
             )
             if accepted >= episodes:
@@ -459,6 +533,68 @@ def cookie_same_column_scene(*, hold_steps: int = 40) -> CollectionScene:
     )
 
 
+def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
+    """Two boxes filled by relay: A is filled, pushed clear, B takes its place.
+
+    Twice the work of a single-box scene, so an episode is roughly twice as long
+    and a run needs its own time budget; `configs/cookie_two_box_batch.yaml` raises
+    the horizon to 12000 for the same reason.
+
+    The success criterion belongs to the expert rather than the environment (see
+    :class:`TwoBoxCollectionPolicy`), and the two-box randomisation is the one this
+    scene owns: all three boxes move and yaw, bounded by their mutual clearance,
+    because the two tabletop boxes start only 86 mm apart.
+    """
+
+    def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
+        task_config = CookieTransferTaskConfig(
+            position_noise_m=position_noise_m,
+            yaw_noise_rad=yaw_noise_rad,
+            require_exact_slots=False,
+            require_released=True,
+            terminate_on_success=False,
+        )
+        return A3CookieTransferEnv(
+            "configs/cookie_two_box_batch.yaml",
+            task_config=task_config,
+            render_cameras=True,
+        )
+
+    def build_policy(env: A3DualArmEnv) -> Policy:
+        return TwoBoxCollectionPolicy(
+            expert=TwoBoxBatchExpert(env),  # type: ignore[arg-type]
+            hold_steps=hold_steps,
+        )
+
+    return CollectionScene(
+        task=TASKS["a3_cookie_two_box"],
+        build_env=build_env,
+        build_policy=build_policy,
+        # What a two-box episode is judged on, per box and per stage: a row that
+        # says only "success: false" cannot distinguish a failed fill from a failed
+        # carry, and those need different fixes.
+        metric_keys=(
+            "stage",
+            "failure_reason",
+            "box_a_cookie_count",
+            "box_b_cookie_count",
+        ),
+        randomize_placements=True,
+        randomize_cookies=False,
+        details={
+            "config": "configs/cookie_two_box_batch.yaml",
+            "hold_steps": hold_steps,
+            "require_exact_slots": False,
+            "require_released": True,
+            "workflow": "fill A, push A clear, carry B into the station, fill B",
+            "success_decision": (
+                "expert, not the environment: a two-box fill is not expressible as "
+                "the single-bin task config"
+            ),
+        },
+    )
+
+
 def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
     """Scene name -> builder.  This is the list a CLI or a sweep iterates."""
 
@@ -467,6 +603,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_transfer": cookie_transfer_scene,
         "a3_cookie_batch": cookie_batch_scene,
         "a3_cookie_same_column": cookie_same_column_scene,
+        "a3_cookie_two_box": cookie_two_box_scene,
     }
 
 

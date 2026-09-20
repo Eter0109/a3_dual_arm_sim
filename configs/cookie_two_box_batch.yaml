@@ -2,22 +2,39 @@
 physics_hz: 1000
 control_hz: 20
 horizon: 12000
-# Scene randomization: all three boxes and the arm start pose move between
-# episodes.  The two tabletop boxes are only 86 mm apart, so it is their mutual
-# clearance rather than the arm that bounds the ranges here, and the spare box has
-# its own range and yaw.  The right arm grips the spare box's rear wall and slides
-# it into the station, so a rotated spare changes that grasp; its yaw is kept at
-# the same modest size as the working box's.
+# Scene randomization: all three boxes and the arm start pose move between episodes.
+#
+# Ranges are [low, high] offsets in metres (yaw in radians), asymmetric because the
+# arm's workspace is not centred on the nominal pose.  These are measured for *this*
+# scene, because reach depends on where a box sits: the working box here is at
+# (0.075, 0.030), and sweeping it until the expert's own reachability check refuses
+# gives, in mm,
+#
+#   working box   +x   6    -x 118    +y 118    -y   8      yaw +/-4.5 deg
+#   spare box     +/-118 in every direction
+#
+# which is nothing like the single-box scene's 30/140/90/55, so copying those values
+# across was wrong and produced a run that reached the second fill and then failed on
+# angle error 2.07 deg against a 2.005 deg threshold.  The ranges below stay inside
+# every measured limit.
+#
+# Two of them are narrower than reach alone would allow:
+#   * the working box's +y is held to 40 mm because the relay pushes it to a fixed
+#     station 90 mm away, and a box that starts most of the way there has no push
+#     left to perform
+#   * the spare box's yaw has to survive the carry, which grips the box and slides it
+#     into place, so it arrives with the yaw it started with -- the fill's +/-4.5 deg
+#     tolerance applies to that arrival, not just to the initial pose
 randomization:
   source_bin_x_m: [-0.060, 0.030]
   source_bin_y_m: [-0.050, 0.050]
   source_bin_yaw_rad: 0.05
-  target_bin_x_m: [-0.060, 0.020]
-  target_bin_y_m: [-0.030, 0.040]
-  target_bin_yaw_rad: 0.10
+  target_bin_x_m: [-0.080, 0.004]
+  target_bin_y_m: [-0.006, 0.040]
+  target_bin_yaw_rad: 0.04
   spare_bin_x_m: [-0.040, 0.040]
-  spare_bin_y_m: [-0.040, 0.040]
-  spare_bin_yaw_rad: 0.10
+  spare_bin_y_m: [-0.040, 0.015]
+  spare_bin_yaw_rad: 0.04
   arm_home_rad: 0.04
   min_box_clearance_m: 0.025
 cookie_transfer:

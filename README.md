@@ -581,10 +581,22 @@ All-zero restores the exact layout, and every scene behaved that way before this
 **The ranges are measured, not chosen.** The arm's workspace sets a limit per direction, and the
 offset at which the expert's own reachability check starts refusing is:
 
-| | +x | −x | +y | −y |
+| single-box scenes | +x | −x | +y | −y |
 | --- | --- | --- | --- | --- |
 | target box | 30 mm | 140 mm | 90 mm | 55 mm |
 | source box | 80 mm | 170 mm | 230 mm | 245 mm |
+
+| two-box scene | +x | −x | +y | −y | yaw |
+| --- | --- | --- | --- | --- | --- |
+| working box | 6 mm | 118 mm | 118 mm | 8 mm | ±4.5° |
+| spare box | 118 mm | 118 mm | 118 mm | 118 mm | — |
+
+**Reach depends on where a box sits, not on how big it is**, so the two scenes have different
+limits: the working box is at `(0.075, 0.030)` in the two-box scene against `(0.095, 0.100)` in the
+single-box one, and 6 mm of room in +x is not 30 mm. Copying the single-box numbers across produced
+a two-box run that filled box A, pushed it clear, carried box B into the station, and then failed at
+the second fill on an angle error of 2.07° against a 2.005° threshold — a 0.07° miss, caused by the
+spare box carrying its randomisation yaw through the carry.
 
 The target box is the binding one, and it is far from centred: it can move 30 mm away from the arm
 but 140 mm towards it, so a symmetric ±30 mm range would waste most of the space the arm can serve.

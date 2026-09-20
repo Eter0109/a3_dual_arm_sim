@@ -39,9 +39,24 @@ set per dataset, so concurrent writers need separate directories.  Seeds are
 interleaved across shards, so the union is still one clean sweep.
 
 `<scene>` names a registered scene, and which scenes can actually collect is not
-obvious -- the batch scenes do, the single-Cookie one does not any more.  See
-`registered_scenes()` in `src/a3_dual_arm_sim/collection.py` and each builder's
-docstring before picking one.
+obvious.  The registered set is:
+
+| Scene | Collects? | What one episode does |
+| --- | --- | --- |
+| `a3_cookie_same_column` | yes | Five-Cookie batches from one source column, twice, into one box |
+| `a3_cookie_batch` | yes | The same, taking the second batch from a different column |
+| `a3_cookie_two_box` | yes | Fills box A, pushes it clear, carries box B into the station, fills B |
+| `a3_grasp` | yes | Lifts a single cube |
+| `a3_cookie_transfer` | **no** | The original single-Cookie workflow; its right arm can no longer reach the tabletop target box, so it accepts nothing |
+
+A two-box episode is roughly twice as long as a single-box one, so budget for it:
+the reference run took about 2600 control steps and 18 minutes on a loaded login
+node before the second fill.
+
+See `registered_scenes()` in `src/a3_dual_arm_sim/collection.py` and each builder's
+docstring for the details, including which success criterion each scene uses.  One
+of them does not use the environment's: the relay decides success itself, because a
+two-box fill is not expressible as the single-bin task config.
 
 ### 2. Merge
 
@@ -89,9 +104,18 @@ Same commands, no pipeline position -- each answers one question.
 
 | Script | The question it answers |
 | --- | --- |
+| `render_collection_video.py` | What did the collected episodes actually do?  One watchable video per episode plus a combined file, with seed and outcome overlaid |
 | `render_cookie_batch_video.py` | What does the scripted batch expert actually do?  Composites the scene camera with the policy cameras and overlays the live Cookie counts |
 | `plot_rollout_trace.py` | Is the policy following the demonstration, or cycling through it?  Charts the phase trace against step index, Pillow only |
 | `measure_render_consistency.py` | Does `--fast-render` change the pixels?  Renders one state twice, with and without the shadow and reflection passes |
+
+`render_collection_video.py` is worth reaching for before trusting a summary:
+collection writes the three policy cameras because that is what a policy trains on,
+but they are 256x256 and stored per camera with every episode concatenated into one
+file.  A summary says six episodes succeeded; only the pictures say whether they
+succeeded the same way twice.  The overlay carries the seed and outcome, because a
+run of six successes at six seeds is a different artifact from six at one seed and
+the file names alone do not distinguish them.
 
 `measure_render_consistency.py` exists because every dataset is collected with
 `--fast-render` and every evaluation and recording path calls `use_fast_render()`

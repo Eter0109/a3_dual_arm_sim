@@ -69,6 +69,16 @@ TASKS: dict[str, TaskSpec] = {
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
     ),
+    # The relay fills two boxes rather than one, so its acceptance rule is its own:
+    # ten Cookies in each box with sixty left in the source, box A pushed clear and
+    # box B back in the station.  The environment cannot express it -- its task
+    # config checks a single target bin -- which is why this task's contract is the
+    # only one an expert, rather than the environment, decides.
+    "a3_cookie_two_box": TaskSpec(
+        name="a3_cookie_two_box",
+        prompt=COOKIE_PROMPT,
+        success_contract="released_10_each_box_60_remain_boxes_relocated",
+    ),
 }
 
 

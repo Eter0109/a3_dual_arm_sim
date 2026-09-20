@@ -114,7 +114,18 @@ class EpisodeRunner:
                     if remaining > 0:
                         time.sleep(remaining)
             success = bool(info.get("success", False))
-            recorded_success = success if "success" in info else None
+            # A policy may know the task was achieved when the environment cannot
+            # say so.  The two-box workflow is the case: its criterion is ten
+            # Cookies in *each* box with sixty left in the source, which the
+            # single-box task config has no way to express, so the environment
+            # reports success=False for an episode that fully succeeded.  The
+            # override is applied here rather than by the caller because it also
+            # feeds the discard decision below -- deciding it afterwards would throw
+            # away the very episodes it exists to keep.
+            override = getattr(self.policy, "success_override", None)
+            if override is not None:
+                success = bool(override)
+            recorded_success = success if ("success" in info or override is not None) else None
             discarded = (
                 bool(getattr(self.policy, "discard_requested", False))
                 or (self.recorder is not None and recorded_frames == 0)
@@ -129,6 +140,15 @@ class EpisodeRunner:
             if self.recorder is not None:
                 self.recorder.discard_episode()
             raise
+        # Task-specific numbers a policy knows and ``info`` does not.  Read after
+        # the loop so they describe the final state, and merged into ``final_info``
+        # rather than kept beside it, so every consumer of a result has one place to
+        # look.  A reason a scripted expert failed is the motivating case: it lives
+        # on the expert, and a summary without it cannot say *why* an episode was
+        # rejected.
+        metrics = getattr(self.policy, "metrics", None)
+        if metrics:
+            info = {**info, **dict(metrics)}
         return EpisodeResult(
             steps=steps,
             terminated=terminated,

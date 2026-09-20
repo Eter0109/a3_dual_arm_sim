@@ -46,6 +46,60 @@ def test_policy_loader_and_source_neutral_runner() -> None:
         runner.close()
 
 
+def test_policy_can_declare_success_the_environment_cannot_see():
+    """A policy may know the task was achieved when ``info`` says otherwise.
+
+    The two-box relay is the case: its criterion is ten Cookies in *each* box with
+    sixty left in the source, which the single-bin task config cannot express, so the
+    environment reports ``success=False`` for an episode that fully succeeded.  The
+    override has to be applied inside the runner rather than by the caller, because
+    it also feeds the discard rule -- deciding it afterwards would throw away the
+    episodes it exists to keep.
+    """
+
+    class _DeclaringPolicy(HoldPolicy):
+        #: Claims success even though the environment never reports it.
+        success_override = True
+
+    policy = _DeclaringPolicy()
+    recorder = MemoryRecorder()
+    env = A3DualArmEnv(render_cameras=False)
+    runner = EpisodeRunner(
+        env, policy, task="test task", recorder=recorder, save_failed_episodes=False
+    )
+    try:
+        result = runner.run(seed=5, max_steps=3)
+        assert not result.final_info.get("success", False), (
+            "this test is only meaningful while the environment disagrees"
+        )
+        assert result.success, "the policy's declaration must win"
+        assert not result.discarded, "an episode the policy calls a success must be kept"
+        assert len(recorder.episodes) == 1
+    finally:
+        runner.close()
+
+
+def test_episode_is_discarded_when_neither_side_reports_success():
+    """The override must not turn every episode into a success."""
+
+    recorder = MemoryRecorder()
+    env = A3DualArmEnv(render_cameras=False)
+    runner = EpisodeRunner(
+        env,
+        HoldPolicy(),
+        task="test task",
+        recorder=recorder,
+        save_failed_episodes=False,
+    )
+    try:
+        result = runner.run(seed=5, max_steps=3)
+        assert not result.success
+        assert result.discarded
+        assert recorder.episodes == []
+    finally:
+        runner.close()
+
+
 def test_keyboard_events_select_arm_pause_stop_and_discard() -> None:
     policy = KeyboardTeleopPolicy()
     policy.handle_key(ord("2"))
