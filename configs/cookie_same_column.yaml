@@ -1,7 +1,23 @@
 # Five-at-a-time bevel insertion. Uniform 2.5 mm gaps and thin left fingertips.
+#
+# Scene randomization: the boxes and the arm start pose move between episodes.
+# These give a policy real variation -- with them at zero every episode is the same
+# picture and the same joint trajectory, which a policy can memorise instead of
+# learning.  The source box has no yaw on purpose: it carries the 80-Cookie layout,
+# and the batch experts find a row by grouping that layout on x.
+#
+# Sizes are half-ranges, so +/-6 mm means the draw is uniform in [-6, +6] mm.  They
+# are kept modest: the batch insertion is aimed at measured gaps in a 44 mm wide
+# workspace region, and a box moved too far stops being reachable at the
+# orientations the placement uses.
 physics_hz: 1000
 control_hz: 20
 horizon: 6000
+randomization:
+  source_bin_xy_m: [0.006, 0.006]
+  target_bin_xy_m: [0.004, 0.004]
+  target_bin_yaw_rad: 0.05
+  arm_home_rad: 0.015
 cookie_transfer:
   left_gripper_kp: 1200.0
   left_finger_pad_half_thickness_m: 0.0005

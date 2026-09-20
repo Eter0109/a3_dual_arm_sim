@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -113,6 +114,76 @@ class HomeConfig:
 
 
 @dataclass(frozen=True)
+class SceneRandomization:
+    """How far each thing in the scene may move between episodes.
+
+    Every value is a **half-range**: the applied offset is drawn uniformly from
+    ``[-value, +value]``.  All-zero means "the exact layout", which is what every
+    scene did before this existed.
+
+    This is *scene*-level variation, as opposed to the per-Cookie placement jitter
+    in ``CookieTaskConfig``: the boxes move, and the Cookies move with the source
+    box because they are laid out relative to it.  The distinction matters for
+    what a policy can learn -- moving the arm, the source box and the target box
+    changes the whole picture and the whole motion, while jittering one Cookie by a
+    pixel does not.
+
+    Why the source box has no yaw: the batch experts find a batch by grouping the
+    configured Cookie layout by ``x`` (``np.isclose(source[:, 0], x)``), so a
+    rotated source layout would silently stop matching its own rows.  Translating
+    the box is free; rotating it would need that grouping rewritten.
+    """
+
+    #: Source box translation, half-range per axis.  The Cookies follow it.
+    source_bin_xy_m: tuple[float, float] = (0.0, 0.0)
+    #: Working box translation and yaw.  Its slots rotate with it, and the experts
+    #: read the live box frame, so a modest yaw is safe.
+    target_bin_xy_m: tuple[float, float] = (0.0, 0.0)
+    target_bin_yaw_rad: float = 0.0
+    #: Spare box translation and yaw.  Only present in the two-box scene.
+    spare_bin_xy_m: tuple[float, float] = (0.0, 0.0)
+    spare_bin_yaw_rad: float = 0.0
+    #: Per-joint jitter on the deployment home, giving each episode a different
+    #: starting pose.  This is the variation the collection docstring used to call
+    #: out as missing: with it at zero the arm starts byte-identical every episode,
+    #: so a policy can memorise one joint trajectory.
+    arm_home_rad: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        """Whether any of the above is non-zero."""
+
+        return any(
+            (
+                any(self.source_bin_xy_m),
+                any(self.target_bin_xy_m),
+                self.target_bin_yaw_rad,
+                any(self.spare_bin_xy_m),
+                self.spare_bin_yaw_rad,
+                self.arm_home_rad,
+            )
+        )
+
+    def __post_init__(self) -> None:
+        if len(self.source_bin_xy_m) != 2 or len(self.target_bin_xy_m) != 2:
+            raise ValueError("box translation half-ranges must contain two values")
+        if len(self.spare_bin_xy_m) != 2:
+            raise ValueError("spare_bin_xy_m must contain two values")
+        for name in (
+            "source_bin_xy_m",
+            "target_bin_xy_m",
+            "target_bin_yaw_rad",
+            "spare_bin_xy_m",
+            "spare_bin_yaw_rad",
+            "arm_home_rad",
+        ):
+            values = getattr(self, name)
+            values = values if isinstance(values, tuple) else (values,)
+            if any(value < 0 or not math.isfinite(value) for value in values):
+                raise ValueError(f"{name} must be finite and non-negative")
+
+
+@dataclass(frozen=True)
 class SimConfig:
     physics_hz: int = 500
     control_hz: int = 20
@@ -138,6 +209,8 @@ class SimConfig:
     home: HomeConfig = field(default_factory=HomeConfig)
     cameras: CameraConfig = field(default_factory=CameraConfig)
     cookie_transfer: CookieSceneConfig = field(default_factory=CookieSceneConfig)
+    #: Per-episode scene variation.  All-zero keeps every scene exactly as it was.
+    randomization: SceneRandomization = field(default_factory=SceneRandomization)
 
     def __post_init__(self) -> None:
         if self.physics_hz <= 0 or self.control_hz <= 0:
@@ -180,6 +253,33 @@ def load_config(path: str | Path | None = None) -> SimConfig:
     home_raw = raw.pop("home", {})
     camera_raw = raw.pop("cameras", {})
     cookie_raw = raw.pop("cookie_transfer", {})
+    randomization_raw = {
+        # Defaults come from the dataclass, so a config only states what it wants
+        # to vary and an absent section means "the exact layout".
+        key: value
+        for key, value in (raw.pop("randomization", {}) or {}).items()
+    }
+    defaults_randomization = SceneRandomization()
+    randomization = SceneRandomization(
+        source_bin_xy_m=_float_tuple(
+            randomization_raw, "source_bin_xy_m", defaults_randomization.source_bin_xy_m
+        ),
+        target_bin_xy_m=_float_tuple(
+            randomization_raw, "target_bin_xy_m", defaults_randomization.target_bin_xy_m
+        ),
+        target_bin_yaw_rad=float(
+            randomization_raw.get("target_bin_yaw_rad", defaults_randomization.target_bin_yaw_rad)
+        ),
+        spare_bin_xy_m=_float_tuple(
+            randomization_raw, "spare_bin_xy_m", defaults_randomization.spare_bin_xy_m
+        ),
+        spare_bin_yaw_rad=float(
+            randomization_raw.get("spare_bin_yaw_rad", defaults_randomization.spare_bin_yaw_rad)
+        ),
+        arm_home_rad=float(
+            randomization_raw.get("arm_home_rad", defaults_randomization.arm_home_rad)
+        ),
+    )
     home = HomeConfig(
         left=tuple(float(v) for v in home_raw.get("left", HomeConfig.left)),
         right=tuple(float(v) for v in home_raw.get("right", HomeConfig.right)),
@@ -296,7 +396,13 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         ),
         deployment_home=_float_tuple(cookie_raw, "deployment_home", defaults.deployment_home),
     )
-    return SimConfig(home=home, cameras=cameras, cookie_transfer=cookie_transfer, **raw)
+    return SimConfig(
+        home=home,
+        cameras=cameras,
+        cookie_transfer=cookie_transfer,
+        randomization=randomization,
+        **raw,
+    )
 
 
 def _float_tuple(values: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:

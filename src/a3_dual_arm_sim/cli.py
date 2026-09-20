@@ -313,6 +313,31 @@ def _replay(args: argparse.Namespace) -> int:
         env.close()
 
 
+def _collect_scene(args: argparse.Namespace) -> int:
+    """Collect a registered scene.  One command for every scene, by design."""
+
+    from .collection import collect_dataset, scene_by_name
+
+    scene = scene_by_name(args.scene)
+    summary = collect_dataset(
+        args.root,
+        scene,
+        repo_id=args.repo_id or f"local/{args.scene}",
+        episodes=args.episodes,
+        start_seed=args.seed,
+        max_attempts=args.max_attempts,
+        position_noise_m=args.position_noise,
+        yaw_noise_rad=args.yaw_noise,
+        hold_steps=args.hold_steps,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+        fast_render=args.fast_render,
+        save_failed_episodes=args.keep_failures,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _collect_grasp(args: argparse.Namespace) -> int:
     summary = collect_grasp_dataset(
         args.root,
@@ -500,6 +525,59 @@ def parser() -> argparse.ArgumentParser:
     )
     _add_fast_render(collect_cookie)
     collect_cookie.set_defaults(function=_collect_cookie)
+
+    collect = commands.add_parser(
+        "collect",
+        help="Collect any registered scene; the scene owns env, expert and contract",
+    )
+    _add_common(collect)
+    collect.add_argument("--root", type=Path, required=True, help="Dataset output root")
+    collect.add_argument(
+        "--scene",
+        required=True,
+        help="Registered scene name (see a3_dual_arm_sim.collection.registered_scenes)",
+    )
+    collect.add_argument("--repo-id", default=None, help="Defaults to local/<scene>")
+    collect.add_argument("--episodes", type=int, default=10)
+    collect.add_argument("--max-attempts", type=int, default=None)
+    collect.add_argument(
+        "--position-noise",
+        type=float,
+        default=0.002,
+        help="Per-cookie XY jitter in metres; ignored by scenes with a fixed layout",
+    )
+    collect.add_argument(
+        "--yaw-noise",
+        type=float,
+        default=0.05,
+        help="Per-cookie yaw jitter in radians",
+    )
+    collect.add_argument(
+        "--hold-steps",
+        type=int,
+        default=40,
+        help="Steps to keep recording after the expert finishes its last placement",
+    )
+    collect.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Index of this shard when several processes collect in parallel",
+    )
+    collect.add_argument(
+        "--shard-count",
+        type=int,
+        default=1,
+        help="Total number of shards; seeds are interleaved across them",
+    )
+    collect.add_argument(
+        "--keep-failures",
+        action="store_true",
+        help="Also write episodes the environment did not accept; for diagnosis, "
+        "not for training",
+    )
+    _add_fast_render(collect)
+    collect.set_defaults(function=_collect_scene)
 
     train = commands.add_parser(
         "train-smolvla", help="Fine-tune SmolVLA on a validated A3 grasp dataset"

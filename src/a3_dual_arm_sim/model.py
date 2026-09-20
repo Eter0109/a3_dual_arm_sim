@@ -520,11 +520,31 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 assets, "mesh", name=f"cookie_{label}_mesh",
                 vertex=_vec(tuple(v for vertex in vertices for v in vertex)),
             )
-    # Source bin: on table
-    _add_open_bin(
+    # Source bin: on table.
+    #
+    # A mocap body, not a plain geom under `world`, so the whole bin can be moved
+    # between episodes without being knocked around during one.  Mocap bodies are
+    # positioned kinematically (`data.mocap_pos` / `mocap_quat`), act as
+    # infinite-mass obstacles for everything else, and are unaffected by contacts
+    # -- exactly the behaviour a heavy steel bin should have.  A free joint would
+    # have made it a dynamic body the Cookies could shove, and rebuilding the
+    # model per episode to move static geoms would cost seconds a rollout.
+    #
+    # The body sits at z=0 and the bin's z values stay absolute, so the geometry
+    # is unchanged; only the parent frame differs.  `center` therefore becomes
+    # local (0, 0) while the world position is the body's `pos`.
+    source_center = scene.source_bin_center_m
+    source_bin = ET.SubElement(
         world,
+        "body",
         name="source_bin",
-        center=scene.source_bin_center_m,
+        mocap="true",
+        pos=_vec((source_center[0], source_center[1], 0.0)),
+    )
+    _add_open_bin(
+        source_bin,
+        name="source_bin",
+        center=(0.0, 0.0),
         half_size=scene.source_bin_half_size_m,
         height=scene.source_bin_wall_height_m,
         rgba=BIN_RGBA,

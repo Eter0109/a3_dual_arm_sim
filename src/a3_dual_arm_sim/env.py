@@ -146,6 +146,16 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             raise ValueError(f"model is missing {object_type.name} {name}")
         return result
 
+    def _id_or_none(self, object_type: mujoco.mjtObj, name: str) -> int:
+        """Look up an optional model element, returning -1 when it is absent.
+
+        Scenes are built from shared code, so some elements only exist for some
+        configs (the spare box, for one).  Callers that can work without an
+        element should not have to know which configs include it.
+        """
+
+        return mujoco.mj_name2id(self.model, object_type, name)
+
     @property
     def last_applied_action(self) -> np.ndarray:
         return self._last_applied_action.copy()

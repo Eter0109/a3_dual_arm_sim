@@ -64,6 +64,7 @@ class EpisodeRunner:
         recorder: Recorder | None = None,
         realtime: bool = False,
         save_failed_episodes: bool = True,
+        reset_options: Mapping[str, Any] | None = None,
     ) -> None:
         if policy.action_mode != env.action_mode:
             raise ValueError(
@@ -75,10 +76,16 @@ class EpisodeRunner:
         self.recorder = recorder
         self.realtime = realtime
         self.save_failed_episodes = save_failed_episodes
+        #: Extra ``env.reset`` options, so a caller can control a scene's own
+        #: randomisation without wrapping the environment.  The collection driver
+        #: uses this to pass the two switches the batch scenes need set
+        #: differently: boxes and start pose move, per-Cookie jitter stays off,
+        #: because their insertion is aimed at 2.5 mm gaps a jitter would close.
+        self.reset_options = dict(reset_options) if reset_options else None
 
     def run(self, *, seed: int = 0, max_steps: int | None = None) -> EpisodeResult:
         context = EpisodeContext(seed=seed, task=self.task, action_mode=self.env.action_mode)
-        observation, _ = self.env.reset(seed=seed)
+        observation, _ = self.env.reset(seed=seed, options=self.reset_options)
         self.policy.reset(context)
         if self.recorder is not None:
             self.recorder.start_episode(context, type(self.policy).__name__)

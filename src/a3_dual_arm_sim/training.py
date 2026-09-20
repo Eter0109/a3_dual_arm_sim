@@ -10,6 +10,7 @@ from typing import Any
 
 from .checkpoint import checkpoint_embeds_vlm
 from .statistics import DEFAULT_STD_FLOOR, floor_normalization_std
+from .tasks import TASKS
 
 CAMERA_KEYS = (
     "observation.images.front",
@@ -19,10 +20,11 @@ CAMERA_KEYS = (
 
 
 #: Tasks whose datasets this auditor accepts, mapped to the success contract the
-#: collection code was expected to enforce.
+#: collection code was expected to enforce.  Derived from the shared task registry
+#: rather than listed here, so a new scene cannot be collectable but untrainable.
+#: `tasks` deliberately has no simulator import.
 SUPPORTED_TASKS = {
-    "a3_grasp": "dual_contact_centered_clear_lifted_low_motion_1s",
-    "a3_cookie_transfer": "exact_2x5_fill_touching_all_walls_upright_1s",
+    name: spec.success_contract for name, spec in TASKS.items()
 }
 
 

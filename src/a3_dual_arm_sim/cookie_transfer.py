@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
         if self.task_config.cookie_count != len(scene_config.cookie_source_positions_m):
             raise ValueError("task cookie_count must match configured cookie source positions")
         self.SOURCE_POSITIONS = scene_config.cookie_source_positions_m
-        self.SOURCE_CENTER = np.asarray(scene_config.source_bin_center_m, dtype=np.float64)
+        #: Nominal source-bin centre, as configured.  The live centre is
+        #: :attr:`SOURCE_CENTER`, which moves when the scene randomises the bin.
+        self.SOURCE_NOMINAL_CENTER = np.asarray(
+            scene_config.source_bin_center_m, dtype=np.float64
+        )
         self.SOURCE_INNER_HALF_SIZE = (
             np.asarray(scene_config.source_bin_half_size_m, dtype=np.float64)
             - scene_config.bin_wall_thickness_m
@@ -110,7 +115,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         self.COOKIE_RESET_Z = scene_config.cookie_reset_z_m
         self.DEPLOYMENT_HOME = np.asarray(scene_config.deployment_home, dtype=np.float64)
+        #: Home for the current episode; `reset` replaces it when the scene
+        #: randomises the start pose.  Initialised so a caller that never resets
+        #: still reads a sane pose.
+        self._randomized_deployment_home = self.DEPLOYMENT_HOME.copy()
+        self._scene_offset = np.zeros(2, dtype=np.float64)
+        self._scene_randomization_applied = False
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
+        self._source_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "source_bin")
+        # -1 means "this scene has no spare box", which is how the single-box
+        # configs are built; `_apply_scene_randomization` skips it then.
+        self._spare_bin_body = self._id_or_none(
+            mujoco.mjtObj.mjOBJ_BODY, "spare_target_bin"
+        )
         self._cookie_bodies = tuple(
             self._id(mujoco.mjtObj.mjOBJ_BODY, f"cookie_{index}")
             for index in range(self.task_config.cookie_count)
@@ -209,6 +226,21 @@ class A3CookieTransferEnv(A3DualArmEnv):
             float(self._sensor("L_finger_outer_touch_sensor")[0]),
         )
 
+    @property
+    def SOURCE_CENTER(self) -> np.ndarray:
+        """Live source-bin centre in world XY.
+
+        A property, not a constant, because the scene can move the bin between
+        episodes (:class:`SceneRandomization`) and every containment check has to
+        follow it -- otherwise a moved bin would report its Cookies as spilled.
+        Falls back to the configured centre for a model without the mocap body.
+        """
+
+        body = getattr(self, "_source_bin_body", -1)
+        if body is None or body < 0:
+            return self.SOURCE_NOMINAL_CENTER.copy()
+        return np.asarray(self.data.xpos[body][:2], dtype=np.float64)
+
     def privileged_cookie_in_source(self, index: int) -> bool:
         return self._cookie_inside_source(index)
 
@@ -235,6 +267,94 @@ class A3CookieTransferEnv(A3DualArmEnv):
         target_xy = np.asarray(self.TARGET_SLOTS_LOCAL[slot_index], dtype=np.float64)
         return bool(np.all(np.abs(local_position[:2] - target_xy) <= self.TARGET_SLOT_TOLERANCE))
 
+    def _apply_scene_randomization(self) -> np.ndarray:
+        """Move the boxes and jitter the start pose for this episode.
+
+        Returns the source-bin XY offset, which the Cookie layout is then placed
+        relative to.  Sizes come from :class:`SceneRandomization`; everything is
+        drawn in an order that does not change the rest of the reset, so a config
+        with all-zero ranges is byte-identical to one without this feature.
+
+        The target box keeps its floor contact: only XY and yaw are drawn, so it
+        never starts floating or sunk.  Same for the spare box.
+
+        ``_randomized_deployment_home`` is stored rather than applied here, because
+        ``reset`` writes the home after this returns.
+        """
+
+        scene = self.config.randomization
+        self._randomized_deployment_home = self.DEPLOYMENT_HOME.copy()
+        self._scene_randomization_applied = scene.enabled
+        if not scene.enabled:
+            return np.zeros(2)
+
+        rng = self.np_random
+        # 1. Source bin.  Translating it is enough to vary the reach, and its yaw
+        #    is deliberately not drawn: the experts group the layout by `x` to find
+        #    a row, which a rotation would break.
+        source_range = np.asarray(scene.source_bin_xy_m, dtype=np.float64)
+        offset = np.asarray(rng.uniform(-source_range, source_range, size=2), dtype=np.float64)
+        mocap_id = int(self.model.body_mocapid[self._source_bin_body])
+        if mocap_id < 0:
+            raise RuntimeError("the source_bin body is not a mocap body")
+        nominal = self.SOURCE_NOMINAL_CENTER
+        self.data.mocap_pos[mocap_id] = [nominal[0] + offset[0], nominal[1] + offset[1], 0.0]
+        self.data.mocap_quat[mocap_id] = [1.0, 0.0, 0.0, 0.0]
+
+        # 2. Working box: XY plus yaw, about its own centre.
+        self._place_free_box(
+            self._target_bin_body,
+            np.asarray(self.config.cookie_transfer.target_bin_world_position_m[:2]),
+            scene.target_bin_xy_m,
+            scene.target_bin_yaw_rad,
+        )
+        # 3. Spare box, when the scene has one.
+        spare_nominal = self.config.cookie_transfer.spare_target_bin_world_position_m
+        if self._spare_bin_body >= 0 and spare_nominal is not None:
+            self._place_free_box(
+                self._spare_bin_body,
+                np.asarray(spare_nominal[:2]),
+                scene.spare_bin_xy_m,
+                scene.spare_bin_yaw_rad,
+            )
+
+        # 4. Arm start pose.  This is the variation that matters most for a policy:
+        #    with it at zero every episode begins from a byte-identical pose, so a
+        #    policy can score well by memorising one trajectory.
+        if scene.arm_home_rad:
+            jitter = rng.uniform(-scene.arm_home_rad, scene.arm_home_rad, size=7)
+            for side, base in (("left", 0), ("right", 8)):
+                self._randomized_deployment_home[base : base + 7] += jitter
+        return offset
+
+    def _place_free_box(
+        self,
+        body: int,
+        nominal_xy: np.ndarray,
+        xy_half_range: tuple[float, float],
+        yaw_half_range: float,
+    ) -> None:
+        """Write a free box's pose, keeping its configured height and roll/pitch."""
+
+        joint = self.model.body_jntadr[body]
+        address = self.model.jnt_qposadr[joint]
+        nominal_z = float(self.data.qpos[address + 2])
+        xy_range = np.asarray(xy_half_range, dtype=np.float64)
+        dx, dy = self.np_random.uniform(-xy_range, xy_range, size=2)
+        yaw = float(self.np_random.uniform(-yaw_half_range, yaw_half_range))
+        self.data.qpos[address : address + 3] = [
+            nominal_xy[0] + dx,
+            nominal_xy[1] + dy,
+            nominal_z,
+        ]
+        self.data.qpos[address + 3 : address + 7] = [
+            math.cos(yaw / 2.0),
+            0.0,
+            0.0,
+            math.sin(yaw / 2.0),
+        ]
+        self.data.qvel[self.model.jnt_dofadr[joint] : self.model.jnt_dofadr[joint] + 6] = 0.0
+
     def reset(
         self,
         *,
@@ -245,7 +365,23 @@ class A3CookieTransferEnv(A3DualArmEnv):
             seed=seed,
             options={"randomize_objects": False},
         )
-        arm_values = np.r_[self.DEPLOYMENT_HOME[:7], self.DEPLOYMENT_HOME[8:15]]
+        randomize = (options or {}).get("randomize_cookies", True)
+        # Two independent switches, because they cost different things:
+        #
+        #   `randomize_scene`   moves the boxes and the arm start pose.  It shifts
+        #                       the whole Cookie layout by one translation, so the
+        #                       2.5 mm gaps the batch insertion depends on are
+        #                       exactly preserved -- a batch scene can and should
+        #                       have this on.
+        #   `randomize_cookies` jitters each Cookie on its own, which does change
+        #                       those gaps, so only the single-Cookie scene can
+        #                       afford it.
+        randomize_scene = (options or {}).get("randomize_scene", True)
+        self._scene_offset = (
+            self._apply_scene_randomization() if randomize_scene else np.zeros(2)
+        )
+        home = self._randomized_deployment_home if randomize_scene else self.DEPLOYMENT_HOME
+        arm_values = np.r_[home[:7], home[8:15]]
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):
             self.data.qpos[self._qpos_ids[name]] = value
             self.data.qvel[self._dof_ids[name]] = 0.0
@@ -253,13 +389,16 @@ class A3CookieTransferEnv(A3DualArmEnv):
             for joint_id in self._finger_joints[side]:
                 self.data.qpos[self.model.jnt_qposadr[joint_id]] = 0.0
                 self.data.qvel[self.model.jnt_dofadr[joint_id]] = 0.0
-        self._last_applied_action = self.DEPLOYMENT_HOME.copy()
-        self._apply_controls(self.DEPLOYMENT_HOME)
+        self._last_applied_action = home.copy()
+        self._apply_controls(home)
         mujoco.mj_forward(self.model, self.data)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
-        randomize = (options or {}).get("randomize_cookies", True)
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
+            # The layout is expressed in the source bin's own frame, so a moved bin
+            # carries its Cookies with it.
+            base_x = base_x + self._scene_offset[0]
+            base_y = base_y + self._scene_offset[1]
             if randomize:
                 dx, dy = self.np_random.uniform(
                     -self.task_config.position_noise_m,
