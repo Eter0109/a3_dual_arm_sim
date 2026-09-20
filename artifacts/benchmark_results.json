@@ -9,8 +9,8 @@
       "min_score": 10,
       "max_score": 10,
       "success_rate": 1.0,
-      "mean_steps": 425.9,
-      "mean_wall_seconds": 60.01,
+      "mean_steps": 429.6,
+      "mean_wall_seconds": 63.13,
       "score_distribution": {
         "10": 20
       }
@@ -22,18 +22,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 58.81,
+        "steps": 426,
+        "wall_seconds": 59.29,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0931,
-          0.098,
+          0.0858,
+          0.0903,
           0.7497
         ],
         "source_bin_pos": [
-          0.1753,
-          0.3145
+          0.1777,
+          0.3104
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -44,18 +44,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 58.51,
+        "steps": 423,
+        "wall_seconds": 62.63,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0936,
-          0.1018,
+          0.0879,
+          0.109,
           0.7497
         ],
         "source_bin_pos": [
-          0.175,
-          0.3159
+          0.1752,
+          0.324
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -66,20 +66,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 439,
-        "wall_seconds": 58.71,
+        "steps": 428,
+        "wall_seconds": 66.81,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0963,
-          0.0983,
+          0.1012,
+          0.0917,
           0.7497
         ],
         "source_bin_pos": [
-          0.1745,
-          0.3146
+          0.1702,
+          0.311
         ],
-        "phase": "RETRACT",
+        "phase": "OPEN",
         "failure_reason": null
       },
       {
@@ -88,18 +88,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 64.22,
+        "steps": 422,
+        "wall_seconds": 69.36,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0962,
-          0.1003,
+          0.101,
+          0.1014,
           0.7497
         ],
         "source_bin_pos": [
-          0.1742,
-          0.3145
+          0.1667,
+          0.3097
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -110,18 +110,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 54.97,
+        "steps": 426,
+        "wall_seconds": 63.13,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0969,
-          0.0983,
+          0.1045,
+          0.0916,
           0.7497
         ],
         "source_bin_pos": [
-          0.1759,
-          0.315
+          0.1839,
+          0.3152
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -132,18 +132,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 50.79,
+        "steps": 431,
+        "wall_seconds": 66.03,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0951,
-          0.0991,
+          0.0953,
+          0.0956,
           0.7497
         ],
         "source_bin_pos": [
-          0.1756,
-          0.3156
+          0.1811,
+          0.3212
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -154,18 +154,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 60.7,
+        "steps": 426,
+        "wall_seconds": 62.09,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0944,
-          0.0993,
+          0.0924,
+          0.0975,
           0.7497
         ],
         "source_bin_pos": [
-          0.1751,
-          0.3147
+          0.1758,
+          0.3119
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -176,18 +176,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 64.36,
+        "steps": 432,
+        "wall_seconds": 65.84,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0961,
-          0.0989,
+          0.1005,
+          0.0945,
           0.7497
         ],
         "source_bin_pos": [
-          0.1753,
-          0.3158
+          0.1775,
+          0.3229
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -198,20 +198,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 66.11,
+        "steps": 441,
+        "wall_seconds": 66.15,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0943,
-          0.101,
+          0.0914,
+          0.1057,
           0.7497
         ],
         "source_bin_pos": [
-          0.1747,
-          0.316
+          0.1715,
+          0.3247
         ],
-        "phase": "OPEN",
+        "phase": "RETRACT",
         "failure_reason": null
       },
       {
@@ -220,18 +220,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 69.74,
+        "steps": 421,
+        "wall_seconds": 52.75,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0954,
-          0.1011,
+          0.0971,
+          0.1055,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3146
+          0.1824,
+          0.3107
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -242,20 +242,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 70.96,
+        "steps": 442,
+        "wall_seconds": 62.3,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0963,
-          0.0986,
+          0.1016,
+          0.093,
           0.7497
         ],
         "source_bin_pos": [
-          0.1759,
-          0.3144
+          0.1841,
+          0.3092
         ],
-        "phase": "OPEN",
+        "phase": "RETRACT",
         "failure_reason": null
       },
       {
@@ -264,17 +264,17 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 48.6,
+        "steps": 430,
+        "wall_seconds": 72.66,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0954,
-          0.0981,
+          0.0969,
+          0.0908,
           0.7497
         ],
         "source_bin_pos": [
-          0.1743,
+          0.1676,
           0.315
         ],
         "phase": "OPEN",
@@ -286,18 +286,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 67.61,
+        "steps": 432,
+        "wall_seconds": 69.89,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0937,
-          0.0987,
+          0.0888,
+          0.0936,
           0.7497
         ],
         "source_bin_pos": [
-          0.1745,
-          0.3159
+          0.17,
+          0.3239
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -308,18 +308,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 54.52,
+        "steps": 431,
+        "wall_seconds": 59.58,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0962,
-          0.0992,
+          0.1012,
+          0.0951,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3157
+          0.1823,
+          0.3221
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -330,18 +330,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 62.89,
+        "steps": 422,
+        "wall_seconds": 64.38,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0957,
-          0.1015,
+          0.0991,
+          0.1073,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3147
+          0.1816,
+          0.3122
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -352,18 +352,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 65.36,
+        "steps": 432,
+        "wall_seconds": 72.16,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0944,
-          0.098,
+          0.0919,
+          0.0909,
           0.7497
         ],
         "source_bin_pos": [
-          0.1754,
-          0.3156
+          0.1789,
+          0.3213
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -374,18 +374,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 58.94,
+        "steps": 427,
+        "wall_seconds": 48.97,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0934,
-          0.0994,
+          0.0869,
+          0.0969,
           0.7497
         ],
         "source_bin_pos": [
-          0.1751,
-          0.3149
+          0.1763,
+          0.3136
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -396,18 +396,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 51.95,
+        "steps": 424,
+        "wall_seconds": 55.54,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0952,
-          0.0995,
+          0.0961,
+          0.0973,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3143
+          0.1819,
+          0.3082
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -418,18 +418,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 427,
-        "wall_seconds": 55.38,
+        "steps": 430,
+        "wall_seconds": 59.5,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0941,
-          0.0983,
+          0.0906,
+          0.0917,
           0.7497
         ],
         "source_bin_pos": [
-          0.1748,
-          0.3154
+          0.173,
+          0.3193
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -440,20 +440,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 426,
-        "wall_seconds": 57.08,
+        "steps": 446,
+        "wall_seconds": 63.51,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0941,
-          0.0983,
+          0.0905,
+          0.091,
           0.7497
         ],
         "source_bin_pos": [
-          0.1748,
-          0.3159
+          0.1734,
+          0.3235
         ],
-        "phase": "OPEN",
+        "phase": "RETRACT",
         "failure_reason": null
       }
     ]
@@ -468,8 +468,8 @@
       "min_score": 10,
       "max_score": 10,
       "success_rate": 1.0,
-      "mean_steps": 424.6,
-      "mean_wall_seconds": 66.86,
+      "mean_steps": 425.9,
+      "mean_wall_seconds": 60.83,
       "score_distribution": {
         "10": 20
       }
@@ -481,18 +481,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 66.32,
+        "steps": 425,
+        "wall_seconds": 60.75,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0932,
-          0.098,
+          0.0858,
+          0.0904,
           0.7497
         ],
         "source_bin_pos": [
-          0.1753,
-          0.3145
+          0.1777,
+          0.3104
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -503,20 +503,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 438,
-        "wall_seconds": 55.62,
+        "steps": 424,
+        "wall_seconds": 73.94,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0936,
-          0.1018,
+          0.0879,
+          0.109,
           0.7497
         ],
         "source_bin_pos": [
-          0.175,
-          0.3159
+          0.1752,
+          0.324
         ],
-        "phase": "RETRACT",
+        "phase": "OPEN",
         "failure_reason": null
       },
       {
@@ -525,18 +525,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 68.09,
+        "steps": 424,
+        "wall_seconds": 66.81,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0963,
-          0.0983,
+          0.1013,
+          0.0918,
           0.7497
         ],
         "source_bin_pos": [
-          0.1745,
-          0.3146
+          0.1702,
+          0.311
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -547,18 +547,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 69.8,
+        "steps": 419,
+        "wall_seconds": 62.4,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0962,
-          0.1003,
+          0.101,
+          0.1015,
           0.7497
         ],
         "source_bin_pos": [
-          0.1742,
-          0.3145
+          0.1667,
+          0.3097
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -569,18 +569,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 62.49,
+        "steps": 427,
+        "wall_seconds": 56.53,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0969,
-          0.0983,
+          0.1045,
+          0.0916,
           0.7497
         ],
         "source_bin_pos": [
-          0.1759,
-          0.315
+          0.1839,
+          0.3152
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -591,18 +591,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 63.24,
+        "steps": 426,
+        "wall_seconds": 61.54,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0951,
-          0.099,
+          0.0953,
+          0.0954,
           0.7497
         ],
         "source_bin_pos": [
-          0.1756,
-          0.3156
+          0.1811,
+          0.3212
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -613,18 +613,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 425,
-        "wall_seconds": 69.42,
+        "steps": 423,
+        "wall_seconds": 50.53,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0945,
-          0.0995,
+          0.0924,
+          0.0975,
           0.7497
         ],
         "source_bin_pos": [
-          0.1751,
-          0.3147
+          0.1758,
+          0.3119
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -635,18 +635,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 62.2,
+        "steps": 428,
+        "wall_seconds": 64.3,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0961,
-          0.0989,
+          0.1005,
+          0.0946,
           0.7497
         ],
         "source_bin_pos": [
-          0.1753,
-          0.3158
+          0.1775,
+          0.3229
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -657,18 +657,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 422,
-        "wall_seconds": 66.2,
+        "steps": 424,
+        "wall_seconds": 60.94,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0943,
-          0.1011,
+          0.0914,
+          0.1056,
           0.7497
         ],
         "source_bin_pos": [
-          0.1747,
-          0.316
+          0.1715,
+          0.3247
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -679,18 +679,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 69.14,
+        "steps": 419,
+        "wall_seconds": 63.9,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0954,
-          0.1012,
+          0.0971,
+          0.1055,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3146
+          0.1824,
+          0.3107
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -701,18 +701,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 67.48,
+        "steps": 424,
+        "wall_seconds": 58.34,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0963,
-          0.0986,
+          0.1016,
+          0.0929,
           0.7497
         ],
         "source_bin_pos": [
-          0.1759,
-          0.3144
+          0.1841,
+          0.3092
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -723,17 +723,17 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 77.42,
+        "steps": 425,
+        "wall_seconds": 57.24,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0954,
-          0.098,
+          0.097,
+          0.0906,
           0.7497
         ],
         "source_bin_pos": [
-          0.1743,
+          0.1676,
           0.315
         ],
         "phase": "OPEN",
@@ -745,18 +745,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 76.02,
+        "steps": 429,
+        "wall_seconds": 62.44,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0938,
-          0.0986,
+          0.0888,
+          0.0936,
           0.7497
         ],
         "source_bin_pos": [
-          0.1745,
-          0.3159
+          0.17,
+          0.3239
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -767,18 +767,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 67.11,
+        "steps": 428,
+        "wall_seconds": 67.12,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0962,
-          0.0991,
+          0.1012,
+          0.0949,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3157
+          0.1823,
+          0.3221
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -789,18 +789,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 421,
-        "wall_seconds": 67.33,
+        "steps": 419,
+        "wall_seconds": 55.87,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0958,
-          0.1014,
+          0.0991,
+          0.1072,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3147
+          0.1816,
+          0.3122
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -811,18 +811,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 73.06,
+        "steps": 429,
+        "wall_seconds": 57.73,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0944,
-          0.0982,
+          0.0919,
+          0.0908,
           0.7497
         ],
         "source_bin_pos": [
-          0.1754,
-          0.3156
+          0.1789,
+          0.3213
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -833,18 +833,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 62.53,
+        "steps": 425,
+        "wall_seconds": 56.18,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0934,
-          0.0994,
+          0.0869,
+          0.0969,
           0.7497
         ],
         "source_bin_pos": [
-          0.1751,
-          0.3149
+          0.1763,
+          0.3136
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -855,20 +855,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 423,
-        "wall_seconds": 61.95,
+        "steps": 442,
+        "wall_seconds": 66.01,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0953,
-          0.0994,
+          0.0962,
+          0.0974,
           0.7497
         ],
         "source_bin_pos": [
-          0.1757,
-          0.3143
+          0.1819,
+          0.3082
         ],
-        "phase": "OPEN",
+        "phase": "RETRACT",
         "failure_reason": null
       },
       {
@@ -877,18 +877,18 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 424,
-        "wall_seconds": 67.39,
+        "steps": 428,
+        "wall_seconds": 56.32,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0941,
-          0.0982,
+          0.0906,
+          0.0916,
           0.7497
         ],
         "source_bin_pos": [
-          0.1748,
-          0.3154
+          0.173,
+          0.3193
         ],
         "phase": "OPEN",
         "failure_reason": null
@@ -899,20 +899,20 @@
         "score": 10,
         "max_score": 10,
         "success": true,
-        "steps": 437,
-        "wall_seconds": 64.41,
+        "steps": 429,
+        "wall_seconds": 57.78,
         "cookies_in_target": 10,
         "cookies_in_source": 70,
         "target_bin_pos": [
-          0.0941,
-          0.0981,
+          0.0905,
+          0.0912,
           0.7497
         ],
         "source_bin_pos": [
-          0.1748,
-          0.3159
+          0.1734,
+          0.3235
         ],
-        "phase": "RETRACT",
+        "phase": "OPEN",
         "failure_reason": null
       }
     ]

@@ -54,14 +54,14 @@ def main() -> int:
     parser.add_argument(
         "--target-box-noise",
         type=float,
-        default=0.002,
-        help="Target box random position noise in meters (default: 0.002 = 2mm)",
+        default=0.010,
+        help="Target box random position noise in meters (default: 0.010 = 1cm)",
     )
     parser.add_argument(
         "--source-box-noise",
         type=float,
-        default=0.001,
-        help="Source box random position noise in meters (default: 0.001 = 1mm)",
+        default=0.010,
+        help="Source box random position noise in meters (default: 0.010 = 1cm)",
     )
     parser.add_argument(
         "--workers",

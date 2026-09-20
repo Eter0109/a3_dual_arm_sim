@@ -203,12 +203,12 @@ class CookieBatchBenchmark:
         *,
         max_steps: int = 1000,
         randomize_boxes: bool = True,
-        target_bin_noise_m: float = 0.002,
-        target_bin_yaw_noise_rad: float = 0.015,
-        source_bin_noise_m: float = 0.001,
+        target_bin_noise_m: float = 0.010,
+        target_bin_yaw_noise_rad: float = 0.030,
+        source_bin_noise_m: float = 0.010,
         randomize_cookies: bool = True,
-        cookie_noise_m: float = 0.0002,
-        cookie_yaw_noise_rad: float = 0.01,
+        cookie_noise_m: float = 0.0003,
+        cookie_yaw_noise_rad: float = 0.015,
         render: bool = False,
     ):
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
