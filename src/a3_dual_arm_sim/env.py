@@ -203,6 +203,17 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._safety_stop = True
         self._safety_reason = reason
 
+    def solve_ik(
+        self,
+        position: np.ndarray,
+        quaternion: np.ndarray,
+        initial_q: np.ndarray | None = None,
+        arm: Literal["L", "R"] | int = "L",
+    ) -> np.ndarray:
+        """Solve inverse kinematics for an absolute Cartesian pose."""
+        arm_index = 0 if arm in ("L", 0) else 1
+        return self._ik.solve(position, quaternion, initial_q, arm_index=arm_index)
+
     def set_key_callback(self, callback: Any) -> None:
         if self._viewer is not None:
             raise RuntimeError("key callback must be set before opening the viewer")
@@ -211,16 +222,21 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
     def step(
         self, action: np.ndarray
     ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
-        requested = validate_action(action, self.action_mode)
+        mode = (
+            "cartesian_delta"
+            if len(action) == CARTESIAN_ACTION_DIM
+            else self.action_mode
+        )
+        requested = validate_action(action, mode)
         if self._safety_stop:
             applied = self._current_joint_action()
         else:
             canonical = (
                 requested
-                if self.action_mode == "joint_position"
-                else self._ik.convert(self.data, requested)
+                if mode == "joint_position"
+                else self._ik.convert(self.data, requested, self._last_applied_action)
             )
-            if self.action_mode == "cartesian_delta":
+            if mode == "cartesian_delta":
                 # An idle arm holds its commanded pose, not its gravity-deflected
                 # measurement. Re-targeting the measurement integrates sag forever.
                 for offset, start in ((0, 0), (7, 8)):

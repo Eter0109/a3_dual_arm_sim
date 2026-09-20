@@ -47,16 +47,16 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
 
     def _validate_target_workspace(self):
         """Reject unreachable table layouts before starting a physical grasp."""
-        work = mujoco.MjData(self.model)
-        work.qpos[:] = self.data.qpos
         for column in range(2):
             for clearance in (0.0, 0.085):
                 position, rotation = self._place_pose(clearance, column)
-                target_q, actual_q, error = np.empty(4), np.empty(4), np.empty(3)
+                target_q = np.empty(4, dtype=np.float64)
                 mujoco.mju_mat2Quat(target_q, rotation.ravel())
-                q = self._solve_l(position, target_q, self.q_transit)
+                q = self.env.solve_ik(position, target_q, self.q_transit)
+                work = self.env._ik._work
                 work.qpos[self._l_qpos] = q
                 mujoco.mj_kinematics(self.model, work)
+                actual_q, error = np.empty(4), np.empty(3)
                 mujoco.mju_mat2Quat(actual_q, work.site_xmat[self._l_site])
                 mujoco.mju_subQuat(error, target_q, actual_q)
                 distance = np.linalg.norm(work.site_xpos[self._l_site] - position)
@@ -88,7 +88,6 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
 
     def _contact_chain(self):
         fingers = tuple(self.env._left_finger_geoms)
-        # Collapse all collision pieces of a Cookie into one graph node.
         groups = getattr(
             self.env, "_cookie_collision_geoms",
             tuple(frozenset((geom,)) for geom in self.env._cookie_geoms),
@@ -138,61 +137,73 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.max_pad_force = max(self.max_pad_force, float(max(total_forces)))
         return nodes <= seen and bool(np.all(forces > 0.12)), forces
 
-    def _insertion_jammed(self, forces):
-        self._jam_count = self._jam_count + 1 if max(forces) > self.MAX_INSERTION_FORCE_N else 0
+    def _insertion_jammed(self, forces, limit=None):
+        threshold = self.MAX_INSERTION_FORCE_N if limit is None else limit
+        self._jam_count = self._jam_count + 1 if max(forces) > threshold else 0
         return self._jam_count >= 3
 
-    def _trajectory_command(
-        self, target: np.ndarray, gripper: float, *, min_steps: int = 6
-    ) -> np.ndarray:
-        key = (target.tobytes(), float(gripper), min_steps)
-        if self._motion_key != key:
-            start = self.env.last_applied_action.copy()
-            joint_delta = float(np.max(np.abs(target - start[:7])))
-            gripper_delta = abs(gripper - float(start[7]))
-            points = max(
-                int(np.ceil((joint_delta - 1e-9) / 0.040)),
-                int(np.ceil((gripper_delta - 1e-9) / self.max_gripper_step)),
-                min_steps,
-            )
-            self._motion_actions = []
-            for alpha in np.linspace(0.0, 1.0, points)[1:]:
-                action = np.zeros(16, dtype=np.float64)
-                action[:7] = (1.0 - alpha) * start[:7] + alpha * target
-                action[7] = (1.0 - alpha) * start[7] + alpha * gripper
-                action[8:15] = self.q_r_hold
-                action[15] = self.right_gripper
-                self._motion_actions.append(action)
-            self._motion_key = key
-            self._motion_done = not self._motion_actions
-        action = (
-            self._motion_actions.pop(0)
-            if self._motion_actions
-            else self._hold_command(target, gripper)
-        )
-        self._motion_done = not self._motion_actions
+    def _hold_command(self, opening: float) -> np.ndarray:
+        action = np.zeros(14, dtype=np.float64)
+        action[6] = np.clip(2.0 * float(opening) - 1.0, -1.0, 1.0)
+        action[13] = 1.0
         return action
 
-    def _servo(self, position, rotation, opening, speed=0.0015):
-        """Rate-limited Cartesian target, IK position hold, measured-pose completion."""
-        current = self.data.site_xpos[self._l_site].copy()
-        if self._servo_pos is None:
-            self._servo_pos = current.copy()
-        delta = np.asarray(position) - self._servo_pos
-        self._servo_pos += delta * min(1.0, speed / max(np.linalg.norm(delta), 1e-9))
-        # Do not let a blocked insertion accumulate a large virtual spring.
-        tracking = self._servo_pos - current
-        max_lag = max(0.008, 3.5 * speed)
-        if np.linalg.norm(tracking) > max_lag:
-            self._servo_pos = current + tracking * (max_lag / np.linalg.norm(tracking))
-        target_q, actual_q, error_r = np.empty(4), np.empty(4), np.empty(3)
-        mujoco.mju_mat2Quat(target_q, np.asarray(rotation).ravel())
-        mujoco.mju_mat2Quat(actual_q, self.data.site_xmat[self._l_site])
-        mujoco.mju_subQuat(error_r, target_q, actual_q)
-        error_r = self.data.site_xmat[self._l_site].reshape(3, 3) @ error_r
-        q = self._solve_l(self._servo_pos, target_q, self.env.last_applied_action[:7])
-        reached = np.linalg.norm(position - current) < 0.0020 and np.linalg.norm(error_r) < 0.045
-        return self._hold_command(q, opening), reached
+    def _servo(self, position, rotation, opening, speed=0.0024):
+        """Rate-limited Cartesian delta TCP command."""
+        work = self.env._ik._work
+        work.qpos[:] = self.data.qpos
+        work.qpos[list(self.env._ik._qpos_ids[0])] = self.env.last_applied_action[:7]
+        work.qpos[list(self.env._ik._qpos_ids[1])] = self.env.last_applied_action[8:15]
+        mujoco.mj_kinematics(self.model, work)
+        cmd_pos = work.site_xpos[self._l_site].copy()
+
+        target_pos = np.asarray(position, dtype=np.float64)
+        pos_err = target_pos - cmd_pos
+        dist = np.linalg.norm(pos_err)
+
+        step_dist = min(dist, speed)
+        if dist > 1e-6:
+            delta_p = (pos_err / dist) * (step_dist / self.env.config.cartesian_translation_scale_m)
+        else:
+            delta_p = np.zeros(3)
+        delta_p = np.clip(delta_p, -1.0, 1.0)
+
+        target_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(target_q, np.asarray(rotation, dtype=np.float64).ravel())
+        cur_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(cur_q, work.site_xmat[self._l_site])
+
+        rot_err = np.empty(3, dtype=np.float64)
+        mujoco.mju_subQuat(rot_err, target_q, cur_q)
+        rot_dist = np.linalg.norm(rot_err)
+
+        max_rot = min(0.05, self.env.config.cartesian_rotation_scale_rad)
+        step_rot = min(rot_dist, max_rot)
+        if rot_dist > 1e-6:
+            delta_r = (rot_err / rot_dist) * (step_rot / self.env.config.cartesian_rotation_scale_rad)
+        else:
+            delta_r = np.zeros(3)
+        delta_r = np.clip(delta_r, -1.0, 1.0)
+
+        delta_g = np.clip(2.0 * float(opening) - 1.0, -1.0, 1.0)
+
+        action = np.zeros(14, dtype=np.float64)
+        action[0:3] = delta_p
+        action[3:6] = delta_r
+        action[6] = delta_g
+        action[13] = 1.0
+
+        meas_pos = self.data.site_xpos[self._l_site]
+        meas_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(meas_q, self.data.site_xmat[self._l_site])
+        meas_rot_err = np.empty(3, dtype=np.float64)
+        mujoco.mju_subQuat(meas_rot_err, target_q, meas_q)
+
+        reached = (
+            np.linalg.norm(target_pos - meas_pos) < 0.0025
+            and np.linalg.norm(meas_rot_err) < 0.045
+        )
+        return action, reached
 
     def _candidate_batches(self):
         """Prefer exposed ends; do not force an insertion through fallen Cookies."""
@@ -214,6 +225,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 ):
                     yield batch
 
+    @property
+    def _approach_q(self) -> np.ndarray:
+        return self.env.solve_ik(
+            self._high_eef, self._target_quat_canonical, self.env.current_joint_action[:7]
+        )
+
     def _select_batch(self):
         source = np.asarray(self.env.SOURCE_POSITIONS)
         self.batch_indices = next(self._candidate_batches(), [])
@@ -231,12 +248,6 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._opening = self._insert_opening
         self._pick_eef = self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
         self._high_eef = self._pick_eef + [0, 0, 0.105]
-        # Seed from the measured deployment pose so the first motion remains
-        # on the nearby mirrored IK branch instead of taking the old transit
-        # branch with a large wrist/elbow rotation.
-        self._approach_q = self._solve_l(
-            self._high_eef, self._target_quat_canonical, self.env.current_joint_action[:7]
-        )
         self._advance(CookiePhase.APPROACH)
 
     def _place_pose(self, clearance=0.0, column_index=None):
@@ -261,28 +272,26 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return self._act_step(observation, task)
         except RuntimeError as exc:
             self._fail(str(exc))
-            return self.env.last_applied_action.copy()
+            return self._hold_command(self._opening)
 
     def _act_step(self, observation=None, task=""):
         del observation, task
         if self.finished:
-            return self.env.last_applied_action.copy()
+            return self._hold_command(self._opening)
         if self.phase is CookiePhase.SELECT_COOKIE:
             self._select_batch()
         self.phase_steps += 1
         self._contact_chain()
         if self.phase_steps > 420:
             self._fail(f"batch phase timeout; contacts={self._contact_chain()[1].tolist()}")
-            return self.env.last_applied_action.copy()
+            return self._hold_command(self._opening)
         if self.phase is CookiePhase.APPROACH:
-            # Travel with the jaws fully open.  The target batch width is set
-            # only once the tool is steady above the Cookies.
-            action = self._trajectory_command(self._approach_q, 1.0)
-            if self._motion_done and self._reached(self._approach_q, tolerance=0.025):
+            action, reached = self._servo(self._high_eef, self._canonical, 1.0, speed=0.015)
+            if reached or self.phase_steps >= 15:
                 self._advance(CookiePhase.PRE_CLOSE)
             return action
         if self.phase is CookiePhase.PRE_CLOSE:
-            action = self._hold_command(self._approach_q, self._opening)
+            action, _ = self._servo(self._high_eef, self._canonical, self._opening, speed=0.001)
             actual_opening = float(self.env.current_joint_action[7])
             if abs(actual_opening - self._opening) <= 0.006:
                 self._preclose_stable += 1
@@ -300,9 +309,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if self.phase is CookiePhase.DESCEND:
             if self._insertion_jammed(self._total_pad_forces):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
-                return self.env.last_applied_action.copy()
+                return self._hold_command(self._opening)
             dist = np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
-            descend_speed = 0.0022 if dist > 0.015 else 0.0006
+            descend_speed = 0.0024 if dist > 0.015 else 0.0006
             action, reached = self._servo(
                 self._pick_eef, self._canonical, self._opening, speed=descend_speed
             )
@@ -315,7 +324,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             if not chain or min(forces) < 1.3:
                 self._opening = max(0.28, self._opening - close_rate)
             self._stable = self._stable + 1 if chain and min(forces) >= 1.0 else 0
-            action, _ = self._servo(self._pick_eef, self._canonical, self._opening)
+            action, _ = self._servo(self._pick_eef, self._canonical, self._opening, speed=0.0005)
             if self._stable >= 5:
                 self._grip_reference = self._positions().copy()
                 self._lift_start_eef = self.data.site_xpos[self._l_site].copy()
@@ -326,7 +335,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             if min(forces) < 1.0:
                 self._opening = max(0.28, self._opening - 0.001)
             dist_lifted = np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
-            lift_speed = 0.0010 if dist_lifted < 0.015 else 0.0022
+            lift_speed = 0.0010 if dist_lifted < 0.015 else 0.0024
             action, reached = self._servo(
                 self._high_eef, self._canonical, self._opening, speed=lift_speed
             )
@@ -334,7 +343,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             tool_rise = self.data.site_xpos[self._l_site, 2] - self._lift_start_eef[2]
             if tool_rise > 0.015 and np.any(tool_rise - lifted > 0.016):
                 self._fail("Cookie dropped during lift")
-                return self.env.last_applied_action.copy()
+                return self._hold_command(self._opening)
             if reached:
                 if not np.all(lifted > 0.070):
                     self._fail(f"not all five lifted: {lifted.tolist()}")
@@ -359,15 +368,15 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             offsets = (self._positions() - self.data.site_xpos[self._l_site]) @ r
             if np.max(np.linalg.norm(offsets - self._held_offsets, axis=1)) > 0.016:
                 self._fail("Cookie slipped out of batch during transport")
-                return self.env.last_applied_action.copy()
+                return self._hold_command(self._opening)
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
             clearance = 0.085 if moving else 0.0
             pos, rotation = self._place_pose(clearance)
             if moving:
-                servo_speed = 0.0024
+                servo_speed = 0.0030
             else:
                 dist_to_place = np.linalg.norm(pos - self.data.site_xpos[self._l_site])
-                servo_speed = 0.0018 if dist_to_place > 0.015 else 0.0007
+                servo_speed = 0.0020 if dist_to_place > 0.015 else 0.0008
             action, reached = self._servo(
                 pos,
                 rotation,
@@ -390,7 +399,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return action
         if self.phase is CookiePhase.RETRACT:
             action, reached = self._servo(
-                self._retract_pos, self._retract_rotation, self._opening, speed=0.0030
+                self._retract_pos, self._retract_rotation, self._opening, speed=0.0035
             )
             if reached:
                 self._advance(CookiePhase.VERIFY_RELEASE)
@@ -410,7 +419,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     if not self.env.privileged_cookie_in_target(i)
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
-                return self.env.last_applied_action.copy()
+                return self._hold_command(self._opening)
             if self._stable >= 12:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
@@ -418,6 +427,6 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._advance(
                     CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
                 )
-            return self.env.last_applied_action.copy()
+            return self._hold_command(self._opening)
         self._fail("unsupported batch phase")
-        return self.env.last_applied_action.copy()
+        return self._hold_command(self._opening)

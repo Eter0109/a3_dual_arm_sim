@@ -127,7 +127,7 @@ def test_batch_preclose_happens_above_cookies_before_descent():
             if expert.phase is CookiePhase.PRE_CLOSE:
                 break
         assert expert.phase is CookiePhase.PRE_CLOSE
-        assert approach[7] == 1.0
+        assert approach[6] == 1.0
         for _ in range(24):
             env.step(expert.act())
             if expert.phase is CookiePhase.DESCEND:
@@ -199,7 +199,12 @@ def test_batch_success_rejects_held_or_overhanging_cookie(monkeypatch):
         expert.reset()
         right_home = env.last_applied_action[8:15].copy()
         assert expert.box_support is None
-        np.testing.assert_array_equal(expert.act()[8:15], right_home)
+        action = expert.act()
+        assert len(action) == 14
+        np.testing.assert_allclose(action[7:13], 0.0)
+        assert action[13] == 1.0
+        env.step(action)
+        np.testing.assert_allclose(env.last_applied_action[8:15], right_home, atol=1e-5)
         p = env.privileged_target_slot_world(0, env._target_cookie_center_z)
         env.set_cookie_pose(0, tuple(p))
         assert env.privileged_cookie_in_target(0)

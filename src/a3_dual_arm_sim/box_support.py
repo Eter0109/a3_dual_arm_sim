@@ -113,7 +113,7 @@ class BoxSupportController:
             except RuntimeError as exc:
                 self.failed = str(exc)
                 return self.command.copy()
-        self.command[8:15] += np.clip(self.target - self.command[8:15], -0.012, 0.012)
+        self.command[8:15] += np.clip(self.target - self.command[8:15], -0.025, 0.025)
         self.command[15] = (
             max(0.0, self.command[15] - 0.025) if self.phase in ("close", "lift", "tilt") else 0.7
         )

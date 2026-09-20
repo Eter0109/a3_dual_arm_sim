@@ -50,6 +50,7 @@ def main():
         )
     env = A3CookieTransferEnv(
         config,
+        action_mode="cartesian_delta",
         render_mode="human" if args.render else None,
         render_cameras=False,
         task_config=CookieTransferTaskConfig(
@@ -102,7 +103,7 @@ def main():
             ):
                 print(
                     f"step={step} eef={env.data.site_xpos[expert._l_site].round(4)} "
-                    f"opening={action[7]:.4f} target={info['cookies_in_target']} "
+                    f"opening={(action[6] + 1) / 2:.4f} target={info['cookies_in_target']} "
                     f"actual_gap_mm={env.current_joint_action[7] * 85:.3f} "
                     f"pad_forces={expert._contact_chain()[1].round(3)} "
                     f"positions={expert._positions().round(4).tolist()}",
