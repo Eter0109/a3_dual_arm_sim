@@ -905,12 +905,14 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     actuators = ET.SubElement(root, "actuator")
     for joint in source_joints.values():
         kp = 600.0 if joint.effort >= 60 else (400.0 if joint.effort >= 30 else 200.0)
+        kv = 40.0 if joint.effort >= 60 else (30.0 if joint.effort >= 30 else 15.0)
         ET.SubElement(
             actuators,
             "position",
             name=f"{joint.name}_position",
             joint=joint.name,
             kp=str(kp),
+            kv=str(kv),
             ctrlrange=_vec(joint.limits),
             forcerange=f"{-joint.effort} {joint.effort}",
         )

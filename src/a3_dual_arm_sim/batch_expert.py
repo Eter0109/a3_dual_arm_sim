@@ -161,7 +161,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         pos_err = target_pos - cmd_pos
         dist = np.linalg.norm(pos_err)
 
-        step_dist = min(dist, speed)
+        # Soft deceleration ramp to prevent abrupt stopping impact
+        decel_dist = 0.020
+        if dist < decel_dist and speed > 0.0020:
+            effective_speed = max(0.0012, speed * (dist / decel_dist))
+        else:
+            effective_speed = speed
+        step_dist = min(dist, effective_speed)
         if dist > 1e-6:
             delta_p = (pos_err / dist) * (step_dist / self.env.config.cartesian_translation_scale_m)
         else:
@@ -199,9 +205,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         meas_rot_err = np.empty(3, dtype=np.float64)
         mujoco.mju_subQuat(meas_rot_err, target_q, meas_q)
 
+        qvel_norm = float(np.linalg.norm(self.data.qvel[:7]))
         reached = (
             np.linalg.norm(target_pos - meas_pos) < 0.0025
             and np.linalg.norm(meas_rot_err) < 0.045
+            and qvel_norm < 0.25
         )
         return action, reached
 
