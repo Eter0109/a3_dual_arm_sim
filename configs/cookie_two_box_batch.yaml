@@ -22,6 +22,24 @@ horizon: 12000
 #   * the working box's +y is held to 40 mm because the relay pushes it to a fixed
 #     station 90 mm away, and a box that starts most of the way there has no push
 #     left to perform
+#   * **the spare box's x is held to +/-4 mm**, because the carry corrects y only.
+#     `RightBoxCarryController` grips the rear wall and slides the box along y; its
+#     target keeps `x = initial_position[0]` and it aborts if the box drifts more
+#     than 15 mm sideways, so whatever x offset the box starts with is the offset it
+#     arrives with.  `VERIFY_B` then requires the box within 8 mm of the station in
+#     XY, and the carry deliberately stops 4 mm short in y, so
+#     `sqrt(x^2 + 4^2) < 8` leaves about 7 mm; +/-4 mm keeps a margin.  The fill
+#     check allows 118 mm of x travel and the grip is reachable to +/-56 mm, but
+#     neither of those is the binding limit -- measured on the first collection run,
+#     before this was understood:
+#
+#       seed 0  x +8.5 mm   succeeded (the offset happened to survive)
+#       seed 1  x +26.2 mm  CARRY_B: grip lost, one finger at 0.0 N
+#       seed 2  x -25.0 mm  VERIFY_B: box arrived 27.8 mm from the station
+#
+#     Both rejections traced to the same uncorrected x offset.  Raising this range
+#     again needs the carry to correct x, which is a change to that controller
+#     rather than to this file.
 #   * the spare box's yaw has to survive the carry, which grips the box and slides it
 #     into place, so it arrives with the yaw it started with -- the fill's +/-4.5 deg
 #     tolerance applies to that arrival, not just to the initial pose
@@ -32,7 +50,7 @@ randomization:
   target_bin_x_m: [-0.080, 0.004]
   target_bin_y_m: [-0.006, 0.040]
   target_bin_yaw_rad: 0.04
-  spare_bin_x_m: [-0.040, 0.040]
+  spare_bin_x_m: [-0.004, 0.004]
   spare_bin_y_m: [-0.040, 0.015]
   spare_bin_yaw_rad: 0.04
   arm_home_rad: 0.04

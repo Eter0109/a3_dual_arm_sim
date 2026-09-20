@@ -247,6 +247,36 @@ def test_two_box_randomization_stays_inside_its_measured_reach():
         )
 
 
+def test_spare_box_x_respects_the_station_tolerance_not_just_reach():
+    """Reach is not the binding limit for the spare box's x; the station check is.
+
+    ``RightBoxCarryController`` grips the rear wall and slides the box along y: its
+    target keeps ``x = initial_position[0]`` and it aborts if the box drifts more than
+    15 mm sideways.  Whatever x offset the box starts with is therefore the offset it
+    arrives with, and ``VERIFY_B`` requires it within 8 mm of the station in XY.  The
+    carry also stops a deliberate 4 mm short in y, so the budget for x is
+    ``sqrt(8^2 - 4^2) ~= 6.9 mm``.
+
+    This is the check that was missing when the range was first raised to +/-40 mm --
+    reach was measured, the station tolerance was not, and the first collection run
+    lost two of three seeds to it: one with the grip lost at x +26 mm (one finger at
+    0 N), one arriving 27.8 mm from the station at x -25 mm.
+    """
+
+    config = load_config("configs/cookie_two_box_batch.yaml")
+    axis = config.randomization.spare_bin_x_m
+    verify_b_tolerance_m = 0.008
+    carry_y_shortfall_m = 0.004  # `destination_y - 0.004` in the MOVE phase
+    budget = np.sqrt(verify_b_tolerance_m**2 - carry_y_shortfall_m**2)
+    assert axis.maximum_magnitude() <= budget + 1e-9, (
+        f"spare_bin_x_m reaches {axis.maximum_magnitude() * 1000:.1f} mm, but the "
+        f"carry cannot correct x and VERIFY_B leaves only {budget * 1000:.1f} mm"
+    )
+    # And the budget really is the tighter of the two, or the assertion above is
+    # testing the wrong thing.
+    assert budget < 0.056, "the grip reach (56 mm) should be looser than this"
+
+
 def test_two_box_scene_reports_why_an_episode_was_rejected():
     """A rejected episode has to say what went wrong.
 
