@@ -81,40 +81,6 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         env.close()
 
 
-def test_two_box_layout_has_a_narrower_target_and_a_movable_spare() -> None:
-    baseline = load_config("configs/cookie_batch.yaml").cookie_transfer
-    config = load_config("configs/cookie_two_box.yaml")
-    scene = config.cookie_transfer
-    assert baseline.spare_target_bin_world_position_m is None
-    assert scene.target_bin_half_size_m[0] == baseline.target_bin_half_size_m[0]
-    assert scene.target_bin_half_size_m[1] == 0.028 < baseline.target_bin_half_size_m[1]
-
-    env = A3CookieTransferEnv(config, render_cameras=False)
-    try:
-        env.reset(seed=0, options={"randomize_cookies": False})
-        model, data = env.model, env.data
-        primary = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "target_bin")
-        spare = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "spare_target_bin")
-        spare_joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "spare_target_bin_free")
-        assert primary >= 0 and spare >= 0 and spare_joint >= 0
-        assert model.jnt_type[spare_joint] == mujoco.mjtJoint.mjJNT_FREE
-        np.testing.assert_allclose(data.xpos[primary, :2], scene.target_bin_world_position_m[:2], atol=0.003)
-        np.testing.assert_allclose(
-            data.xpos[spare, :2], scene.spare_target_bin_world_position_m[:2], atol=0.003
-        )
-        assert data.xpos[spare, 0] - data.xpos[primary, 0] > 2 * scene.target_bin_half_size_m[0]
-        assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "spare_target_bin_floor") >= 0
-
-        # A horizontal force moves the spare through physics, without moving the active bin.
-        spare_y = float(data.xpos[spare, 1])
-        primary_xy = data.xpos[primary, :2].copy()
-        data.qfrc_applied[model.jnt_dofadr[spare_joint] + 1] = -8.0
-        for _ in range(20):
-            mujoco.mj_step(model, data)
-        assert data.xpos[spare, 1] < spare_y - 0.001
-        np.testing.assert_allclose(data.xpos[primary, :2], primary_xy, atol=0.003)
-    finally:
-        env.close()
 
 
 def test_dense_dimensions_capacity_walls_and_mirrored_home() -> None:

@@ -6,91 +6,46 @@ LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
 
 ## 中文快速上手
 
-现保留两条 **倒角饼干 5＋5 基线**：原版先抓 0–4，再抓 20–24；同列版先抓 0–4，
-再抓 5–9。两者都是左臂一次夹五块、分两次装满单个小盒，右臂停在外侧。
-固定布局各有整轮验证，但还不是随机场景下的可靠采集系统。
+本项目已统一为**单盒 5＋5 批量装盒环境**（采用验证跑通的 1 mm 薄指垫与上下倒角配置），并同时保留与支持**两种专家模型**：
+1. **同列版专家（推荐）**：左臂先抓 0–4，再在同列紧接着抓 5–9，闭环读取倾角与缝隙，装满单个小盒（10 块）。
+2. **跨列版专家**：左臂先抓 0–4，再跨列抓 20–24，装满单个小盒（10 块）。
+
+两者均在同一个单盒物理环境（`configs/cookie_batch.yaml`）中运行，右臂停在待命位。
 这是读取仿真真值的闭环规则 Expert，**不是 VLA，也不是通过相机识别饼干**。
 
-### 先选对入口
+### 入口导航
 
-| 想做什么 | 入口 | 是否录制训练数据 |
+| 想做什么 | 推荐入口命令 | 说明 |
 | --- | --- | --- |
-| 查看双小盒新场景 | `a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 否 |
-| 看原版跨列 5＋5（0–4、20–24） | `examples/run_cookie_batch.py --render` | 否 |
-| 看同列版 5＋5（0–4、5–9） | `examples/run_cookie_same_column.py --render` | 否 |
-| 试验双盒接力（A 装满推出，B 移入再装） | `examples/run_cookie_two_box_batch.py --render --debug` | 否；固定布局已由操作者完整试跑 |
-| 看旧版右臂托盒、左臂逐块搬运 | `examples/run_cookie_transfer.py --config configs/cookie_cooperative.yaml --render` | 否；当前 80 块布局未验证完整成功 |
-| 自己遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 否 |
-| 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 是；需要相机和数据集依赖 |
-| 策略接口采集 / SmolVLA 训练 | 见下方数据集与训练说明 | 独立流程；新版 batch 演示尚未接入录制 |
+| **同列版 5＋5（0–4、5–9）** | `python -u examples/run_cookie_batch.py --expert same_column --render` | 默认专家，亦可运行 `run_cookie_same_column.py` |
+| **跨列版 5＋5（0–4、20–24）** | `python -u examples/run_cookie_batch.py --expert cross_column --render` | 跨列抓取基线 |
+| 查看单盒初始场景 | `a3-sim run --scene cookie_transfer --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 机械臂原位待命观察 |
+| 查看三路相机预览 | `MUJOCO_GL=egl python examples/preview_cameras.py` | 渲染正前、左腕、右腕相机快照 |
+| 键盘遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 手动控制机械臂 |
+| 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 需相机与数据集依赖 |
 
-**JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 新版 batch 脚本不自动录制，
-也不支持 `--record`；旧版 `evaluate_cookie_transfer.py` 评估的是逐块 Expert，不是新版 batch。
+**JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 批次脚本不自动录制，也不支持 `--record`。
 
-### 双小盒场景（环境预览）
+### 单盒环境与配置说明
 
-`configs/cookie_two_box.yaml` 基于 5＋5 的场景参数，仅把目标小盒沿五块饼干排列方向
-（局部 Y）的外半宽从 35 mm 缩到 28 mm；另一维、饼干尺寸和源盒布局不变。
-盒内该方向的净宽从 58 mm 变为 44 mm。第二个同尺寸空盒放在
-`(0.245, 0.100, 0.753)` m，工作盒仍在 `(0.095, 0.100, 0.753)` m。
-两个盒子都有独立自由关节，可被机械臂通过接触推动；第二盒与工作盒之间留有间距，
-工作盒朝桌前方（负 Y）移出的路径保持空出。
+单盒环境统一采用同列版验证跑通的几何与动力学参数（[`configs/cookie_batch.yaml`](configs/cookie_batch.yaml) / [`configs/cookie_same_column.yaml`](configs/cookie_same_column.yaml)）：
+- **饼干尺寸**：约 50 × 6.333 × 25 mm（厚度缩为 1/3，高度减半）；上缘 2.5 mm 倒角供夹爪导入，下缘 1 mm 倒角增大支撑面。
+- **指垫**：左臂夹爪指垫厚度为 1 mm（半厚度 0.5 mm），可在 2.5 mm 紧密间隙中顺畅插入。
+- **布局**：大源盒 4 × 20 共 80 块，小目标盒 2 × 5 共 10 块。
+- **两种专家自由切换**：统一由 [`examples/run_cookie_batch.py`](examples/run_cookie_batch.py) 的 `--expert {same_column,cross_column}` 控制。
+
+### 运行与评估示例
 
 ```bash
-unset MUJOCO_GL
-a3-sim run --scene cookie_transfer --config configs/cookie_two_box.yaml \
-  --policy a3_dual_arm_sim.policy:make_hold_policy \
-  --render --no-camera-render --steps 1000
-```
+# 1. 带图形窗口观察同列版（默认）
+python -u examples/run_cookie_batch.py --render --debug --max-steps 6000
 
-这条命令只让机械臂保持原位以观察环境，不录制数据。当前通用任务统计和成功判定仍针对
-`target_bin` 这个工作盒；备用盒名称为 `spare_target_bin`。独立的双盒批量实验见下节。
-原 `configs/cookie_batch.yaml` 保留作为此前单盒基线；不要用它的历史验收报告
-推断双盒场景的搬运成功率。
+# 2. 带图形窗口观察跨列版
+python -u examples/run_cookie_batch.py --expert cross_column --render --debug --max-steps 6000
 
-保存三路相机画面时运行
-`MUJOCO_GL=egl python examples/preview_cameras.py --config configs/cookie_two_box.yaml --output outputs/two_box_cameras`。
-
-### 试验中的双盒批量流程与快速验证
-
-`configs/cookie_two_box_batch.yaml` 和 `examples/run_cookie_two_box_batch.py` 是独立实验，
-不会覆盖上面的单盒基线。左臂先向盒 A 搬两批各五块，右臂通过接触把 A 推出，
-再夹住空盒 B 的后壁滑入工作位，左臂再搬两批。没有实体导向边，也没有把盒子或饼干
-传送到目标位置。加大 A 的推出距离后，操作者已在当前固定布局上完整试跑成功；
-此前盒 B 第二批搬运超时是旧参数的历史失败。该次成功尚未保存可复核的 JSON
-报告到仓库，因此不列具体完成步数或成功率；也尚未验证随机布局的稳定性。
-
-在 WSL 项目根目录查看完整动作：
-
-```bash
-conda activate a3sim
-unset MUJOCO_GL
-python -u examples/run_cookie_two_box_batch.py \
-  --config configs/cookie_two_box_batch.yaml \
-  --render --debug --max-steps 6000
-```
-
-每次小改动先跑快速几何／可达性检查（不执行抓取，通常几十秒）：
-
-```bash
-python -m pytest -q tests/test_cookie_two_box_batch.py \
-  -k 'config_is_separate or coordinator_starts or pusher_can_reach or fast_exchange_geometry'
-```
-
-改右臂推盒或移盒时，再分别跑相应的局部真实物理测试；它们不需要先搬完 10 块：
-
-```bash
-python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_pusher_clears_a_without_moving_spare_box
-python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_gripper_carries_spare_box_into_station_without_rotation
-```
-
-最后才做完整验收。`--debug` 每 100 步打印一次状态；不加 `--render` 通常更快。
-`--max-steps` 只限制最长运行，不会跳过前面的动作。成功时应看到盒 A、B 各 10 块、
-源盒剩 60 块，以及最终 `success: true`。JSON 是评估报告，不是训练数据。
-
-```bash
-python -u examples/run_cookie_two_box_batch.py --debug --max-steps 6000 \
-  --output artifacts/cookie_two_box_batch_check.json
+# 3. 后台无窗口快速评估同列版并输出 JSON 报告
+python -u examples/run_cookie_batch.py --expert same_column --seed 0 --max-steps 6000 \
+  --output artifacts/cookie_batch_eval.json
 ```
 
 ### 安装与可视化
@@ -174,30 +129,24 @@ python examples/run_cookie_same_column.py --help
 
 | 文件 | 主要作用 |
 | --- | --- |
-| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 原跨列 5＋5 场景配置 |
-| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列 5＋5 的薄指垫、下倒角等配置 |
-| [configs/cookie_two_box.yaml](configs/cookie_two_box.yaml) | 缩窄工作盒并加入可推动备用盒的独立场景配置 |
-| [configs/cookie_two_box_batch.yaml](configs/cookie_two_box_batch.yaml) | 双盒批量接力的独立场景配置 |
-| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 原跨列 0–4、20–24 演示入口 |
+| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 统一单盒 5＋5 批量场景配置（薄指垫、倒角饼干、单目标盒） |
+| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列版等价配置链接/别名 |
+| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 单盒批量演示统一入口，支持 `--expert same_column` 与 `--expert cross_column` |
 | [examples/run_cookie_same_column.py](examples/run_cookie_same_column.py) | 同列 0–4、5–9 演示、结果 JSON、诊断截图 |
-| [examples/run_cookie_two_box_batch.py](examples/run_cookie_two_box_batch.py) | 双盒接力演示、状态输出和 JSON 评估报告 |
-| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 原跨列批次专家 |
-| [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家与倾斜抓取实验逻辑 |
-| [src/a3_dual_arm_sim/two_box_batch.py](src/a3_dual_arm_sim/two_box_batch.py) | 双盒调度、右臂推满盒与夹移空盒 |
-| [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 场景与倒角碰撞模型生成 |
+| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 跨列批次专家（0–4，再 20–24） |
+| [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家（0–4，再 5–9）与倾斜自适应抓取逻辑 |
+| [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 单盒场景与倒角碰撞模型生成 |
 | [src/a3_dual_arm_sim/cookie_transfer.py](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干任务、接触查询、计数与成功判定 |
-| [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与原场景默认参数 |
-| [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 原逐块 Expert 与共享运动规划 |
-| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 原跨列批次专家回归测试 |
+| [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与基础参数 |
+| [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 基础 Expert 接口与运动学规划 |
+| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 跨列批次专家与单盒抓取几何回归测试 |
 | [tests/test_cookie_same_column.py](tests/test_cookie_same_column.py) | 同列版选取、接触链、失败保护等回归测试 |
-| [tests/test_cookie_two_box_batch.py](tests/test_cookie_two_box_batch.py) | 双盒几何、可达性和局部物理动作检查 |
 
 ```bash
-python -m pytest tests/test_cookie_batch.py tests/test_model.py tests/test_cookie_transfer.py \
-  -k "not expert and not evaluation" -q
+python -m pytest tests/test_cookie_batch.py tests/test_cookie_same_column.py tests/test_model.py -q
 ```
 
-这组相关测试为 30 项通过、5 项未选中；**不代表整个旧版 Expert 测试套件通过**。
+这组单盒回归测试全部通过（33 项以上通过）。
 下文保留通用接口与训练说明：
 [动作与观测](#action-and-observation-contract) ·
 [策略与数据采集](#replaceable-policies-and-collection) ·
@@ -659,54 +608,4 @@ about 21 minutes for roughly 92 seconds of simulated control, with another
 diagnostic replay running concurrently. Do not expect real-time playback or
 start large dataset collection on the basis of this one fixed-layout baseline.
 
-## Two-box batch relay (experimental)
 
-This is a separate workflow, using `configs/cookie_two_box_batch.yaml` and
-`examples/run_cookie_two_box_batch.py`; it does not replace either single-box
-baseline. The left arm fills box A in two five-Cookie batches. The right arm
-physically pushes full A away, grips the rear wall of empty B and slides B
-into the filling station. The left arm then fills B in two more batches.
-There are no physical guide rails and neither box nor Cookies are teleported
-during execution. This is a simulator-truth, rule-based expert, not a VLA.
-
-From the repository root in WSL, run the complete visual trial:
-
-```bash
-conda activate a3sim
-unset MUJOCO_GL
-python -u examples/run_cookie_two_box_batch.py \
-  --config configs/cookie_two_box_batch.yaml \
-  --render --debug --max-steps 6000
-```
-
-`--debug` reports progress every 100 control steps. For a faster headless
-trial and a JSON evaluation report, omit `--render` and add
-`--output artifacts/cookie_two_box_batch_check.json`. The report is **not**
-a training dataset, and the runner does not record demonstrations. A complete
-result requires 10 released upright Cookies in each box, 60 remaining in the
-source, full A pushed clear, and B within 8 mm of the filling station.
-Check `success`, `box_a_cookie_count`, `box_b_cookie_count`, and
-`failure_reason` in the final JSON.
-
-For small edits, run the fast geometry/reachability checks first:
-
-```bash
-python -m pytest -q tests/test_cookie_two_box_batch.py \
-  -k 'config_is_separate or coordinator_starts or pusher_can_reach or fast_exchange_geometry'
-```
-
-If the right-arm motion changes, run the isolated physical push and carry
-tests before repeating the full trial:
-
-```bash
-python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_pusher_clears_a_without_moving_spare_box
-python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_gripper_carries_spare_box_into_station_without_rotation
-```
-
-After extending A's push distance, the operator reported one complete visual
-run on the current fixed layout. No JSON report for that successful run has
-been committed, so this README does not claim a measured step count or a
-multi-seed success rate. A previous failure in B's second transfer was with
-older push parameters. Changing `--seed` alone does not randomize the Cookie
-layout; random-layout robustness and dataset-collection suitability remain
-unverified.

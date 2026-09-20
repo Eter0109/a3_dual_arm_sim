@@ -11,12 +11,19 @@ from dataclasses import replace
 from pathlib import Path
 
 from a3_dual_arm_sim.batch_expert import A3CookieBatchExpert
+from a3_dual_arm_sim.same_column_batch_expert import A3SameColumnBatchExpert
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--expert",
+        choices=("same_column", "cross_column"),
+        default="same_column",
+        help="Batch expert strategy: 'same_column' (0-4 then 5-9, default) or 'cross_column' (0-4 then 20-24)",
+    )
     parser.add_argument("--config", type=Path, default=Path("configs/cookie_batch.yaml"))
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
@@ -55,7 +62,11 @@ def main():
     renderer = None
     try:
         obs, info = env.reset(seed=args.seed, options={"randomize_cookies": False})
-        expert = A3CookieBatchExpert(env)
+        expert = (
+            A3SameColumnBatchExpert(env)
+            if args.expert == "same_column"
+            else A3CookieBatchExpert(env)
+        )
         expert.reset()
         if args.snapshots:
             import mujoco
@@ -124,6 +135,7 @@ def main():
                 failure_reason = "final released-count/source-count criterion not met"
         result = {
             "seed": args.seed,
+            "expert_type": args.expert,
             "success": success,
             "steps": step,
             "wall_seconds": round(time.monotonic() - start, 2),
