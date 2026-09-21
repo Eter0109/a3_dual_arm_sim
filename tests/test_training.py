@@ -110,3 +110,29 @@ def test_train_command_is_local_reproducible_smoke(tmp_path: Path) -> None:
     assert "--dataset.video_backend=pyav" in joined
     assert "--env_eval_freq=0" in joined
     assert "--wandb.enable=false" in joined
+    assert "--save_freq=2000" in command
+    assert "--ema.enable=true" in command
+    assert "--ema.decay=0.99" in command
+
+
+def test_training_schedule_overrides(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(
+        json.dumps({"type": "smolvla", "max_state_dim": 32, "max_action_dim": 32})
+    )
+    (base / "model.safetensors").write_bytes(b"weights")
+    path = prepare_a3_smolvla_source(
+        base,
+        tmp_path / "adapted",
+        device="cpu",
+        lr=3e-5,
+        decay_steps=20000,
+        warmup_steps=100,
+        num_steps=25,
+    )
+    config = json.loads((path / "config.json").read_text())
+    assert config["optimizer_lr"] == 3e-5
+    assert config["scheduler_decay_steps"] == 20000
+    assert config["scheduler_warmup_steps"] == 100
+    assert config["num_steps"] == 25

@@ -469,9 +469,71 @@ MUJOCO_GL=egl a3-sim run \
 The one-step smoke proves loading, preprocessing, forward/backward, optimizer update, and checkpoint
 serialization only. It is not evidence that the model learned the task. A meaningful run needs many
 diverse successful demonstrations, held-out seeds, full training, and closed-loop success evaluation.
-On the current host PyTorch reports no usable CUDA driver, so long CPU training is intentionally not
-presented as the recommended workflow. TorchCodec may also warn on this installation; the recorder
-and trainer explicitly use the available PyAV image path.
+Check GPU availability in the training environment with `nvidia-smi` and
+`torch.cuda.is_available()`. TorchCodec may warn about missing FFmpeg libraries;
+LeRobot falls back to PyAV on this installation, and the trainer explicitly selects PyAV.
+
+### Single-box SmolVLA training and benchmark
+
+Run from the project root. This starts a new run from the configured base model,
+not from the previous 8k checkpoint. Existing model output directories are rejected.
+
+```bash
+mkdir -p outputs/smolvla_20k_b64_run
+python -u -m a3_dual_arm_sim.cli train-smolvla \
+  --root datasets/a3_single_box_same_column_100 \
+  --repo-id local/a3-single-box-same-column-100 \
+  --output outputs/smolvla_20k_b64_run/model \
+  --steps 20000 --batch-size 64 --lr 0.00005 --device cuda \
+  > outputs/smolvla_20k_b64_run/train.log 2>&1
+
+# From another terminal:
+tail -f outputs/smolvla_20k_b64_run/train.log
+```
+
+Defaults: learning rate `5e-5`, 500 warmup steps, cosine decay to `5e-6`,
+EMA decay `0.99`, checkpoint every 2,000 steps, and training metrics every 20 steps.
+W&B and automatic validation are disabled; run the benchmark separately.
+Batch 64 requires sufficient GPU memory. The command runs in the foreground.
+
+Evaluate an explicit checkpoint (ordinary weights use `pretrained_model`;
+EMA weights use `pretrained_model_ema`):
+
+```bash
+MUJOCO_GL=egl HF_HUB_OFFLINE=1 python -u examples/benchmark_cookie_batch.py \
+  --policy smolvla:outputs/smolvla_20k_b64_run/model/checkpoints/020000/pretrained_model_ema \
+  --episodes 3 --seed-start 1000 --max-steps 1000 --workers 1 \
+  --output artifacts/smolvla_20k_ema_headless.json
+
+# Interactive window: run on a graphical desktop, without MUJOCO_GL=egl.
+env -u MUJOCO_GL HF_HUB_OFFLINE=1 python -u examples/benchmark_cookie_batch.py \
+  --policy smolvla:outputs/smolvla_20k_b64_run/model/checkpoints/020000/pretrained_model_ema \
+  --episodes 3 --seed-start 1000 --max-steps 1000 --workers 1 --render \
+  --output artifacts/smolvla_20k_ema_render.json
+```
+
+Combining EGL with the viewer can fail with `Failed to make the EGL context current`
+and an allocator error during shutdown. This is separate from the TorchCodec warning.
+Keep camera rendering enabled for SmolVLA. Use one worker to avoid loading multiple
+GPU model copies. `--policy smolvla` still defaults to `outputs/smolvla_single_box`;
+it does not discover newly named training runs. A run-directory path selects the
+highest numbered checkpoint and prefers EMA at that step; an explicit model path
+selects exactly those weights.
+
+The adapter uses checkpoint processors and 16-D absolute joint targets. Its current
+defaults additionally anchor the right arm, map left gripper values below `0.42`
+to `0.2804` and above `0.65` to `1.0`, and smooth left joints with
+`0.75 * current + 0.25 * previous`. These are deployment heuristics, not learned
+behavior. Python callers can disable them using `anchor_right_arm=False`,
+`gripper_sharpening=False`, and `ema_alpha=0`. Weight EMA is separate from action smoothing.
+The local base uses chunk size 16 and executes 8 actions before replanning
+(0.4 seconds at 20 Hz); these values are inherited from the checkpoint.
+The adapter defaults to 25 inference denoising steps.
+
+Report checkpoint paths and seeds alongside results. A filename containing `ema`
+does not prove EMA weights were evaluated: the existing local 20k report records
+`pretrained_model` internally. Short startup tests do not establish task success;
+full acceptance requires target count 10, source count 70, and no safety fault.
 
 ## Keyboard teleoperation
 
@@ -644,4 +706,3 @@ not yet optimized: the earlier development headless replay took
 about 21 minutes for roughly 92 seconds of simulated control, with another
 diagnostic replay running concurrently. Do not expect real-time playback or
 start large dataset collection on the basis of this one fixed-layout baseline.
-

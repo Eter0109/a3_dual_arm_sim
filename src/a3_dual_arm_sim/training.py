@@ -100,7 +100,17 @@ def _local_hub_snapshot(repo_id: str) -> Path | None:
     return snapshot if (snapshot / "config.json").is_file() else None
 
 
-def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: str) -> Path:
+def prepare_a3_smolvla_source(
+    base_model: Path,
+    runtime_dir: Path,
+    *,
+    device: str,
+    lr: float = 5e-5,
+    decay_lr: float = 5e-6,
+    warmup_steps: int = 500,
+    decay_steps: int = 20000,
+    num_steps: int = 25,
+) -> Path:
     """Create a lightweight adapted checkpoint view without copying the 1.2 GB weights."""
     base_model = base_model.expanduser().resolve()
     runtime_dir = runtime_dir.expanduser().resolve()
@@ -125,6 +135,14 @@ def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: st
     config["use_amp"] = device == "cuda"
     config["push_to_hub"] = False
     config["repo_id"] = None
+
+    # Tuned hyperparameters for expert distillation (Pillar 2)
+    config["optimizer_lr"] = lr
+    config["scheduler_decay_lr"] = decay_lr
+    config["scheduler_warmup_steps"] = warmup_steps
+    config["scheduler_decay_steps"] = decay_steps
+    config["num_steps"] = num_steps
+
     vlm_model_name = config.get("vlm_model_name")
     cached_vlm = _local_hub_snapshot(vlm_model_name) if vlm_model_name else None
     if cached_vlm is not None:
@@ -161,10 +179,14 @@ def build_train_command(
     steps: int,
     batch_size: int,
     seed: int,
+    num_workers: int = 2,
+    use_ema: bool = True,
+    ema_decay: float = 0.99,
+    save_freq: int = 2000,
 ) -> list[str]:
     if steps <= 0 or batch_size <= 0:
         raise ValueError("steps and batch_size must be positive")
-    return [
+    cmd = [
         sys.executable,
         "-m",
         "lerobot.scripts.lerobot_train",
@@ -175,16 +197,19 @@ def build_train_command(
         f"--output_dir={output_dir.expanduser().resolve()}",
         "--job_name=a3_grasp_smolvla",
         f"--seed={seed}",
-        "--num_workers=0",
+        f"--num_workers={num_workers}",
         f"--batch_size={batch_size}",
         f"--steps={steps}",
         "--env_eval_freq=0",
         "--eval_steps=0",
-        "--log_freq=1",
+        "--log_freq=20",
         "--save_checkpoint=true",
-        "--save_freq=0",
+        f"--save_freq={save_freq}",
         "--wandb.enable=false",
     ]
+    if use_ema:
+        cmd.extend(["--ema.enable=true", f"--ema.decay={ema_decay}"])
+    return cmd
 
 
 def train_smolvla(
@@ -193,10 +218,17 @@ def train_smolvla(
     repo_id: str,
     base_model: Path,
     output_dir: Path,
-    steps: int,
-    batch_size: int,
-    seed: int,
-    device: str,
+    steps: int = 10000,
+    batch_size: int = 16,
+    seed: int = 1000,
+    device: str = "cuda",
+    lr: float = 5e-5,
+    decay_lr: float = 5e-6,
+    warmup_steps: int = 500,
+    save_freq: int = 2000,
+    num_workers: int = 2,
+    use_ema: bool = True,
+    ema_decay: float = 0.99,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     audit = audit_training_dataset(dataset_root, repo_id=repo_id)
@@ -209,6 +241,10 @@ def train_smolvla(
         base_model,
         output_dir.parent / ".a3_smolvla_source",
         device=device,
+        lr=lr,
+        decay_lr=decay_lr,
+        warmup_steps=warmup_steps,
+        decay_steps=steps,
     )
     command = build_train_command(
         dataset_root=dataset_root,
@@ -218,6 +254,10 @@ def train_smolvla(
         steps=steps,
         batch_size=batch_size,
         seed=seed,
+        num_workers=num_workers,
+        use_ema=use_ema,
+        ema_decay=ema_decay,
+        save_freq=save_freq,
     )
     result = {**audit, "device": device, "output_dir": str(output_dir), "command": command}
     if dry_run:

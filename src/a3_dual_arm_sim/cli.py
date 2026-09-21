@@ -37,9 +37,7 @@ def _recorder(args: argparse.Namespace, env: A3DualArmEnv) -> LeRobotV3Recorder 
 
 
 def _validate_camera_recording(args: argparse.Namespace) -> None:
-    if getattr(args, "record", None) is not None and not getattr(
-        args, "camera_render", True
-    ):
+    if getattr(args, "record", None) is not None and not getattr(args, "camera_render", True):
         raise ValueError(
             "--no-camera-render cannot be combined with --record because it would "
             "save black policy-camera frames"
@@ -260,9 +258,7 @@ def _replay(args: argparse.Namespace) -> int:
                 "object_touches_table": bool(final_info.get("object_touches_table", True)),
                 "lift_m": float(final_info.get("lift_m", 0.0)),
                 "linear_speed_m_s": float(final_info.get("object_linear_speed_m_s", 0.0)),
-                "angular_speed_rad_s": float(
-                    final_info.get("object_angular_speed_rad_s", 0.0)
-                ),
+                "angular_speed_rad_s": float(final_info.get("object_angular_speed_rad_s", 0.0)),
                 "grasp_center_error_m": float(final_info.get("grasp_center_error_m", 0.0)),
                 "stable_hold_steps": int(final_info.get("success_hold_count", 0)),
                 "required_stable_hold_steps": env.task_config.success_hold_steps,
@@ -273,16 +269,10 @@ def _replay(args: argparse.Namespace) -> int:
                 "cookies_in_source": int(final_info.get("cookies_in_source", 0)),
                 "required_cookies": int(final_info.get("required_cookies", 0)),
                 "exact_2x5_fill": bool(final_info.get("exact_2x5_fill", False)),
-                "target_touches_all_walls": bool(
-                    final_info.get("target_touches_all_walls", False)
-                ),
-                "target_slot_occupancy": list(
-                    final_info.get("target_slot_occupancy", ())
-                ),
+                "target_touches_all_walls": bool(final_info.get("target_touches_all_walls", False)),
+                "target_slot_occupancy": list(final_info.get("target_slot_occupancy", ())),
                 "stable_hold_steps": int(final_info.get("success_hold_count", 0)),
-                "required_stable_hold_steps": int(
-                    final_info.get("required_success_hold_steps", 0)
-                ),
+                "required_stable_hold_steps": int(final_info.get("required_success_hold_steps", 0)),
             }
         print(json.dumps(result, indent=2))
         return 0
@@ -313,6 +303,7 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
         seed=args.seed,
         device=args.device,
+        lr=getattr(args, "lr", 5e-5),
         dry_run=args.dry_run,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -355,9 +346,7 @@ def parser() -> argparse.ArgumentParser:
 
     smoke = commands.add_parser("smoke", help="Run a deterministic headless hold episode")
     _add_common(smoke)
-    smoke.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
-    )
+    smoke.add_argument("--scene", choices=("sandbox", "cookie_transfer"), default="sandbox")
     smoke.add_argument("--steps", type=int, default=1000)
     smoke.set_defaults(function=_smoke)
 
@@ -365,9 +354,7 @@ def parser() -> argparse.ArgumentParser:
     _add_common(run)
     _add_recording(run)
     _add_camera_rendering(run)
-    run.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
-    )
+    run.add_argument("--scene", choices=("sandbox", "cookie_transfer"), default="sandbox")
     run.add_argument("--policy", required=True, help="Python module:factory")
     run.add_argument("--task", default=None)
     run.add_argument("--steps", type=int, default=None)
@@ -378,9 +365,7 @@ def parser() -> argparse.ArgumentParser:
     _add_common(teleop)
     _add_recording(teleop)
     _add_camera_rendering(teleop)
-    teleop.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
-    )
+    teleop.add_argument("--scene", choices=("sandbox", "cookie_transfer"), default="sandbox")
     teleop.add_argument("--task", default=None)
     teleop.add_argument("--steps", type=int, default=None)
     teleop.set_defaults(function=_teleop)
@@ -410,8 +395,9 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--repo-id", default="local/a3-grasp")
     train.add_argument("--model", type=Path, default=default_base_model())
     train.add_argument("--output", type=Path, required=True)
-    train.add_argument("--steps", type=int, default=20_000)
-    train.add_argument("--batch-size", type=int, default=4)
+    train.add_argument("--steps", type=int, default=10_000)
+    train.add_argument("--batch-size", type=int, default=16)
+    train.add_argument("--lr", type=float, default=5e-5)
     train.add_argument("--seed", type=int, default=1000)
     train.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     train.add_argument("--dry-run", action="store_true")
@@ -427,9 +413,7 @@ def main() -> int:
     except ValueError as exc:
         argument_parser.error(str(exc))
     exit_code = int(args.function(args))
-    uses_human_viewer = args.command == "teleop" or bool(
-        getattr(args, "render", False)
-    )
+    uses_human_viewer = args.command == "teleop" or bool(getattr(args, "render", False))
     if uses_human_viewer:
         # On Python 3.13, combining mujoco.viewer with mujoco.Renderer can finish
         # explicit cleanup successfully and then SIGSEGV during native GLFW module

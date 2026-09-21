@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import gymnasium as gym
 import mujoco
@@ -80,11 +80,14 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._safety_reason: str | None = None
         self._last_applied_action = np.zeros(JOINT_ACTION_DIM, dtype=np.float64)
         self._joint_ids = {name: self._id(mujoco.mjtObj.mjOBJ_JOINT, name) for name in ARM_JOINTS}
-        self._qpos_ids = {name: int(self.model.jnt_qposadr[jid]) for name, jid in self._joint_ids.items()}
-        self._dof_ids = {name: int(self.model.jnt_dofadr[jid]) for name, jid in self._joint_ids.items()}
+        self._qpos_ids = {
+            name: int(self.model.jnt_qposadr[jid]) for name, jid in self._joint_ids.items()
+        }
+        self._dof_ids = {
+            name: int(self.model.jnt_dofadr[jid]) for name, jid in self._joint_ids.items()
+        }
         self._actuator_ids = {
-            name: self._id(mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_position")
-            for name in ARM_JOINTS
+            name: self._id(mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_position") for name in ARM_JOINTS
         }
         self._finger_joints = {
             side: tuple(
@@ -100,6 +103,14 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
             for side in ("L", "R")
         }
+        self._finger_dof_ids = [
+            int(self.model.jnt_dofadr[jid])
+            for side in ("L", "R")
+            for jid in self._finger_joints[side]
+        ]
+        self._robot_dof_ids = np.asarray(
+            [*self._dof_ids.values(), *self._finger_dof_ids], dtype=np.int32
+        )
         self._eef_sites = (
             self._id(mujoco.mjtObj.mjOBJ_SITE, "L_eef"),
             self._id(mujoco.mjtObj.mjOBJ_SITE, "R_eef"),
@@ -172,7 +183,12 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 self.data.qpos[self.model.jnt_qposadr[joint_id]] = physical
         self._randomize_objects(enabled=(options or {}).get("randomize_objects", True))
         mujoco.mj_forward(self.model, self.data)
-        home_action = np.r_[self.config.home.left, self.config.home.grippers[0], self.config.home.right, self.config.home.grippers[1]]
+        home_action = np.r_[
+            self.config.home.left,
+            self.config.home.grippers[0],
+            self.config.home.right,
+            self.config.home.grippers[1],
+        ]
         self._apply_controls(home_action)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
@@ -219,14 +235,8 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             raise RuntimeError("key callback must be set before opening the viewer")
         self._key_callback = callback
 
-    def step(
-        self, action: np.ndarray
-    ) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
-        mode = (
-            "cartesian_delta"
-            if len(action) == CARTESIAN_ACTION_DIM
-            else self.action_mode
-        )
+    def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+        mode = "cartesian_delta" if len(action) == CARTESIAN_ACTION_DIM else self.action_mode
         requested = validate_action(action, mode)
         if self._safety_stop:
             applied = self._current_joint_action()
@@ -240,17 +250,22 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 # An idle arm holds its commanded pose, not its gravity-deflected
                 # measurement. Re-targeting the measurement integrates sag forever.
                 for offset, start in ((0, 0), (7, 8)):
-                    if not np.any(requested[offset:offset + 6]):
-                        canonical[start:start + 7] = self._last_applied_action[start:start + 7]
+                    if not np.any(requested[offset : offset + 6]):
+                        canonical[start : start + 7] = self._last_applied_action[start : start + 7]
             applied = self._limit_joint_action(canonical)
             self._apply_controls(applied)
             for _ in range(self.config.substeps):
                 mujoco.mj_step(self.model, self.data)
-                if not np.all(np.isfinite(self.data.qpos)) or not np.all(np.isfinite(self.data.qvel)):
+                if not np.all(np.isfinite(self.data.qpos)) or not np.all(
+                    np.isfinite(self.data.qvel)
+                ):
                     self.emergency_stop("non-finite simulator state")
                     break
-                if np.max(np.abs(self.data.qvel)) > 80.0:
+                if np.max(np.abs(self.data.qvel[self._robot_dof_ids])) > 40.0:
                     self.emergency_stop("joint velocity exceeded safety threshold")
+                    break
+                if np.max(np.abs(self.data.qvel)) > 1000.0:
+                    self.emergency_stop("simulator instability: object velocity exceeded threshold")
                     break
         self._last_applied_action = applied.copy()
         self._step_count += 1
@@ -350,8 +365,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             poses.extend(self.data.site_xpos[site_id])
             poses.extend(quaternion)
         force = np.r_[
-            self._sensor("L_wrist_force"), self._sensor("L_wrist_torque"),
-            self._sensor("R_wrist_force"), self._sensor("R_wrist_torque"),
+            self._sensor("L_wrist_force"),
+            self._sensor("L_wrist_torque"),
+            self._sensor("R_wrist_force"),
+            self._sensor("R_wrist_torque"),
             self._sensor("L_finger_inner_touch_sensor"),
             self._sensor("L_finger_outer_touch_sensor"),
             self._sensor("R_finger_inner_touch_sensor"),
@@ -363,8 +380,12 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             FRONT_IMAGE: self._render_camera("front"),
             LEFT_WRIST_IMAGE: self._render_camera("left_wrist"),
             RIGHT_WRIST_IMAGE: self._render_camera("right_wrist"),
-            STATE: np.asarray([*left_state, left_grip[0], *right_state, right_grip[0]], dtype=np.float32),
-            VELOCITY: np.asarray([*left_velocity, left_grip[1], *right_velocity, right_grip[1]], dtype=np.float32),
+            STATE: np.asarray(
+                [*left_state, left_grip[0], *right_state, right_grip[0]], dtype=np.float32
+            ),
+            VELOCITY: np.asarray(
+                [*left_velocity, left_grip[1], *right_velocity, right_grip[1]], dtype=np.float32
+            ),
             EEF_POSE: np.asarray(poses, dtype=np.float32),
             FORCE: np.asarray(force, dtype=np.float32),
             "time": float(self.data.time),
@@ -375,9 +396,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
 
     def _render_camera(self, name: str) -> np.ndarray:
         if not self.render_cameras:
-            return np.zeros(
-                (self.config.image_height, self.config.image_width, 3), dtype=np.uint8
-            )
+            return np.zeros((self.config.image_height, self.config.image_width, 3), dtype=np.uint8)
         if self._renderer is None:
             self._renderer = mujoco.Renderer(
                 self.model,
@@ -422,14 +441,16 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 text1 = "MAX GRIPPER FORCE:\nPEAK RECORDED:"
                 text2 = f"{max_f:.2f} N\n{self._max_recorded_gripper_force:.2f} N"
                 try:
-                    self._viewer.set_texts([
-                        (
-                            mujoco.mjtFontScale.mjFONTSCALE_100,
-                            mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                            text1,
-                            text2,
-                        )
-                    ])
+                    self._viewer.set_texts(
+                        [
+                            (
+                                mujoco.mjtFontScale.mjFONTSCALE_100,
+                                mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                text1,
+                                text2,
+                            )
+                        ]
+                    )
                 except Exception:
                     pass
 
@@ -447,6 +468,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             if window is not None:
                 try:
                     import glfw
+
                     glfw.set_window_title(window, title_text)
                 except Exception:
                     pass

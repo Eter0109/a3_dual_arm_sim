@@ -76,6 +76,63 @@ class ExpertPolicyAdapter:
         return phase.name if phase is not None else ""
 
 
+def resolve_smolvla_checkpoint(checkpoint: str | Path) -> Path:
+    path = Path(checkpoint).expanduser().resolve()
+    if (path / "checkpoints").is_dir():
+        numbered = [p for p in (path / "checkpoints").iterdir() if p.name.isdigit()]
+        if numbered:
+            path = max(numbered, key=lambda p: int(p.name))
+        else:
+            path = path / "checkpoints" / "last"
+        ema = path / "pretrained_model_ema"
+        path = ema if (ema / "config.json").is_file() else path / "pretrained_model"
+    if not (path / "config.json").is_file():
+        raise FileNotFoundError(f"Missing SmolVLA checkpoint config: {path}")
+    return path.resolve()
+
+
+class SmolVLAPolicyAdapter:
+    """Adapts a trained SmolVLA checkpoint to the standard BenchmarkPolicy interface."""
+
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        dataset_root: str | Path = Path("datasets/a3_single_box_same_column_100"),
+        repo_id: str = "local/a3-single-box-same-column-100",
+        device: str | None = None,
+        name: str = "smolvla",
+        **kwargs: Any,
+    ):
+        import torch
+
+        from .smolvla_policy import SmolVLAPolicyPlugin
+
+        checkpoint_path = resolve_smolvla_checkpoint(checkpoint)
+
+        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.plugin = SmolVLAPolicyPlugin(
+            checkpoint_path, Path(dataset_root), repo_id, dev, **kwargs
+        )
+        self.name = name
+        self.action_mode: ActionMode = "joint_position"
+
+    def reset(self, context: EpisodeContext | None = None) -> None:
+        self.plugin.reset(
+            context
+            or EpisodeContext(
+                seed=0, task="transfer 10 cookies into target box", action_mode="joint_position"
+            )
+        )
+
+    def act(
+        self, observation: dict[str, Any], task: str = "transfer 10 cookies into target box"
+    ) -> np.ndarray:
+        return self.plugin.act(observation, task)
+
+    def close(self) -> None:
+        self.plugin.close()
+
+
 def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = None) -> Any:
     """Create a policy runner from a string name, spec, or object."""
     if isinstance(policy_or_spec, str):
@@ -90,6 +147,13 @@ def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = N
             if env is not None:
                 adapter.bind_env(env)
             return adapter
+        if spec == "smolvla" or spec.startswith("smolvla:") or Path(policy_or_spec).exists():
+            ckpt = Path("outputs/smolvla_single_box")
+            if spec.startswith("smolvla:"):
+                ckpt = Path(policy_or_spec.split(":", 1)[1])
+            elif Path(policy_or_spec).exists():
+                ckpt = Path(policy_or_spec)
+            return SmolVLAPolicyAdapter(ckpt)
         # Handle module:factory policy spec
         if ":" in policy_or_spec:
             mod_name, func_name = policy_or_spec.rsplit(":", 1)
@@ -240,9 +304,13 @@ class CookieBatchBenchmark:
         env: A3CookieTransferEnv | None = None,
         recorder: Any | None = None,
     ) -> EpisodeScore:
+        runner_policy = make_policy_adapter(policy, env=env)
         should_close_env = False
         if env is None:
-            env = self.create_env(render_cameras=recorder is not None)
+            needs_cameras = (recorder is not None) or (
+                getattr(runner_policy, "action_mode", "") == "joint_position"
+            )
+            env = self.create_env(render_cameras=needs_cameras)
             should_close_env = True
 
         reset_options = {
@@ -257,9 +325,9 @@ class CookieBatchBenchmark:
 
         observation, info = env.reset(seed=seed, options=reset_options)
 
-        runner_policy = make_policy_adapter(policy, env=env)
         if hasattr(runner_policy, "bind_env") and getattr(runner_policy, "expert", None) is None:
             runner_policy.bind_env(env)
+
         if hasattr(runner_policy, "reset"):
             context = EpisodeContext(
                 seed=seed, task="transfer 10 cookies into target box", action_mode=env.action_mode
@@ -443,12 +511,15 @@ class CookieBatchBenchmark:
                         )
                 episode_results = [results_by_idx[i] for i in range(num_episodes)]
         else:
-            env = self.create_env()
+            runner_policy = make_policy_adapter(policy)
+            needs_cameras = getattr(runner_policy, "action_mode", "") == "joint_position"
+            env = None
             try:
+                env = self.create_env(render_cameras=needs_cameras)
                 for ep_i in range(num_episodes):
                     seed = seed_start + ep_i
                     ep_result = self.run_episode(
-                        policy=policy,
+                        policy=runner_policy,
                         seed=seed,
                         episode_idx=ep_i + 1,
                         env=env,
@@ -469,7 +540,12 @@ class CookieBatchBenchmark:
                             flush=True,
                         )
             finally:
-                env.close()
+                try:
+                    if env is not None:
+                        env.close()
+                finally:
+                    if isinstance(policy, str) and hasattr(runner_policy, "close"):
+                        runner_policy.close()
 
         total_score = sum(r.score for r in episode_results)
         max_possible = num_episodes * 10

@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument(
         "--policy",
         default="same_column",
-        help="Policy to benchmark: 'same_column', 'cross_column', or 'module:factory' (default: same_column)",
+        help="Policy: same_column, cross_column, smolvla[:checkpoint_or_run], or module:factory",
     )
     parser.add_argument(
         "--episodes",
