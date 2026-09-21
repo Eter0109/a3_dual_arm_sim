@@ -482,6 +482,7 @@ class TwoBoxBatchExpert:
                     self._b_indices = indices
                     self.stage = "VERIFY_BOTH"
                     self._settled_steps = 0
+                    self._verify_steps = 0
             return action
         if self.stage in ("PUSH_A", "CARRY_B"):
             assert self.pusher is not None
@@ -507,7 +508,7 @@ class TwoBoxBatchExpert:
             position = self.env.data.xpos[self.box_a]
             clearance_mm = float(position[1] - self.station[1]) * 1000.0
             contained, placed = self._counts_in_box(self.box_a, self._a_indices)
-            good = position[1] >= self.station[1] + 0.085 and placed == 10
+            good = position[1] >= self.station[1] + 0.085 and contained == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
             self._verify_steps += 1
             if self._settled_steps >= 15:
@@ -516,8 +517,8 @@ class TwoBoxBatchExpert:
                 self.failed = (
                     f"filled box A did not clear the filling station: "
                     f"{clearance_mm:.1f} mm clear of it (needs 85.0) with "
-                    f"{placed}/10 Cookies placed "
-                    f"({contained}/10 still in the box)"
+                    f"{contained}/10 Cookies in the box ({placed}/10 of them "
+                    f"placed flush)"
                 )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_B":
@@ -525,7 +526,7 @@ class TwoBoxBatchExpert:
             offset = position[:2] - self.station
             distance_mm = float(np.linalg.norm(offset)) * 1000.0
             contained, placed = self._counts_in_box(self.box_a, self._a_indices)
-            good = distance_mm < 8.0 and placed == 10
+            good = distance_mm < 8.0 and contained == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
             self._verify_steps += 1
             if self._settled_steps >= 15:
@@ -542,36 +543,46 @@ class TwoBoxBatchExpert:
                     f"empty box B did not reach the filling station: "
                     f"{distance_mm:.1f} mm from it (needs under 8.0) at "
                     f"x={offset[0] * 1000:+.1f} y={offset[1] * 1000:+.1f} mm, "
-                    f"with {placed}/10 Cookies placed in box A "
-                    f"({contained}/10 still aboard)"
+                    f"with {contained}/10 Cookies in box A ({placed}/10 of them "
+                    f"placed flush)"
                 )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_BOTH":
-            a, b = self.counts()
             source = sum(
                 self.env.privileged_cookie_in_source(i)
                 for i in range(len(self.env._cookie_bodies))
             )
             contained_a, placed_a = self._counts_in_box(self.box_a, self._a_indices)
             contained_b, placed_b = self._counts_in_box(self.box_b, self._b_indices)
+            clearance_mm = float(self.env.data.xpos[self.box_a, 1] - self.station[1]) * 1000.0
+            offset = self.env.data.xpos[self.box_b, :2] - self.station
+            distance_mm = float(np.linalg.norm(offset)) * 1000.0
             good = (
-                a == b == 10
-                and len(self._a_indices) == len(self._b_indices) == 10
-                and placed_a == 10
-                and placed_b == 10
+                len(self._a_indices) == len(self._b_indices) == 10
+                and contained_a == 10
+                and contained_b == 10
                 and source == len(self.env._cookie_bodies) - 20
-                and self.env.data.xpos[self.box_a, 1] >= self.station[1] + 0.085
-                and np.linalg.norm(self.env.data.xpos[self.box_b, :2] - self.station) < 0.008
+                and clearance_mm >= 85.0
+                and distance_mm < 8.0
             )
             self._settled_steps = self._settled_steps + 1 if good else 0
+            self._verify_steps += 1
             if self._settled_steps >= 20:
                 self.stage = "DONE"
                 self.done = True
-            elif self._settled_steps == 0:
+            elif self._verify_steps >= self.VERIFY_SETTLE_STEPS:
+                # The last check used to fail on its *first* bad step, which makes
+                # it a race against whatever the previous stage left still moving:
+                # a box a tenth of a millimetre outside its tolerance at the moment
+                # the fill ended rejected the episode, and the faster motions make
+                # that window narrower rather than wider.  A bounded wait keeps the
+                # criterion strict without racing the settling.
                 self.failed = (
-                    f"dual-box final criteria failed: A={a} ({contained_a} in the "
-                    f"box, {placed_a} placed), B={b} ({contained_b} in the box, "
-                    f"{placed_b} placed), source={source}"
+                    f"dual-box final criteria failed: A={contained_a}/10 in the box "
+                    f"({placed_a} flush) at {clearance_mm:.1f} mm clear (needs 85.0), "
+                    f"B={contained_b}/10 in the box ({placed_b} flush) at "
+                    f"{distance_mm:.1f} mm from the station (needs under 8.0), "
+                    f"source={source} (needs {len(self.env._cookie_bodies) - 20})"
                 )
             return self.env.last_applied_action.copy()
         self.failed = f"unknown dual-box stage {self.stage}"
