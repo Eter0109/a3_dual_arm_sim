@@ -7,29 +7,16 @@ from typing import Any
 
 import numpy as np
 
-from .contracts import EpisodeContext
+from .contracts import EpisodeContext, jsonable
 from .env import A3DualArmEnv
 from .policy import Policy
 from .recording import Recorder
 
 
 def _jsonable(value: Any) -> Any:
-    """Convert numpy containers to plain Python, recursively.
+    """Coerce numpy to plain Python; see :func:`a3_dual_arm_sim.contracts.jsonable`."""
 
-    Environment ``info`` carries arrays (actions, object poses), and callers
-    serialise this result to JSON. Doing the conversion here keeps every consumer
-    from having to know which fields are arrays.
-    """
-
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Mapping):
-        return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+    return jsonable(value)
 
 
 @dataclass(frozen=True)
@@ -126,6 +113,18 @@ class EpisodeRunner:
             if override is not None:
                 success = bool(override)
             recorded_success = success if ("success" in info or override is not None) else None
+            # Task-specific numbers a policy knows and ``info`` does not.  Read
+            # here, before the episode is written, so the dataset's own metadata
+            # can carry them: a scene that runs several attempts per process
+            # writes accepted and rejected episodes side by side, and a reader who
+            # has to open the collection summary to tell them apart -- or to learn
+            # *why* one was rejected -- cannot filter the dataset by itself.  A
+            # reason a scripted expert failed is the motivating case: it lives on
+            # the expert, and a metadata line without it cannot explain a
+            # rejection.
+            metrics = getattr(self.policy, "metrics", None)
+            if metrics:
+                info = {**info, **dict(metrics)}
             discarded = (
                 bool(getattr(self.policy, "discard_requested", False))
                 or (self.recorder is not None and recorded_frames == 0)
@@ -135,20 +134,11 @@ class EpisodeRunner:
                 if discarded:
                     self.recorder.discard_episode()
                 else:
-                    self.recorder.finish_episode(success=recorded_success)
+                    self.recorder.finish_episode(success=recorded_success, metrics=metrics)
         except BaseException:
             if self.recorder is not None:
                 self.recorder.discard_episode()
             raise
-        # Task-specific numbers a policy knows and ``info`` does not.  Read after
-        # the loop so they describe the final state, and merged into ``final_info``
-        # rather than kept beside it, so every consumer of a result has one place to
-        # look.  A reason a scripted expert failed is the motivating case: it lives
-        # on the expert, and a summary without it cannot say *why* an episode was
-        # rejected.
-        metrics = getattr(self.policy, "metrics", None)
-        if metrics:
-            info = {**info, **dict(metrics)}
         return EpisodeResult(
             steps=steps,
             terminated=terminated,

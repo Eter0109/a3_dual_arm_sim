@@ -52,6 +52,26 @@ def validate_action(action: Any, mode: ActionMode) -> NDArray[np.float64]:
     return np.ascontiguousarray(value)
 
 
+def jsonable(value: Any) -> Any:
+    """Convert numpy containers to plain Python, recursively.
+
+    Environment ``info`` and policy ``metrics`` carry arrays (actions, object
+    poses) and both end up in JSON -- the episode result and the dataset's own
+    metadata file.  Doing the conversion in one place keeps every consumer from
+    having to know which fields are arrays.
+    """
+
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {key: jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(item) for item in value]
+    return value
+
+
 def validate_observation(observation: Mapping[str, Any]) -> None:
     shapes = {
         STATE: (16,), VELOCITY: (16,), EEF_POSE: (14,), FORCE: (18,),

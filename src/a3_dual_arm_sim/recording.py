@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -16,6 +17,7 @@ from .contracts import (
     STATE,
     VELOCITY,
     EpisodeContext,
+    jsonable,
 )
 from .paths import project_root
 
@@ -30,7 +32,11 @@ TASK = "task"
 class Recorder(Protocol):
     def start_episode(self, context: EpisodeContext, controller_type: str) -> None: ...
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None: ...
-    def finish_episode(self, success: bool | None = None) -> None: ...
+    def finish_episode(
+        self,
+        success: bool | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None: ...
     def discard_episode(self) -> None: ...
     def close(self) -> None: ...
 
@@ -39,6 +45,7 @@ class MemoryRecorder:
     def __init__(self) -> None:
         self.frames: list[dict[str, Any]] = []
         self.episodes: list[list[dict[str, Any]]] = []
+        self.metrics: list[Mapping[str, Any]] = []
         self.context: EpisodeContext | None = None
 
     def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
@@ -48,8 +55,14 @@ class MemoryRecorder:
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None:
         self.frames.append({**observation, ACTION: np.asarray(action).copy()})
 
-    def finish_episode(self, success: bool | None = None) -> None:
+    def finish_episode(
+        self,
+        success: bool | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
+        del success
         self.episodes.append(self.frames)
+        self.metrics.append(dict(metrics) if metrics else {})
         self.frames = []
 
     def discard_episode(self) -> None:
@@ -145,11 +158,15 @@ class LeRobotV3Recorder:
         self.dataset.add_frame(frame)
         self._frames += 1
 
-    def finish_episode(self, success: bool | None = None) -> None:
+    def finish_episode(
+        self,
+        success: bool | None = None,
+        metrics: Mapping[str, Any] | None = None,
+    ) -> None:
         if self._context is None:
             raise RuntimeError("no episode is active")
         self.dataset.save_episode(parallel_encoding=True)
-        metadata = {
+        metadata: dict[str, Any] = {
             "episode_index": self._episode_index,
             "seed": self._context.seed,
             "task": self._context.task,
@@ -159,6 +176,13 @@ class LeRobotV3Recorder:
             "frames": self._frames,
             "success": success,
         }
+        # Why an episode ended is part of the episode.  A scene that runs several
+        # attempts per process writes both accepted and rejected episodes, and a
+        # reader who has to open the collection summary to learn which is which
+        # cannot filter a dataset by itself; nor can a rejected episode explain
+        # itself, which is the whole point of keeping it.
+        if metrics:
+            metadata["metrics"] = jsonable(dict(metrics))
         with self._metadata_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(metadata, ensure_ascii=False) + "\n")
         self._episode_index += 1
