@@ -136,10 +136,19 @@ class A3GraspExpert:
         )
         position_error = np.linalg.norm(residual(result.x)[:3])
         if not result.success or position_error > 0.012:
-            raise RuntimeError(
-                f"grasp expert IK failed: success={result.success} "
-                f"position_error={position_error:.5f}"
-            )
+            # `result.success` is the *optimizer's* convergence flag, not the
+            # outcome: a converged solve can still land short of the target, and a
+            # message reading "IK failed: success=True" sent readers looking for a
+            # contradiction instead of at the residual.
+            reasons = []
+            if not result.success:
+                reasons.append("the solver did not converge")
+            if position_error > 0.012:
+                reasons.append(
+                    f"the closest pose is {position_error * 1000:.2f} mm from the "
+                    f"target (tolerance 12.00 mm)"
+                )
+            raise RuntimeError("grasp expert IK failed: " + " and ".join(reasons))
         return np.asarray(result.x, dtype=np.float64)
 
     def act(self, observation: dict[str, Any], task: str) -> np.ndarray:
@@ -419,10 +428,18 @@ class A3CookieTransferExpert:
                 if position_error < self.ik_retry_tolerance_m:
                     break
         if not res.success or position_error > self.ik_max_tolerance_m:
-            raise RuntimeError(
-                "cookie expert IK failed: "
-                f"success={res.success} position_error={position_error:.5f}"
-            )
+            # As above: `res.success` says the optimizer converged, not that the
+            # pose is close enough.  Name the condition that actually failed, so a
+            # rejected episode reads as "1.27 mm short" rather than as a paradox.
+            reasons = []
+            if not res.success:
+                reasons.append("the solver did not converge")
+            if position_error > self.ik_max_tolerance_m:
+                reasons.append(
+                    f"the closest pose is {position_error * 1000:.2f} mm from the "
+                    f"target (tolerance {self.ik_max_tolerance_m * 1000:.2f} mm)"
+                )
+            raise RuntimeError("cookie expert IK failed: " + " and ".join(reasons))
         return np.asarray(res.x, dtype=np.float64)
 
     def reset(self, context: EpisodeContext | None = None) -> None:
