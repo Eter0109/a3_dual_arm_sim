@@ -613,6 +613,14 @@ Yaw is available on all three boxes, including the source, and the Cookies inher
 yaw — they are rotated about the bin centre and then translated, so the 2.5 mm gaps and the row
 pitch are preserved. Measured on randomised seeds: 4/4 complete, 1814–1855 steps.
 
+The two-box scene relaxes one part of the placement contract: its Cookies have to be **in** a box,
+not standing in it (`require_upright: False`, recorded in `collection_summary.json` and in the
+dataset's own details). Its subject is the box exchange, and the push that clears A slides along
+A's rear wall where a filled box's rear Cookies lean against it — measured at about 24° of lean for
+three of ten, with every Cookie still inside. Requiring them to stay upright graded the posture
+rather than the task and rejected a run that had already done the harder half. The precision-fill
+scenes keep the upright requirement, where a Cookie on its side really is not in its slot.
+
 Two kinds of variation are configured separately because they cost different things:
 
 * **Scene variation** (the above) moves the boxes and jitters the arm's start pose. It is what makes
@@ -951,7 +959,7 @@ python -u examples/run_cookie_two_box_batch.py \
 trial and a JSON evaluation report, omit `--render` and add
 `--output artifacts/cookie_two_box_batch_check.json`. The report is **not**
 a training dataset, and the runner does not record demonstrations. A complete
-result requires 10 released upright Cookies in each box, 60 remaining in the
+result requires 10 Cookies placed in each box, 60 remaining in the
 source, full A pushed clear, and B within 8 mm of the filling station.
 Check `success`, `box_a_cookie_count`, `box_b_cookie_count`, and
 `failure_reason` in the final JSON.

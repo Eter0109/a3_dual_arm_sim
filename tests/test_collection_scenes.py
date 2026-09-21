@@ -98,6 +98,34 @@ def test_batch_scenes_relax_the_slot_contract_and_require_release():
             env.close()
 
 
+def test_only_the_relay_scene_counts_a_lying_cookie_as_placed():
+    """The relay grades "in the box"; the precision fills grade "in its slot".
+
+    The push that clears box A slides along A's rear wall, where the rear Cookies
+    lean against it: measured at about 24 degrees for three of ten, with all ten
+    still inside.  Grading that as "7/10 aboard" rejected a run that had already
+    done the harder half of the task, so the relay scene asks only for
+    containment, and the two counts it reports (contained, placed) become the same
+    number.  The precision-fill scenes must keep the strict form: a Cookie on its
+    side is not in a 2x5 slot, and their whole subject is the placement.
+    """
+
+    strict = scene_by_name("a3_cookie_same_column").build_env(0.0, 0.0)
+    try:
+        assert strict.task_config.require_upright is True
+    finally:
+        strict.close()
+
+    relay = scene_by_name("a3_cookie_two_box").build_env(0.0, 0.0)
+    try:
+        assert relay.task_config.require_upright is False
+        # "Lying down" must not become "still pinched": the relay still requires
+        # the left fingers to be clear before a Cookie counts.
+        assert relay.task_config.require_released is True
+    finally:
+        relay.close()
+
+
 def test_batch_scenes_vary_the_scene_but_never_jitter_the_cookies():
     """The two kinds of variation are separable, and the batch scenes need both.
 

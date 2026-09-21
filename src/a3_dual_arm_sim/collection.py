@@ -552,6 +552,10 @@ def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
             yaw_noise_rad=yaw_noise_rad,
             require_exact_slots=False,
             require_released=True,
+            # The relay's subject is the box exchange, not the placement: a Cookie
+            # shoved flat by the push is still in the box, and grading it as
+            # missing would reject a run for succeeding at the harder half.
+            require_upright=False,
             terminate_on_success=False,
         )
         return A3CookieTransferEnv(
@@ -586,6 +590,7 @@ def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
             "hold_steps": hold_steps,
             "require_exact_slots": False,
             "require_released": True,
+            "require_upright": False,
             "workflow": "fill A, push A clear, carry B into the station, fill B",
             "success_decision": (
                 "expert, not the environment: a two-box fill is not expressible as "

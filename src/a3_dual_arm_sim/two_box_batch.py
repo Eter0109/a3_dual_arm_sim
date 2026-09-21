@@ -419,13 +419,34 @@ class TwoBoxBatchExpert:
             )
         return f"stage={self.stage}"
 
-    def _count(self, box_id: int, indices: list[int]) -> int:
+    def _counts_in_box(self, box_id: int, indices: list[int]) -> tuple[int, int]:
+        """How many of ``indices`` the box holds, and how many it holds *placed*.
+
+        Two numbers, because one cannot say why a box reports fewer than ten.
+        The first is geometric: the Cookie's centre is inside the box.  The
+        second is the scene's own contract -- ``privileged_cookie_in_target``,
+        which additionally wants the Cookie settled, released, and (unless the
+        scene says otherwise) still upright.  A run that failed ``VERIFY_A`` with
+        "7/10 Cookies aboard" was holding all ten: three had leaned about 24
+        degrees during the push, so the box was full and the count was about
+        posture.  Reporting both makes a rejected episode say which it was.
+        """
+
         old = self.env._target_bin_body
         try:
             self.env._target_bin_body = box_id
-            return sum(self.env.privileged_cookie_in_target(i) for i in indices)
+            contained = sum(
+                self.env.privileged_cookie_in_target_region(i) for i in indices
+            )
+            placed = sum(self.env.privileged_cookie_in_target(i) for i in indices)
         finally:
             self.env._target_bin_body = old
+        return contained, placed
+
+    def _count(self, box_id: int, indices: list[int]) -> int:
+        """How many of ``indices`` the box holds under the scene's contract."""
+
+        return self._counts_in_box(box_id, indices)[1]
 
     def counts(self) -> tuple[int, int]:
         all_indices = list(range(len(self.env._cookie_bodies)))
@@ -485,8 +506,8 @@ class TwoBoxBatchExpert:
         if self.stage == "VERIFY_A":
             position = self.env.data.xpos[self.box_a]
             clearance_mm = float(position[1] - self.station[1]) * 1000.0
-            held = self._count(self.box_a, self._a_indices)
-            good = position[1] >= self.station[1] + 0.085 and held == 10
+            contained, placed = self._counts_in_box(self.box_a, self._a_indices)
+            good = position[1] >= self.station[1] + 0.085 and placed == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
             self._verify_steps += 1
             if self._settled_steps >= 15:
@@ -495,15 +516,16 @@ class TwoBoxBatchExpert:
                 self.failed = (
                     f"filled box A did not clear the filling station: "
                     f"{clearance_mm:.1f} mm clear of it (needs 85.0) with "
-                    f"{held}/10 Cookies aboard"
+                    f"{placed}/10 Cookies placed "
+                    f"({contained}/10 still in the box)"
                 )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_B":
             position = self.env.data.xpos[self.box_b]
             offset = position[:2] - self.station
             distance_mm = float(np.linalg.norm(offset)) * 1000.0
-            held = self._count(self.box_a, self._a_indices)
-            good = distance_mm < 8.0 and held == 10
+            contained, placed = self._counts_in_box(self.box_a, self._a_indices)
+            good = distance_mm < 8.0 and placed == 10
             self._settled_steps = self._settled_steps + 1 if good else 0
             self._verify_steps += 1
             if self._settled_steps >= 15:
@@ -520,7 +542,8 @@ class TwoBoxBatchExpert:
                     f"empty box B did not reach the filling station: "
                     f"{distance_mm:.1f} mm from it (needs under 8.0) at "
                     f"x={offset[0] * 1000:+.1f} y={offset[1] * 1000:+.1f} mm, "
-                    f"with {held}/10 Cookies still in box A"
+                    f"with {placed}/10 Cookies placed in box A "
+                    f"({contained}/10 still aboard)"
                 )
             return self.env.last_applied_action.copy()
         if self.stage == "VERIFY_BOTH":
@@ -529,11 +552,13 @@ class TwoBoxBatchExpert:
                 self.env.privileged_cookie_in_source(i)
                 for i in range(len(self.env._cookie_bodies))
             )
+            contained_a, placed_a = self._counts_in_box(self.box_a, self._a_indices)
+            contained_b, placed_b = self._counts_in_box(self.box_b, self._b_indices)
             good = (
                 a == b == 10
                 and len(self._a_indices) == len(self._b_indices) == 10
-                and self._count(self.box_a, self._a_indices) == 10
-                and self._count(self.box_b, self._b_indices) == 10
+                and placed_a == 10
+                and placed_b == 10
                 and source == len(self.env._cookie_bodies) - 20
                 and self.env.data.xpos[self.box_a, 1] >= self.station[1] + 0.085
                 and np.linalg.norm(self.env.data.xpos[self.box_b, :2] - self.station) < 0.008
@@ -544,7 +569,9 @@ class TwoBoxBatchExpert:
                 self.done = True
             elif self._settled_steps == 0:
                 self.failed = (
-                    f"dual-box final criteria failed: A={a}, B={b}, source={source}"
+                    f"dual-box final criteria failed: A={a} ({contained_a} in the "
+                    f"box, {placed_a} placed), B={b} ({contained_b} in the box, "
+                    f"{placed_b} placed), source={source}"
                 )
             return self.env.last_applied_action.copy()
         self.failed = f"unknown dual-box stage {self.stage}"

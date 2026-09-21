@@ -57,6 +57,16 @@ class CookieTransferTaskConfig:
     terminate_on_success: bool = True
     require_exact_slots: bool = True
     require_released: bool = False
+    #: Whether a Cookie has to still be standing to count as placed.
+    #:
+    #: The precision-fill scenes say yes: their contract is about putting ten
+    #: Cookies into a 2x5 grid, and one lying on its side is not in its slot.  The
+    #: relay scene says no, because its subject is the box exchange rather than the
+    #: placement -- a Cookie shoved flat on its back by the push is still *in the
+    #: box*, and rejecting the episode for it would grade the wrong thing.  A run
+    #: that failed on exactly that reported "7/10 Cookies aboard" for a box holding
+    #: all ten, three of them leaning about 24 degrees.
+    require_upright: bool = True
 
     def __post_init__(self) -> None:
         if self.required_cookies != 10:
@@ -687,7 +697,13 @@ class A3CookieTransferEnv(A3DualArmEnv):
             not self.task_config.require_released
             or not any(self.privileged_left_finger_contacts(index))
         )
-        return footprint_inside and vertically_inside and upright and settled and released
+        return (
+            footprint_inside
+            and vertically_inside
+            and (upright or not self.task_config.require_upright)
+            and settled
+            and released
+        )
 
     def _cookie_inside_source(self, index: int) -> bool:
         return self._cookie_region_status(
