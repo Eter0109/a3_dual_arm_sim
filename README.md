@@ -982,8 +982,26 @@ python -m pytest -q tests/test_cookie_two_box_batch.py::test_right_gripper_carri
 After extending A's push distance, the operator reported one complete visual
 run on the current fixed layout. No JSON report for that successful run has
 been committed, so this README does not claim a measured step count or a
-multi-seed success rate. A previous failure in B's second transfer was with
 older push parameters. The two-box scene has its own `randomization` ranges,
 including for the spare box; see [Scene variation](#scene-variation).
-Random-layout robustness at a wider range, and dataset-collection suitability,
-remain unverified.
+
+Measured since, three seeds collected with `scripts/collect_cookie.sh`, one
+attempt each, at the scene's own randomisation: seeds 0 and 2 complete (4802 and
+4751 control steps, ten Cookies upright in each box) and seed 1 is rejected at the
+second fill, where the left arm's IK lands 5.27 mm from its target against a
+4.00 mm tolerance after the working box has been exchanged. The three episodes are
+`outputs/videos/two_box_collection/{seed0_success,seed1_failed,seed2_success}.mp4`.
+
+That 2-of-3 is the scene's working yield rather than a defect to chase: the
+failure is a millimetre-scale near miss in one arm pose, and a collection run asks
+for more attempts than episodes and keeps the accepted ones. A rejected episode
+now records *why* in its own metadata line:
+
+```json
+{"seed": 1, "frames": 4900, "success": false,
+ "metrics": {"stage": "FILL_B", "box_a_cookie_count": 10, "box_b_cookie_count": 8,
+             "failure_reason": "FILL_B: cookie expert IK failed: the closest pose is
+                                5.27 mm from the target (tolerance 4.00 mm)"}}
+```
+
+Random-layout robustness at a wider range remains unverified.
