@@ -137,7 +137,9 @@ def test_lerobot_v3_round_trip(tmp_path: Path) -> None:
         assert result.steps == 2
     finally:
         runner.close()
-    metadata = [json.loads(line) for line in (root / "a3_episode_metadata.jsonl").read_text().splitlines()]
+    metadata = [
+        json.loads(line) for line in (root / "a3_episode_metadata.jsonl").read_text().splitlines()
+    ]
     assert metadata == [
         {
             "episode_index": 0,
@@ -150,6 +152,23 @@ def test_lerobot_v3_round_trip(tmp_path: Path) -> None:
             "success": None,
         }
     ]
+    resumed_env = A3DualArmEnv(render_cameras=False)
+    resumed_recorder = LeRobotV3Recorder(
+        root,
+        repo_id="local/a3-test",
+        fps=resumed_env.config.control_hz,
+        image_height=resumed_env.config.image_height,
+        image_width=resumed_env.config.image_width,
+        resume=True,
+    )
+    resumed_runner = EpisodeRunner(
+        resumed_env, HoldPolicy(), task="dataset test", recorder=resumed_recorder
+    )
+    try:
+        resumed_runner.run(seed=10, max_steps=1)
+    finally:
+        resumed_runner.close()
+
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     try:
@@ -158,8 +177,8 @@ def test_lerobot_v3_round_trip(tmp_path: Path) -> None:
         )
     except TypeError:
         dataset = LeRobotDataset("local/a3-test", root=root, download_videos=False)
-    assert len(dataset) == 2
-    assert dataset.num_episodes == 1
+    assert len(dataset) == 3
+    assert dataset.num_episodes == 2
     assert tuple(dataset[0]["action"].shape) == (16,)
     assert tuple(dataset[0]["observation.force"].shape) == (18,)
     assert dataset[0]["task"] == "dataset test"

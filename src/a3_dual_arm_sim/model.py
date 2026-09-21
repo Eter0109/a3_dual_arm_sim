@@ -7,6 +7,7 @@ from typing import Literal
 from xml.etree import ElementTree as ET
 
 import mujoco
+import numpy as np
 
 from .config import SimConfig
 from .contracts import ARM_JOINTS, LEFT_JOINTS, RIGHT_JOINTS
@@ -177,13 +178,25 @@ def _add_gripper(
         pos=_vec(wrist_target_position),
     )
     ET.SubElement(wrist_target, "site", size="0.003", rgba="0 0 0 0")
+    # Resolve the look-at direction once in the flange frame. targetbody would
+    # continually reorient the camera instead of modelling a rigid mount.
+    camera_z = np.asarray(wrist_camera_position) - np.asarray(wrist_target_position)
+    if np.linalg.norm(camera_z) < 1e-9:
+        raise ValueError("wrist camera position and target must differ")
+    camera_z = camera_z / np.linalg.norm(camera_z)
+    camera_x = np.array([direction, 0.0, 0.0])
+    if abs(camera_x @ camera_z) > 0.99:
+        camera_x = np.array([0.0, 0.0, 1.0])
+    camera_x -= (camera_x @ camera_z) * camera_z
+    camera_x /= np.linalg.norm(camera_x)
+    camera_y = np.cross(camera_z, camera_x)
     ET.SubElement(
         flange,
         "camera",
         name=f"{side}_wrist",
         pos=_vec(wrist_camera_position),
-        mode="targetbody",
-        target=f"{prefix}_wrist_camera_target",
+        mode="fixed",
+        xyaxes=_vec(tuple(camera_x) + tuple(camera_y)),
         fovy=f"{config.cameras.wrist_fovy_deg:.10g}",
     )
 
@@ -495,12 +508,18 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         else scene.cookie_bottom_edge_bevel_m
     )
     _add_beveled_cookie_mesh(
-        assets, "cookie_collision_mesh", scene.cookie_half_size_m,
-        scene.cookie_edge_bevel_m, bottom_bevel,
+        assets,
+        "cookie_collision_mesh",
+        scene.cookie_half_size_m,
+        scene.cookie_edge_bevel_m,
+        bottom_bevel,
     )
     _add_beveled_cookie_mesh(
-        assets, "cookie_visual_mesh", visual_half_size,
-        scene.cookie_edge_bevel_m, bottom_bevel,
+        assets,
+        "cookie_visual_mesh",
+        visual_half_size,
+        scene.cookie_edge_bevel_m,
+        bottom_bevel,
     )
     if scene.cookie_collision_mode not in ("mesh", "compound"):
         raise ValueError("cookie_collision_mode must be mesh or compound")
@@ -517,7 +536,9 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 for y in (-width, width)
             ]
             ET.SubElement(
-                assets, "mesh", name=f"cookie_{label}_mesh",
+                assets,
+                "mesh",
+                name=f"cookie_{label}_mesh",
                 vertex=_vec(tuple(v for vertex in vertices for v in vertex)),
             )
     # Source bin: on table
@@ -647,7 +668,8 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 attributes.pop("pos")
                 attributes.update(
                     name=f"cookie_{index}_{label}_geom",
-                    type="mesh", mesh=f"cookie_{label}_mesh",
+                    type="mesh",
+                    mesh=f"cookie_{label}_mesh",
                     mass=str(scene.cookie_mass_kg * cap_volumes[label] / volume),
                 )
                 ET.SubElement(cookie, "geom", **attributes)

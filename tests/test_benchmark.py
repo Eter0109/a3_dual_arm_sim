@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
 import numpy as np
-import pytest
 
 from a3_dual_arm_sim.benchmark import (
     BenchmarkPolicy,
@@ -12,8 +10,8 @@ from a3_dual_arm_sim.benchmark import (
     ExpertPolicyAdapter,
     make_policy_adapter,
 )
-from a3_dual_arm_sim.contracts import EpisodeContext
 from a3_dual_arm_sim.policy import HoldPolicy
+from a3_dual_arm_sim.recording import MemoryRecorder
 
 
 def test_benchmark_policy_protocol_conformance():
@@ -50,19 +48,25 @@ def test_box_randomization_options():
     )
     env = benchmark.create_env()
     try:
-        _, info1 = env.reset(seed=1, options={
-            "randomize_boxes": True,
-            "target_bin_noise_m": 0.005,
-            "source_bin_noise_m": 0.003,
-        })
+        _, _info1 = env.reset(
+            seed=1,
+            options={
+                "randomize_boxes": True,
+                "target_bin_noise_m": 0.005,
+                "source_bin_noise_m": 0.003,
+            },
+        )
         t_pos1 = env.data.xpos[env._target_bin_body].copy()
         s_pos1 = env.data.xpos[env._source_bin_body].copy()
 
-        _, info2 = env.reset(seed=2, options={
-            "randomize_boxes": True,
-            "target_bin_noise_m": 0.005,
-            "source_bin_noise_m": 0.003,
-        })
+        _, _info2 = env.reset(
+            seed=2,
+            options={
+                "randomize_boxes": True,
+                "target_bin_noise_m": 0.005,
+                "source_bin_noise_m": 0.003,
+            },
+        )
         t_pos2 = env.data.xpos[env._target_bin_body].copy()
         s_pos2 = env.data.xpos[env._source_bin_body].copy()
 
@@ -102,3 +106,52 @@ def test_benchmark_score_and_summary_metrics():
     table = res.summary_table()
     assert "25 / 30" in table
     assert "test_policy" in table
+
+
+def test_benchmark_recorder_stores_applied_joint_action():
+    class Policy:
+        action_mode = "cartesian_delta"
+        name = "test_expert"
+        finished = True
+
+        def reset(self, context=None):
+            self.context = context
+
+        def act(self, observation, task=""):
+            return np.zeros(14)
+
+    class Data:
+        xpos = np.zeros((2, 3))
+
+    class Env:
+        action_mode = "joint_position"
+        data = Data()
+        _target_bin_body = 0
+        _source_bin_body = 1
+
+        def reset(self, seed, options):
+            return {"marker": seed}, {}
+
+        def step(self, action):
+            applied = np.arange(16, dtype=np.float64)
+            return (
+                {},
+                0.0,
+                False,
+                False,
+                {
+                    "applied_action": applied,
+                    "success": True,
+                    "cookies_in_target": 10,
+                    "cookies_in_source": 70,
+                    "safety_reason": None,
+                },
+            )
+
+    recorder = MemoryRecorder()
+    score = CookieBatchBenchmark(max_steps=1).run_episode(
+        Policy(), seed=4, env=Env(), recorder=recorder
+    )
+    assert score.success
+    assert len(recorder.episodes) == 1
+    np.testing.assert_array_equal(recorder.episodes[0][0]["action"], np.arange(16))

@@ -58,6 +58,26 @@ def test_training_dataset_audit_requires_success_and_contract(tmp_path: Path) ->
         audit_training_dataset(_dataset(tmp_path / "failed", success=False), repo_id="local/test")
 
 
+def test_training_dataset_audit_accepts_cookie_joint_actions(tmp_path: Path) -> None:
+    root = _dataset(tmp_path / "cookie")
+    (root / "collection_summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "task": "cookie_transfer",
+                "stored_action_mode": "joint_position",
+            }
+        )
+        + "\n"
+    )
+    assert audit_training_dataset(root, repo_id="local/test")["episodes"] == 1
+    summary = json.loads((root / "collection_summary.json").read_text())
+    summary["stored_action_mode"] = "cartesian_delta"
+    (root / "collection_summary.json").write_text(json.dumps(summary) + "\n")
+    with pytest.raises(ValueError, match="joint_position"):
+        audit_training_dataset(root, repo_id="local/test")
+
+
 def test_adapted_checkpoint_uses_three_cameras_and_16d_io(tmp_path: Path) -> None:
     base = tmp_path / "base"
     base.mkdir()

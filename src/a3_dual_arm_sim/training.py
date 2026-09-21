@@ -35,8 +35,13 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
             "Dataset uses the obsolete transient-lift success contract; recollect it with the "
             "current stable-grasp expert"
         )
-    if collection_summary.get("task") != "a3_grasp":
-        raise ValueError("Dataset collection summary is not for the A3 grasp task")
+    if collection_summary.get("task") not in {"a3_grasp", "cookie_transfer"}:
+        raise ValueError("Unsupported A3 training task")
+    if (
+        collection_summary.get("task") == "cookie_transfer"
+        and collection_summary.get("stored_action_mode") != "joint_position"
+    ):
+        raise ValueError("Cookie SmolVLA datasets require joint_position actions")
     if info.get("codebase_version") != "v3.0":
         raise ValueError("SmolVLA training requires a LeRobot v3.0 dataset")
     features = info.get("features", {})
@@ -126,9 +131,7 @@ def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: st
         config["vlm_model_name"] = str(cached_vlm)
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / "config.json").write_text(
-        json.dumps(config, indent=2) + "\n", encoding="utf-8"
-    )
+    (runtime_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     for source in base_model.iterdir():
         if source.name in {"config.json", "model.safetensors", "train_config.json"}:
             continue
@@ -221,7 +224,9 @@ def train_smolvla(
         return result
 
     env = os.environ.copy()
-    env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"})
+    env.update(
+        {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"}
+    )
     subprocess.run(command, check=True, env=env)
     checkpoints = sorted((output_dir / "checkpoints").glob("*/pretrained_model/config.json"))
     if not checkpoints:

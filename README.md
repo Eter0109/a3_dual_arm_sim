@@ -303,6 +303,39 @@ a3-sim replay --root datasets/a3_scripted --repo-id local/a3-scripted --episode 
 The adapter boundary is also used by the included SmolVLA wrapper; another VLA can implement the
 same four methods without changing the environment, runner, or recorder.
 
+### Collect the randomized single-box benchmark
+
+The same-column expert can collect 100 successful single-box demonstrations directly in the
+LeRobot v3 format used by the included SmolVLA adapter:
+
+```bash
+MUJOCO_GL=egl python -u examples/collect_cookie_benchmark.py --episodes 100
+```
+
+The default output is resolved from the project root as
+`datasets/a3_single_box_same_column_100`; no machine-specific path is embedded in the collector.
+Use `--root` or `--config` to override either path. The benchmark retains its randomized source
+and target boxes and Cookie jitter, advances seeds after every attempt, discards unsuccessful
+episodes, and stops after five consecutive failures for inspection.
+
+The expert produces Cartesian deltas, while every stored `action` is the post-IK and safety-limited
+16-D absolute `joint_position` target actually sent to the simulator. This matches the SmolVLA
+deployment interface. The dataset also contains three RGB cameras, 16-D measured state and
+velocity, 14-D end-effector pose, 18-D force feedback, the task instruction, and per-episode source
+action metadata.
+
+Press Ctrl+C once to request a clean stop after the current episode. Resume a finalized partial
+dataset without overwriting it:
+
+```bash
+MUJOCO_GL=egl python -u examples/collect_cookie_benchmark.py \
+  --episodes 100 --resume
+```
+
+The collector validates the configuration before resuming and runs the SmolVLA dataset contract
+audit after all requested episodes are saved. `attempts.jsonl` records both successful and failed
+attempts; only successful episodes enter the LeRobot dataset.
+
 ## Cookie transfer scene
 
 This section describes the **default / legacy single-Cookie configuration**.
@@ -402,6 +435,10 @@ episode metadata, and unsuccessful episodes. The A3 adapter changes the supplied
 its original 10-D state, 7-D action, and two cameras to the A3 16-D state, 16-D action, and three
 cameras. SmolVLA already pads state and action to 32 internally, so this does not change learned
 weight shapes. The large base weights are symlinked into a generated runtime view instead of copied.
+
+For the single-box dataset, use
+`datasets/a3_single_box_same_column_100` with repo ID
+`local/a3-single-box-same-column-100` in the same `train-smolvla` command below.
 
 ```bash
 # Inspect the exact command and feature contract without starting training.
@@ -607,5 +644,4 @@ not yet optimized: the earlier development headless replay took
 about 21 minutes for roughly 92 seconds of simulated control, with another
 diagnostic replay running concurrently. Do not expect real-time playback or
 start large dataset collection on the basis of this one fixed-layout baseline.
-
 

@@ -70,8 +70,16 @@ def lerobot_features(height: int, width: int) -> dict[str, Any]:
         LEFT_WRIST_IMAGE: image.copy(),
         RIGHT_WRIST_IMAGE: image.copy(),
         STATE: {"dtype": "float32", "shape": (16,), "names": [f"state_{i}" for i in range(16)]},
-        VELOCITY: {"dtype": "float32", "shape": (16,), "names": [f"velocity_{i}" for i in range(16)]},
-        EEF_POSE: {"dtype": "float32", "shape": (14,), "names": [f"eef_pose_{i}" for i in range(14)]},
+        VELOCITY: {
+            "dtype": "float32",
+            "shape": (16,),
+            "names": [f"velocity_{i}" for i in range(16)],
+        },
+        EEF_POSE: {
+            "dtype": "float32",
+            "shape": (14,),
+            "names": [f"eef_pose_{i}" for i in range(14)],
+        },
         FORCE: {"dtype": "float32", "shape": (18,), "names": [f"force_{i}" for i in range(18)]},
         ACTION: {"dtype": "float32", "shape": (16,), "names": [f"action_{i}" for i in range(16)]},
     }
@@ -89,31 +97,59 @@ class LeRobotV3Recorder:
         image_height: int,
         image_width: int,
         use_videos: bool = False,
+        resume: bool = False,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
         except ImportError as exc:
-            raise RuntimeError("Install recording support with: pip install -e '.[dataset]'") from exc
+            raise RuntimeError(
+                "Install recording support with: pip install -e '.[dataset]'"
+            ) from exc
         self.root = Path(root)
-        if self.root.exists() and any(self.root.iterdir()):
+        if self.root.exists() and any(self.root.iterdir()) and not resume:
             raise FileExistsError(f"refusing to overwrite non-empty dataset: {self.root}")
-        if self.root.exists():
+        if self.root.exists() and not resume:
             self.root.rmdir()
         self.root.parent.mkdir(parents=True, exist_ok=True)
-        self.dataset = LeRobotDataset.create(
-            repo_id=repo_id,
-            fps=fps,
-            root=self.root,
-            robot_type="A3_dual_arm",
-            features=lerobot_features(image_height, image_width),
-            use_videos=use_videos,
-            image_writer_threads=3,
+        self._metadata_path = self.root / "a3_episode_metadata.jsonl"
+        resumed_episodes: list[dict[str, Any]] = []
+        if resume:
+            info_path = self.root / "meta" / "info.json"
+            if not self._metadata_path.is_file() or not info_path.is_file():
+                raise FileNotFoundError("resume requires finalized LeRobot and A3 metadata")
+            resumed_episodes = [
+                json.loads(line)
+                for line in self._metadata_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            if len(resumed_episodes) != info.get("total_episodes"):
+                raise RuntimeError("Incomplete save: LeRobot/A3 episode counts differ")
+        self.dataset = (
+            LeRobotDataset.resume(
+                repo_id=repo_id,
+                root=self.root,
+                image_writer_threads=3,
+            )
+            if resume
+            else LeRobotDataset.create(
+                repo_id=repo_id,
+                fps=fps,
+                root=self.root,
+                robot_type="A3_dual_arm",
+                features=lerobot_features(image_height, image_width),
+                use_videos=use_videos,
+                image_writer_threads=3,
+            )
         )
         self._context: EpisodeContext | None = None
         self._controller_type = "unknown"
         self._frames = 0
         self._episode_index = 0
-        self._metadata_path = self.root / "a3_episode_metadata.jsonl"
+        if resume:
+            if len(resumed_episodes) != self.dataset.meta.total_episodes:
+                raise RuntimeError("Incomplete save: LeRobot/A3 episode counts differ")
+            self._episode_index = len(resumed_episodes)
 
     def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
         self._context = context

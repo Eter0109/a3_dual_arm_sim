@@ -33,9 +33,7 @@ def test_model_compiles_with_all_source_arm_joints_and_sensors() -> None:
     assert bundle.model.nsensor == 8
     assert bundle.model.nsensordata == 16
     for joint in bundle.source_joints:
-        joint_id = mujoco.mj_name2id(
-            bundle.model, mujoco.mjtObj.mjOBJ_JOINT, joint.name
-        )
+        joint_id = mujoco.mj_name2id(bundle.model, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
         assert joint_id >= 0
         assert tuple(bundle.model.jnt_range[joint_id]) == joint.limits
 
@@ -46,24 +44,15 @@ def test_robotiq_2f85_visuals_and_85mm_parallel_jaw_contract() -> None:
     data = mujoco.MjData(model)
     for side in ("L", "R"):
         joint_ids = [
-            mujoco.mj_name2id(
-                model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_finger_{finger}_joint"
-            )
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_finger_{finger}_joint")
             for finger in ("inner", "outer")
         ]
         for joint_id in joint_ids:
             assert tuple(model.jnt_range[joint_id]) == (0.0, ROBOTIQ_2F85_JAW_TRAVEL_M)
-        assert (
-            mujoco.mj_name2id(
-                model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_2f85_base_visual"
-            )
-            >= 0
-        )
+        assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_2f85_base_visual") >= 0
         mujoco.mj_forward(model, data)
         pad_ids = [
-            mujoco.mj_name2id(
-                model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_finger_{finger}_geom"
-            )
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"{side}_finger_{finger}_geom")
             for finger in ("inner", "outer")
         ]
         center_distance = float(
@@ -127,17 +116,15 @@ def test_gripper_visual_pads_match_hidden_collision_pads() -> None:
     root = ET.fromstring(build_model(load_config(), scene="cookie_transfer").xml)
     for side in ("L", "R"):
         for finger in ("inner", "outer"):
-            collision = root.find(
-                f".//geom[@name='{side}_finger_{finger}_geom']"
-            )
-            visual = root.find(
-                f".//geom[@name='{side}_finger_{finger}_pad_visual']"
-            )
+            collision = root.find(f".//geom[@name='{side}_finger_{finger}_geom']")
+            visual = root.find(f".//geom[@name='{side}_finger_{finger}_pad_visual']")
             assert collision is not None and visual is not None
             assert visual.attrib["pos"] == collision.attrib["pos"]
             assert visual.attrib["size"] == collision.attrib["size"]
             assert visual.attrib["group"] == "2"
             assert visual.attrib["contype"] == "0"
+
+
 def test_wrist_cameras_are_symmetric() -> None:
     config = load_config()
     bundle = build_model(config, scene="cookie_transfer")
@@ -152,8 +139,8 @@ def test_wrist_cameras_are_symmetric() -> None:
     right_target = root.find(".//body[@name='R_wrist_camera_target']")
     assert left_target is not None
     assert right_target is not None
-    assert left_target.attrib["pos"] == "0 0.245 0.085"
-    assert right_target.attrib["pos"] == "0 -0.245 0.085"
+    assert left_target.attrib["pos"] == "0 0.15 0"
+    assert right_target.attrib["pos"] == "0 -0.15 0"
 
     # Verify world-space bilateral symmetry
     data = mujoco.MjData(bundle.model)
@@ -164,3 +151,25 @@ def test_wrist_cameras_are_symmetric() -> None:
     r_pos = data.cam_xpos[r_cid]
     np.testing.assert_allclose(l_pos, [r_pos[0], -r_pos[1], r_pos[2]], atol=1e-4)
 
+
+def test_wrist_camera_mount_does_not_rotate_relative_to_flange():
+    model = build_model(load_config(), scene="cookie_transfer").model
+    data = mujoco.MjData(model)
+    for side, camera in (("L", "left_wrist"), ("R", "right_wrist")):
+        cid = model.camera(camera).id
+        bid = model.body(f"{side}_flange").id
+        assert model.cam_mode[cid] == mujoco.mjtCamLight.mjCAMLIGHT_FIXED
+        poses = []
+        for angle in (-0.4, 0.0, 0.4):
+            data.qpos[model.jnt_qposadr[model.joint(f"{side}_WRIST_Y").id]] = angle
+            mujoco.mj_forward(model, data)
+            rotation = data.xmat[bid].reshape(3, 3)
+            poses.append(
+                (
+                    rotation.T @ (data.cam_xpos[cid] - data.xpos[bid]),
+                    rotation.T @ data.cam_xmat[cid].reshape(3, 3),
+                )
+            )
+        for position, rotation in poses[1:]:
+            np.testing.assert_allclose(position, poses[0][0], atol=1e-10)
+            np.testing.assert_allclose(rotation, poses[0][1], atol=1e-10)

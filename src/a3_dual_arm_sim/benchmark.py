@@ -11,22 +11,17 @@ import importlib
 import json
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
 from .batch_expert import A3CookieBatchExpert
 from .config import load_config
-from .contracts import (
-    CARTESIAN_ACTION_DIM,
-    JOINT_ACTION_DIM,
-    ActionMode,
-    EpisodeContext,
-)
+from .contracts import ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
-from .policy import Policy
 from .same_column_batch_expert import A3SameColumnBatchExpert
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "cookie_batch.yaml"
@@ -35,7 +30,7 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "cookie_
 @runtime_checkable
 class BenchmarkPolicy(Protocol):
     """Protocol for any policy evaluated in the benchmark.
-    
+
     Compatible with neural network policies (e.g. SmolVLA, OpenVLA, ACT, Diffusion Policy),
     RL agents, or rule-based expert controllers.
     """
@@ -224,7 +219,7 @@ class CookieBatchBenchmark:
 
         self.config = load_config(self.config_path)
 
-    def create_env(self) -> A3CookieTransferEnv:
+    def create_env(self, *, render_cameras: bool = False) -> A3CookieTransferEnv:
         return A3CookieTransferEnv(
             config=self.config,
             task_config=CookieTransferTaskConfig(
@@ -234,7 +229,7 @@ class CookieBatchBenchmark:
                 yaw_noise_rad=self.cookie_yaw_noise_rad,
             ),
             render_mode="human" if self.render else None,
-            render_cameras=False,
+            render_cameras=render_cameras,
         )
 
     def run_episode(
@@ -243,10 +238,11 @@ class CookieBatchBenchmark:
         seed: int,
         episode_idx: int = 1,
         env: A3CookieTransferEnv | None = None,
+        recorder: Any | None = None,
     ) -> EpisodeScore:
         should_close_env = False
         if env is None:
-            env = self.create_env()
+            env = self.create_env(render_cameras=recorder is not None)
             should_close_env = True
 
         reset_options = {
@@ -265,40 +261,78 @@ class CookieBatchBenchmark:
         if hasattr(runner_policy, "bind_env") and getattr(runner_policy, "expert", None) is None:
             runner_policy.bind_env(env)
         if hasattr(runner_policy, "reset"):
-            context = EpisodeContext(seed=seed, task="transfer 10 cookies into target box", action_mode=env.action_mode)
+            context = EpisodeContext(
+                seed=seed, task="transfer 10 cookies into target box", action_mode=env.action_mode
+            )
             runner_policy.reset(context)
 
         t_start = time.monotonic()
+        if recorder is not None:
+            recorder.start_episode(
+                EpisodeContext(
+                    seed=seed,
+                    task="transfer 10 cookies into target box",
+                    action_mode=runner_policy.action_mode,
+                ),
+                getattr(runner_policy, "name", type(runner_policy).__name__),
+            )
         steps = 0
         terminated = False
         truncated = False
 
-        while steps < self.max_steps:
-            steps += 1
-            if hasattr(runner_policy, "act"):
-                try:
-                    action = runner_policy.act(observation, "transfer 10 cookies into target box")
-                except TypeError:
-                    action = runner_policy.act(observation)
-            elif callable(runner_policy):
-                action = runner_policy(observation)
-            else:
-                raise ValueError(f"Policy {runner_policy} does not have act() and is not callable")
+        try:
+            while steps < self.max_steps:
+                steps += 1
+                if hasattr(runner_policy, "act"):
+                    try:
+                        action = runner_policy.act(
+                            observation, "transfer 10 cookies into target box"
+                        )
+                    except TypeError:
+                        action = runner_policy.act(observation)
+                elif callable(runner_policy):
+                    action = runner_policy(observation)
+                else:
+                    raise ValueError(
+                        f"Policy {runner_policy} does not have act() and is not callable"
+                    )
 
-            observation, _, terminated, truncated, info = env.step(action)
+                previous_observation = observation
+                observation, _, terminated, truncated, info = env.step(action)
+                if recorder is not None:
+                    recorder.add_frame(previous_observation, info["applied_action"])
 
-            # Check if policy or expert is finished
-            if getattr(runner_policy, "finished", False) or terminated or truncated:
-                break
+                if getattr(runner_policy, "finished", False) or terminated or truncated:
+                    break
+        except BaseException:
+            if recorder is not None:
+                recorder.discard_episode()
+            if should_close_env:
+                env.close()
+            raise
 
         wall_time = time.monotonic() - t_start
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
         env_success = bool(info.get("success", False))
         success = env_success and cookies_in_target == 10
+        if recorder is not None:
+            success = success and cookies_in_source == 70 and not info.get("safety_reason")
+            if success:
+                recorder.finish_episode(success=True)
+            else:
+                recorder.discard_episode()
 
-        target_pos = env.data.xpos[env._target_bin_body].round(4).tolist() if hasattr(env, "_target_bin_body") else []
-        source_pos = env.data.xpos[env._source_bin_body][:2].round(4).tolist() if hasattr(env, "_source_bin_body") else []
+        target_pos = (
+            env.data.xpos[env._target_bin_body].round(4).tolist()
+            if hasattr(env, "_target_bin_body")
+            else []
+        )
+        source_pos = (
+            env.data.xpos[env._source_bin_body][:2].round(4).tolist()
+            if hasattr(env, "_source_bin_body")
+            else []
+        )
 
         phase = getattr(runner_policy, "phase_name", "")
         failure_reason = None
@@ -307,7 +341,9 @@ class CookieBatchBenchmark:
                 failure_reason = "environment_safety_terminated"
             elif truncated or steps >= self.max_steps:
                 failure_reason = "max_steps_exceeded"
-            elif getattr(runner_policy, "expert", None) is not None and getattr(runner_policy.expert, "failed", False):
+            elif getattr(runner_policy, "expert", None) is not None and getattr(
+                runner_policy.expert, "failed", False
+            ):
                 failure_reason = getattr(runner_policy.expert, "failure_reason", "expert_failed")
             else:
                 failure_reason = f"only {cookies_in_target}/10 cookies in target box"
@@ -349,11 +385,17 @@ class CookieBatchBenchmark:
                 policy_name = getattr(policy, "name", type(policy).__name__)
 
         if verbose:
-            print(f"\n=======================================================", flush=True)
+            print("\n=======================================================", flush=True)
             print(f" Starting Benchmark: {policy_name}", flush=True)
-            print(f" Episodes: {num_episodes}, Seeds: {seed_start} to {seed_start + num_episodes - 1}", flush=True)
-            print(f" Randomization: boxes={self.randomize_boxes}, cookies={self.randomize_cookies}, workers={workers}", flush=True)
-            print(f"=======================================================", flush=True)
+            print(
+                f" Episodes: {num_episodes}, Seeds: {seed_start} to {seed_start + num_episodes - 1}",
+                flush=True,
+            )
+            print(
+                f" Randomization: boxes={self.randomize_boxes}, cookies={self.randomize_cookies}, workers={workers}",
+                flush=True,
+            )
+            print("=======================================================", flush=True)
 
         episode_results: list[EpisodeScore] = []
 
@@ -379,7 +421,10 @@ class CookieBatchBenchmark:
                 for ep_i in range(num_episodes)
             ]
             with ProcessPoolExecutor(max_workers=min(workers, num_episodes)) as executor:
-                future_to_idx = {executor.submit(_run_single_episode_worker, arg): i for i, arg in enumerate(worker_args)}
+                future_to_idx = {
+                    executor.submit(_run_single_episode_worker, arg): i
+                    for i, arg in enumerate(worker_args)
+                }
                 results_by_idx: dict[int, EpisodeScore] = {}
                 for future in as_completed(future_to_idx):
                     ep_res = future.result()
