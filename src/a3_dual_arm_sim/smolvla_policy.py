@@ -36,12 +36,19 @@ class SmolVLAPolicyPlugin:
         self._torch = torch
         self._prepare_observation = prepare_observation_for_inference
         self._device = torch.device(device)
-        dataset = LeRobotDataset(
-            repo_id,
-            root=dataset_root,
-            download_videos=False,
-            return_uint8=True,
-        )
+        try:
+            dataset = LeRobotDataset(
+                repo_id,
+                root=dataset_root,
+                download_videos=False,
+                return_uint8=True,
+            )
+        except TypeError:
+            dataset = LeRobotDataset(
+                repo_id,
+                root=dataset_root,
+                download_videos=False,
+            )
         config = PreTrainedConfig.from_pretrained(checkpoint)
         config.pretrained_path = checkpoint
         config.device = device

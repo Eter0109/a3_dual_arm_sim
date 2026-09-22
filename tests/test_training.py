@@ -108,5 +108,5 @@ def test_train_command_is_local_reproducible_smoke(tmp_path: Path) -> None:
     joined = " ".join(command)
     assert "--steps=1" in joined
     assert "--dataset.video_backend=pyav" in joined
-    assert "--env_eval_freq=0" in joined
+    assert "--eval_freq=0" in joined
     assert "--wandb.enable=false" in joined

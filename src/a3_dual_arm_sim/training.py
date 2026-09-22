@@ -145,10 +145,20 @@ def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: st
                 step["config"]["tokenizer_name"] = str(cached_vlm)
         preprocessor_path.write_text(json.dumps(preprocessor, indent=2) + "\n", encoding="utf-8")
     runtime_weights = runtime_dir / "model.safetensors"
-    if runtime_weights.is_symlink() and runtime_weights.resolve() != weights_path:
-        runtime_weights.unlink()
+    if runtime_weights.exists():
+        try:
+            if not runtime_weights.samefile(weights_path):
+                runtime_weights.unlink()
+        except OSError:
+            runtime_weights.unlink()
     if not runtime_weights.exists():
-        runtime_weights.symlink_to(weights_path)
+        try:
+            runtime_weights.symlink_to(weights_path)
+        except OSError:
+            try:
+                runtime_weights.hardlink_to(weights_path)
+            except OSError:
+                shutil.copy2(weights_path, runtime_weights)
     return runtime_dir
 
 
@@ -178,11 +188,10 @@ def build_train_command(
         "--num_workers=0",
         f"--batch_size={batch_size}",
         f"--steps={steps}",
-        "--env_eval_freq=0",
-        "--eval_steps=0",
+        "--eval_freq=0",
         "--log_freq=1",
         "--save_checkpoint=true",
-        "--save_freq=0",
+        f"--save_freq={steps}",
         "--wandb.enable=false",
     ]
 
