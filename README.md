@@ -165,10 +165,38 @@ python examples/run_cookie_same_column.py --help
 
 ![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
 
-上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率**：目前只改 seed 不会改变饼干布局，
-也不保证任选五块、换尺寸或换摆放后仍能成功。源盒中部分剩余饼干可能倾倒。
-开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，当时还有另一轮诊断运行并行；
-这不是独占机器的性能基准。当前优先验证接触与搬运，尚未优化到实时，暂不建议直接大规模采集。
+上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率。**
+自那以后场景加入了随机化（见[场景随机化](#scene-variation)）：换 seed 会真实改变
+箱体位置与朝向，饼干随源盒刚性平移并继承其偏航。每个场景的随机幅度都按实测可达范围
+标定，单列场景在随机 seed 上实测 4/4 完成。双盒场景三 seed 实测 2/3 通过
+（4802 / 4751 步成功，一个 seed 在第二次填充时 IK 差 1.27 mm 被拒），视频见
+`outputs/videos/two_box_collection/`。开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，
+当时还有另一轮诊断运行并行；这不是独占机器的性能基准。
+
+### 与 `main` 分支的速度差距（实测）
+
+`main` 与 dev 分支各自独立优化了批次专家的运动参数，本分支保留了自己的
+"共享基类 + 同列子类"结构。在同一场景（`a3_cookie_same_column`、同样的 10 mm 盒噪声）
+上实测同一 seed 的分阶段步数：
+
+| 阶段 | 本分支 | `main` | 参数比 |
+| --- | --- | --- | --- |
+| `DESCEND` | 343 步 | 64 步 | 0.0006 vs 0.0024 m/步（**4x**） |
+| `DESCEND_TO_PLACE` | 319 | 54 | 0.0005 vs 0.0024（**5x**） |
+| `MOVE_TO_SLOT` | 311 | 84 | 0.0010 vs 0.0024（**2.4x**） |
+| `LIFT` | 260 | 68 | 0.0008 vs 0.0022（**2.8x**） |
+| `CLOSE` | 229 | 62 | 合爪 0.0015 vs 0.0060（**4x**） |
+| **整局** | **1657 步** | **426 步** | 5 个 seed 平均 425 步 |
+
+把 `main` 的参数移植到本分支后，单盒场景从 1657 降到 596 步、3/3 通过；
+但**双盒 relay 从 2/3 掉到 0/5**，失败点各不相同（`CARRY_B` 丢抓、
+`PUSH_A` 侧漂、`FILL_B` 卡死）。原因是 relay 的推盒／搬盒控制器按慢速动力学标定，
+加速后接触力与夹持判据全部失准。因此本分支**不整体采用** `main` 的速度参数：
+速度不是瓶颈，产出率才是。要同时得到两者，需要只加速不接触货物的纯空中段，
+并把 relay 的力／速度判据一起重新标定。
+
+一处独立于加速的 `main` 改动也被否决：actuator `kv` 阻尼（40/30/15）会让双盒搬运
+的夹持力判据读到 0 N 并报"搬运中丢失空盒"，8 项双盒测试中 1 项失败；去掉后 8 项全过。
 
 ### 文件导航与回归检查
 
@@ -641,6 +669,37 @@ still register as inside the moved bin. `tests/test_scene_randomization.py` pins
 `collection_summary.json` records the ranges actually in force, not the ones a caller asked for, so
 a dataset explains its own variation.
 
+### How this differs from `main`'s randomization
+
+`main` also randomizes, but for a different purpose and an order of magnitude smaller. Both
+mechanisms are described here because the difference is easy to miss and decides what a dataset is
+worth.
+
+| | `main` | this branch |
+| --- | --- | --- |
+| Box translation | 10 mm symmetric (`source_bin_noise_m` / `target_bin_noise_m` in its benchmark; the env's own fallback is 1–2 mm) | 60–140 mm per axis, **asymmetric** `[low, high]` |
+| Box yaw | target only, ±0.030 rad (1.7°) | all three boxes, up to ±0.10 rad (5.7°) |
+| Source box | moved by writing `model.body_pos` | a **mocap body**, moved per episode |
+| Cookies | jittered individually: ±0.3 mm and ±0.015 rad | inherit the source box's yaw as a **rigid transform**; per-Cookie jitter is a separate switch |
+| Arm start pose | fixed (`DEPLOYMENT_HOME`) | jittered per joint (`arm_home_rad`) |
+| Between-box constraint | none | a draw closer than `min_box_clearance_m` is **redrawn**; impossible ranges raise |
+| Default | `randomize_boxes=False` — off unless asked | on for every scene, sized in each config |
+| Where it is recorded | nowhere | `collection_summary.json` + the dataset's own details |
+
+The magnitudes are the point. `main`'s 10 mm moves a box by about its own wall thickness, which is
+enough to make the benchmark non-trivial but not enough to change what the expert has to do — its
+reported success rate is a measurement of the expert on essentially one layout. Its Cookie jitter,
+0.3 mm, is a tenth of the 2.5 mm gaps the batch insertion aims at, so it perturbs the load without
+moving it out of the lanes the expert planned. This branch's ranges are sized against the arm's
+measured reach per direction (the working box can move 6 mm one way in +x and 118 mm the other, so a
+symmetric range would waste most of the workspace), and the scene changes enough between episodes
+that a policy cannot score well by memorising a trajectory.
+
+Two consequences follow, and both are visible in the measured numbers. Randomising more makes each
+episode harder, so the yield is lower: the two-box scene completes about 2 of 3 seeds. And the
+`randomize_boxes=False` default on `main` means a `main` benchmark run and a run here are not
+measuring the same thing even when they use the same scene name.
+
 ## Cookie-transfer VLA pipeline
 
 The cookie task has a complete collect → merge → train → evaluate → record loop under `scripts/`.
@@ -746,13 +805,21 @@ need only Pillow and PyAV; the `ffmpeg` binary is not required.
 
 ## Known limitations
 
-- **Demonstration diversity is the binding constraint.** `A3CookieTransferEnv.reset` writes
-  `DEPLOYMENT_HOME` into `qpos` on every episode, so all collected episodes begin from an identical
-  arm pose, and the only variation is a few millimetres of cookie placement - roughly one pixel at
-  `256x256`. The demonstrations are therefore visually near-identical, and a policy can minimise loss
-  by memorising one joint trajectory. Measured rollouts show exactly that: it tracks the demonstration
-  for the first two or three cookies and then diverges without recovering. Improving this needs a
-  randomised initial pose and enough placement noise for the cameras to see it, not more tuning.
+- **Demonstration diversity is the binding constraint — and it is now a per-config choice.**
+  The batch configs (`cookie_batch`, `cookie_same_column`, `cookie_two_box_batch`) carry a
+  `randomization` section: the boxes move tens of millimetres, yaw on all three, and the arm's start
+  pose is jittered per joint, which is what makes their episodes differ enough to train on (see
+  [Scene variation](#scene-variation)). The legacy single-Cookie configs (`default.yaml`,
+  `cookie_transfer`) have none: `reset` writes `DEPLOYMENT_HOME` on every episode, so all of their
+  episodes begin from an identical arm pose with a few millimetres of Cookie placement — roughly one
+  pixel at `256x256`. Measured rollouts on that scene show the consequence: a policy tracks the
+  demonstration for the first two or three cookies and then diverges without recovering. The fix is
+  to collect from a scene that randomises, not to tune the policy further.
+- **Speed has not been traded for yield.** `main`'s expert parameters are 2.4–5x faster per phase
+  (426 vs 1657 steps on the same single-box seed), but porting them onto this branch drops the
+  two-box relay from 2 of 3 seeds to 0 of 5 — the relay's push and carry controllers are calibrated
+  against the slower dynamics. See the measured table in
+  [已验证的结果与限制](#已验证的结果与限制). Speed is therefore an open item, not a solved one.
 - **One episode is not a measurement.** SmolVLA's flow-matching sampler restarts from fresh noise at
   every re-plan, so identical seeds give materially different episodes.
 - **A partial policy runs to the horizon.** `terminate_on_success` fires only when the exact fill holds
