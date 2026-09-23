@@ -47,7 +47,11 @@ obvious.  The registered set is:
 | `a3_cookie_batch` | yes | The same, taking the second batch from a different column |
 | `a3_cookie_two_box` | yes | Fills box A, pushes it clear, carries box B into the station, fills B |
 | `a3_grasp` | yes | Lifts a single cube |
-| `a3_cookie_transfer` | **no** | The original single-Cookie workflow; its right arm can no longer reach the tabletop target box, so it accepts nothing |
+
+`a3_cookie_transfer` used to be here and is **retired**: its single-Cookie expert
+cannot complete on any layout the repository ships, so it is no longer registered.
+`cookie_transfer_scene`'s docstring has the measurements, and `a3-sim collect-cookie`
+(the old entry point) still exists but prints a warning and will accept nothing.
 
 A two-box episode is roughly twice as long as a single-box one, so budget for it:
 the reference run took about 2600 control steps and 18 minutes on a loaded login

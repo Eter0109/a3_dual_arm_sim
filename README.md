@@ -506,6 +506,18 @@ This section describes the **default / legacy single-Cookie configuration**.
 The batch configuration overrides spacing, box geometry and support, contact settings,
 and success criteria; see [the batch baseline](#beveled-cookie-batch-expert-experimental).
 
+> **Retired as a collectable scene.** The single-Cookie expert that drives this
+> configuration no longer completes on either layout the repository ships: the
+> default box is too narrow inside (16.6 mm against a 19/3 mm Cookie), so the jaws
+> knock the Cookie out on the way down, and the same-column scene's box sits at
+> (0.095, 0.100), which the right arm cannot reach to support (its box IK misses by
+> 45.5 mm against a 12 mm rule). Neither is a regression — the expert was written
+> for a wider box in a nearer pose, and nothing left in the repository offers that
+> combination. `a3_cookie_transfer` is therefore no longer in
+> `collection.registered_scenes()`; its `TaskSpec` is kept so datasets already on
+> disk still validate. The environment and expert below are otherwise unchanged and
+> are still the base of both batch experts.
+
 `A3CookieTransferEnv` is a separate task variant based on the supplied deployment photograph and
 4.8-second packing video. The A3 base is carried by a central dark mast, the arms start in a hanging
 ready pose mirrored about the central stand. Eighty cookie proxies begin upright in four columns
@@ -721,7 +733,8 @@ Two kinds of variation are configured separately because they cost different thi
 * **Per-Cookie jitter** (`position_noise_m` / `yaw_noise_rad`, passed to collection as
   `--position-noise` / `--yaw-noise`) moves each Cookie on its own. The batch scenes turn it off: a
   2 mm jitter is wider than the 2.5 mm gaps their insertion needs, and with it on both batch experts
-  fail immediately (measured: 0 accepted in 2 attempts). The single-Cookie scene uses it.
+  fail immediately (measured: 0 accepted in 2 attempts). The single-Cookie scene used it; that
+  scene is now retired (see [Cookie transfer scene](#cookie-transfer-scene)).
 
 Each widening has to be paid for by a validation run — the insertion is aimed at measured clearances
 and the placement is solved against the target box's live frame, so both bound what a range can
@@ -787,10 +800,11 @@ dataset, so concurrent writers cannot share a root. Seeds are interleaved across
 
 The second argument names a **registered scene**, not a config file. A scene bundles the environment,
 the scripted expert, and the dataset's success contract, so `a3-sim collect --scene <name>` is the
-only collection command and a new layout is a registry entry rather than another driver. Which
-scenes can actually collect is worth checking rather than assuming: the batch scenes do, while
-`a3_cookie_transfer` no longer does on the dense layout. `registered_scenes()` in
-`src/a3_dual_arm_sim/collection.py` lists them and each builder's docstring says what it needs.
+only collection command and a new layout is a registry entry rather than another driver.
+`registered_scenes()` in `src/a3_dual_arm_sim/collection.py` lists them and each builder's docstring
+says what it needs. The original `a3_cookie_transfer` is no longer among them: it cannot complete on
+any layout the repository ships, so registering it would offer a scene that accepts nothing — see
+[Cookie transfer scene](#cookie-transfer-scene).
 
 The underlying command is `a3-sim collect`, which also takes `--position-noise`, `--yaw-noise`,
 `--hold-steps`, `--shard-index`, `--shard-count`, and `--fast-render`. It writes a
@@ -976,7 +990,9 @@ action mode, canonical stored action mode, seed, task, frame count, and optional
 
 `run_cookie_batch.py` preserves the original 0–4 then 20–24 five-at-a-time
 baseline. `run_cookie_same_column.py` is the separate 0–4 then 5–9 version;
-`run_cookie_transfer.py` still runs the single-Cookie expert.
+`run_cookie_transfer.py` still runs the single-Cookie expert, which is retired as a
+collectable scene but still runs as a viewer (it stops in `DESCEND_TO_PLACE` — see
+[Cookie transfer scene](#cookie-transfer-scene)).
 
 ```bash
 # Interactive trial; does NOT record a training dataset.
@@ -1041,7 +1057,9 @@ never attaches or teleports Cookies during execution.
 This batch trial intentionally uses a **tabletop target box**, with the right
 arm parked. Two top-down 2F85 housings interfere around the small box opening;
 continuous right-arm box holding is therefore not part of this baseline.
-The original cooperative single-Cookie example remains available separately.
+The original cooperative single-Cookie example remains available separately, but
+it is retired as a collectable scene — see
+[Cookie transfer scene](#cookie-transfer-scene).
 The layout is randomised between episodes by the config's `randomization`
 section; see [Scene variation](#scene-variation). This is an experimental
 contact-control baseline, not a guarantee of reliable demonstrations or a

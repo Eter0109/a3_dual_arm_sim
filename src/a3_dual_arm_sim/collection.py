@@ -422,11 +422,30 @@ def cookie_transfer_scene(
 ) -> CollectionScene:
     """One Cookie at a time, moved by the grip that also holds the target box.
 
-    This is the original single-Cookie workflow.  It is kept registered because its
-    datasets are the ``a3_cookie_transfer`` contract, but be aware it no longer
-    completes on the current dense 80-Cookie scene: its right arm cannot reach the
-    tabletop target box, so collection stops at ``SUPPORT_BOX`` and accepts
-    nothing.  Use one of the batch scenes below for new data.
+    **Retired, and deliberately not in :func:`registered_scenes`.**  It was the
+    original single-Cookie workflow, and it no longer completes on either of the
+    layouts that are now in the repository:
+
+    * on the default dense layout the target box is too narrow -- its inner y is
+      16.6 mm against the 19/3 mm Cookie -- so the jaws knock the Cookie out on
+      the way down.  Measured: the Cookie ends at z = 0.7609 against a 0.7685 rest
+      height and 95.7 mm from the tool, which ``_cookie_dropped`` reads as a drop
+      and the run stops in ``DESCEND_TO_PLACE``;
+    * on ``configs/cookie_same_column.yaml`` the box sits at (0.095, 0.100), which
+      the right arm cannot reach to support it: the box IK misses by 45.5 mm
+      against its own 12 mm rule, so the run stops in ``SUPPORT_BOX``.
+
+    Both were measured after the box geometry was retuned for the batch and relay
+    scenes, and neither is a regression in this expert -- it was written for a
+    wider box in a nearer pose, and nothing that remains in the repository offers
+    that combination.  The class is still the base of both batch experts, so this
+    is a scene registration being withdrawn rather than code being deleted; the
+    function and ``TASKS["a3_cookie_transfer"]`` are kept so that datasets
+    already on disk still validate against the contract that produced them.
+
+    Reviving it means giving it its own config: a box at least 70 mm deep inside,
+    and a pose the right arm's box support can reach.  See
+    ``docs/configurable-scenes.md`` -- that is what the spec work is for.
     """
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
@@ -601,11 +620,17 @@ def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
 
 
 def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
-    """Scene name -> builder.  This is the list a CLI or a sweep iterates."""
+    """Scene name -> builder.  This is the list a CLI or a sweep iterates.
+
+    ``a3_cookie_transfer`` is not here: its builder is kept for the compatibility
+    wrapper below, but the scene cannot complete on any layout the repository
+    ships, so registering it would offer a scene that accepts nothing.  See
+    :func:`cookie_transfer_scene` for the measurements and for what reviving it
+    would take.
+    """
 
     return {
         "a3_grasp": grasp_scene,
-        "a3_cookie_transfer": cookie_transfer_scene,
         "a3_cookie_batch": cookie_batch_scene,
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
@@ -647,11 +672,23 @@ def collect_cookie_dataset(
 ) -> dict[str, Any]:
     """Collect successful single-Cookie transfer demonstrations.
 
-    Prefer :func:`collect_dataset` with :func:`cookie_batch_scene` or
-    :func:`cookie_same_column_scene`; this scene no longer completes on the dense
-    layout (see :func:`cookie_transfer_scene`).
+    Kept so that an existing script still runs, but the scene behind it is
+    retired and cannot complete on any layout the repository ships: prefer
+    :func:`collect_dataset` with :func:`cookie_batch_scene`,
+    :func:`cookie_same_column_scene` or :func:`cookie_two_box_scene`.  See
+    :func:`cookie_transfer_scene` for the measurements.
+
+    It warns rather than refusing, so an existing script still runs, but the warning
+    is the point: every attempt this scene makes fails in the expert's first phase,
+    so a run that is not stopped burns its whole attempt budget to collect nothing.
     """
 
+    print(
+        "warning: the a3_cookie_transfer scene is retired and accepts nothing on "
+        "any layout this repository ships; use --scene a3_cookie_same_column, "
+        "a3_cookie_batch or a3_cookie_two_box instead",
+        flush=True,
+    )
     return collect_dataset(
         root,
         cookie_transfer_scene(config, hold_steps=hold_steps),
