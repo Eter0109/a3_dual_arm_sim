@@ -11,6 +11,17 @@ from .cookie_transfer import A3CookieTransferEnv
 
 
 class BoxSupportController:
+    #: Rate the joint command is allowed to advance at, per step.  Also the rate a
+    #: phase's budget is derived from, so the two cannot disagree.
+    JOINT_STEP_RAD = 0.012
+    #: Steps a phase may spend settling once the arm is close, on top of the travel
+    #: the move needs.  Ten of them are the ``stable >= 10`` condition itself; the
+    #: rest is slack for an arm that approaches the target asymptotically.
+    SETTLE_STEPS = 60
+    #: Fewest steps any phase may take, so a phase whose target is already within
+    #: tolerance still has room to establish its condition.
+    MIN_PHASE_STEPS = 120
+
     def __init__(self, env: A3CookieTransferEnv) -> None:
         self.env = env
         self.model, self.data = env.model, env.data
@@ -24,6 +35,7 @@ class BoxSupportController:
     def reset(self) -> None:
         self.phase = "approach"
         self.steps = self.stable = 0
+        self.budget = self.MIN_PHASE_STEPS
         self.failed = None
         self.ready = False
         self.initial_height = float(self.data.xpos[self.bin_id, 2])
@@ -86,13 +98,29 @@ class BoxSupportController:
             raise RuntimeError(f"right box IK unreachable: error={np.linalg.norm(result.fun):.4f}")
         return result.x
 
+    def _travel_budget(self, target: np.ndarray) -> int:
+        """Steps a phase may take, from how far the arm has to travel.
+
+        Derived rather than fixed, because a fixed budget silently became too
+        short: this used to be a flat 240 steps, and when the default scene's box
+        moved further from the deployment home the approach began timing out while
+        the arm was still converging -- measured, joint 4 needs 3.13 rad, which is
+        261 steps at ``JOINT_STEP_RAD``, and the phase gave up 0.26 rad short.  The
+        failure read as an unreachable box, which it was not.
+        """
+
+        travel = float(np.max(np.abs(target - self.data.qpos[self.qids])))
+        needed = int(np.ceil(travel / self.JOINT_STEP_RAD)) + self.SETTLE_STEPS
+        return max(self.MIN_PHASE_STEPS, needed)
+
     def act(self) -> np.ndarray:
         if self.failed or self.ready:
             return self.command.copy()
         self.steps += 1
-        if self.steps > 240:
+        if self.steps > self.budget:
             self.failed = (
-                f"right box {self.phase} timeout; contacts={self.contact_forces().tolist()}"
+                f"right box {self.phase} timeout after {self.steps} of "
+                f"{self.budget} steps; contacts={self.contact_forces().tolist()}"
             )
             return self.command.copy()
         if self.target is None:
@@ -113,6 +141,7 @@ class BoxSupportController:
             except RuntimeError as exc:
                 self.failed = str(exc)
                 return self.command.copy()
+            self.budget = self._travel_budget(self.target)
         self.command[8:15] += np.clip(self.target - self.command[8:15], -0.012, 0.012)
         self.command[15] = (
             max(0.0, self.command[15] - 0.025) if self.phase in ("close", "lift", "tilt") else 0.7
