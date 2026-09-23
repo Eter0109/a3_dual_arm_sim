@@ -108,20 +108,35 @@ two grids came out identical):
     25     o       o       o       o       o       o
      0     o       o       o       o       o       o
    ...     o       o       o       o       o       o
-  -350     o       o       o       o       o       o
+  -520     o       o       o       o       o       o
 ```
 
-Two facts come out of this and they are the whole reason the lane is shaped the
+What matters for a lane is not the site's reach but the **pads'**, because the pads
+are what touch the box's rear wall.  Re-solved in the pad frame, in 1 mm steps:
+
+```
+  station x    0.030  0.040  0.050  0.060  0.075  0.090  0.100  0.110  0.120
+  pad +y cap   124    119    114    109     99     80     72     68     57   (mm)
+```
+
+Three facts come out of this and they are the whole reason the lane is shaped the
 way it is:
 
-* **+y is capped at about +0.100.**  Everything from y = +0.125 up is refused at
-  every x.  The push that parks a filled box works today because the pads only
-  travel to the box's rear wall -- the box's centre reaches +0.120 while the pads
-  stop at +0.089.  One box, and no more: parking a second box at +0.207 would need
-  the pads at +0.176.
-* **-y is open to at least -0.520** (checked past the sweep's edge; the table runs
-  to -0.750).  The queue has room for six boxes at the derived pitch, so it is not
-  what bounds N.
+* **+y is capped at about +0.100, and falls off a cliff past the shipped station.**
+  +y and +x compete for the same arm reach.  The push that parks a filled box works
+today because the pads only travel to the box's rear wall -- the box's centre
+reaches +0.120 while the pads stop at +0.089, using 86 mm of the 99 available at
+x = 0.075.  One box, and no more: parking a second box at +0.207 would need the
+pads at +0.176.
+* **A lane wants its station as far in as the fill's band allows.**  124 mm at
+x = 0.030 against 99 at the shipped 0.075, and 80 at the single-box scene's 0.095 --
+where no ten-Cookie box could be pushed at all.  Since the fill band's floor is
+flat at y = 0.030 for every x from 0.030 to 0.075, there is no reason to sit at
+0.075 except that the relay already does.
+* **-y is open past -0.520** (checked past the sweep's edge; the table runs to
+-0.750).  A queue of six boxes at the derived pitch fits, so it is not what bounds
+N -- but the *queue gap* can be: the shipped relay places its spare 160 mm back
+against a derived pitch of 87 mm, and at that gap five boxes run off the end.
 
 **Consequence.**  The parked boxes cannot be pushed one at a time to their own
 slots.  The mechanism that does work is the one a person would use: the pads push
@@ -130,9 +145,9 @@ one pitch per fill**.  Pad travel is unchanged, and the parked boxes are never
 touched directly.  That is the derived rule:
 
 ```
-lane_pitch      = box_extent_y + min_box_clearance
-push_destination = station_y + lane_pitch        # the station box's target
-parked_i         = station_y + lane_pitch * (k - i)   # after filling box k
+lane_pitch      = box_extent_y + min_box_clearance     (87 mm for a 31 mm-half box)
+push_destination = station_y + lane_pitch              (the station box's target)
+parked_i         = station_y + lane_pitch * (k - i)    (after filling box k)
 ```
 
 ### The source bin: how far it can get out of the way, and how much it can supply
@@ -212,35 +227,39 @@ write.
 The two shipped lattices decode to three numbers, and they are all derivable:
 
 ```
-y pitch between slots = cookie_thickness                     0.0063333  (0.019/3)
-x spacing between columns = cookie_width + column_gap        0.056      (0.050 + 0.006)
-inner_half_x = x_spacing/2 + cookie_half_x + wall_margin     0.057      (0.028 + 0.025 + 0.004)
-inner_half_y = (rows-1)/2 * y_pitch + cookie_half_y + pad_clearance
-                                                             0.025      (0.012667 + 0.003167 + 0.009167)
+y pitch between slots = cookie thickness                      0.0063333  (0.019/3)
+x spacing between columns = cookie width + column_gap         0.056      (0.050 + 0.006)
+inner_half_x = x_spacing/2 + cookie_half_x + x_margin         0.057      (0.028 + 0.025 + 0.004)
+inner_half_y = (rows-1)/2 * y_pitch + cookie_half_y + y_margin
+                                                              0.025      (0.012667 + 0.003167 + 0.009167)
 ```
 
 The y pitch is the *nominal* thickness, not the source pitch: the source lays the
-Cookies out with 0.4 mm of clearance so they do not interpenetrate at reset, while
-the target slots are where the batch comes to rest after the jaws compressed it.
-The y margin is the pad clearance -- the jaws descend into the box outside the
-batch, so the box has to be wider than the batch by the pads' own thickness plus
-room to move.
+Cookies out with a clearance so they do not interpenetrate at reset, while the
+target slots are where the batch comes to rest after the jaws compressed it.  The
+y margin is the pad clearance -- the jaws descend into the box outside the batch,
+so the box has to be wider than the batch by the pads' own thickness plus room to
+move.
 
-`pad_clearance` is the one number here that is not arithmetic.  It is bounded
-below by the pad geometry (0.0032 m) and its shipped value is 0.0092; the spec
-carries it as a parameter with that default, and the anchor test is what says
-whether a change is allowed.
+Both margins are *chosen*, not derived, and the spec carries them as fields: the x
+margin is 4 mm in both shipped configs, and the y margin is 9.167 mm in the relay
+(the tightest that leaves the 6.35 mm pads room) against 13.167 mm in the
+single-box scene, which has the room.  So the derivation reproduces each scene by
+taking the margin from the scene, and what it *derives* is everything the margin is
+added to.
 
 The *shape* is then a choice of `columns`, with `rows = ceil(box_capacity /
 columns)`.  Two constraints pick it:
 
-* `per_grasp <= rows` -- a batch is placed into one run of slots inside a column,
-  so it cannot be longer than the column.
-* `per_grasp * source_pitch_y + pad_thickness <= 0.085` -- the jaw travel.  This
-  caps `per_grasp` at 11 regardless of the box.
-* growing `columns` grows the box in x, and the station has +30 mm of x reach at
-  the shipped pose, so **`columns = 2` is the practical ceiling** unless the
-  station also moves -x.
+* `per_grasp <= rows` -- a batch is placed into one run of slots inside a column, so
+  it cannot be longer than the column.  (A batch cannot span two columns at all:
+  the jaws hold it in a line, so continuing into the next column would need a
+  sideways move mid-place.)
+* `per_grasp * source_row_pitch_y + pad_thickness <= 0.085` -- the jaw travel.  This
+  caps `per_grasp` at 10 with the shipped 2.5 mm row gap.
+* growing `columns` grows the box in x, and the fill reaches 30 mm past the shipped
+  outermost slot, so **three columns fit with 2 mm to spare and four do not**.
+  `columns = 2` stays the default because it is what both shipped scenes use.
 
 So for C=10, `columns=2`, `rows=5`, and `per_grasp` can be 1..5.  To grasp more
 than 5 the box has to be a single column of 10, which is a different box shape --
@@ -249,17 +268,23 @@ worth offering, and worth testing, but not the default.
 ### 2. The batch plan, from capacity and grasp size
 
 ```
-sizes = [per_grasp] * (box_capacity // per_grasp) + ([remainder] if remainder else [])
-slots_of(batch b) = the next `sizes[b]` free slots, column-major
+per column: sizes = [per_grasp] * (rows_used // per_grasp) + [rows_used % per_grasp]
+slots_of(batch b) = the next `sizes[b]` slots of that column, from the -y end
 ```
 
 With C=10, K=5 this is `[5, 5]` and batch 0 takes column 0's five slots -- exactly
 today's behaviour, which is why the anchor holds.  With C=10, K=3 it is
-`[3, 3, 3, 1]`: column 0 takes two batches (rows 0-2, rows 3-4) and column 1 takes
-two more, the last one a single Cookie.
+`[3, 2, 3, 2]`, not `[3, 3, 3, 1]`.
+
+The first version of this plan was `[per_grasp] * (capacity // per_grasp) +
+[remainder]`, spreading the remainder across the *whole box*, and it is wrong for
+the reason above: there is nowhere to place a second batch of three when column 0
+has two rows left.  The remainder is per column.  The plan is implemented in
+`batch_plan.py` and pinned by a test that partitions every capacity from 1 to 24
+against every grasp size from 1 to 10.
 
 This is also where "how many Cookies to take next" is decided, and it is a running
-counter rather than a fixed list: `min(per_grasp, remaining_capacity_of_this_box)`.
+counter rather than a fixed list: `min(per_grasp, remaining_in_this_column)`.
 Stated that way the same code resumes a partially filled box, which is what the
 user's later milestone (a box that arrives with Cookies already in it) needs.
 
@@ -269,27 +294,34 @@ user's later milestone (a box that arrives with Cookies already in it) needs.
 ### 3. The source layout, from source count and grasp size
 
 ```
-usable_columns = the columns the arm can actually reach   (measured: 2 of 4)
-rows           = per_grasp * max(1, round(ceil(source_cookies / columns) / per_grasp))
-positions      = the `columns`-column lattice at source_pitch, centred on the nominal centre
-source_bin_half = grid_extent/2 + bin_margin
-require N * box_capacity <= usable_columns * rows
+col_pitch = cookie_width + 0.4 mm            (0.0504 -- the columns are not entered)
+row_pitch = cookie_thickness + 2.5 mm        (0.0088333 -- this is the jaw's lane)
+rows      = ceil(source_cookies / columns)
+positions = the `columns`-column lattice at that pitch, centred on the nominal centre
+source_bin_half = grid_extent/2 + cookie_half + margin + wall
+require N * box_capacity <= usable_columns * usable_rows
 ```
 
 With S=80, K=5, columns=4 this gives rows = 20 and reproduces the shipped layout
-exactly.  The rounding is not cosmetic: `_candidate_batches` requires `per_grasp`
-consecutive available Cookies in a column, so a column whose length is not a
-multiple of `per_grasp` leaves a tail the expert skips -- and a skipped tail breaks
-the relay's `source == n - N*C` check.  Rounding the column up to a whole number
-of batches is what keeps the source exactly divisible.
+exactly.  The row pitch is a correction: the plan first said it was
+`0.019/3 + 0.0004 = 0.0067333`, copying the module constant `COOKIE_PITCH`, but the
+shipped configs use `0.0088333` -- the Cookie's thickness plus the 2.5 mm lane the
+fingertip descends into, which they widened when the Cookies were made thinner.
+The anchor test is what caught it, which is the argument for having one.
 
-The last line is the constraint that sets `boxes <= 4`, and it is worth being
-explicit about why it is a *supply* constraint and not a geometry one.  The far
-columns are unreachable, so they contribute nothing; whether the layout keeps them
-for the look of a full bin is a presentation choice, and the spec should carry
-`usable_columns` as a measured parameter rather than infer it from `columns` --
-inferring it is exactly how a spec would end up advertising N = 6 and refusing
-half of them at collection time.
+The last line is the constraint that sets `boxes <= 4`, and it is a *supply*
+constraint rather than a geometry one: the far columns are unreachable, so they
+contribute nothing, and whether the layout keeps them for the look of a full bin is
+a presentation choice.  The spec therefore carries the usable counts as *measured*
+inputs -- `usable_source_column_max_x_m` and a per-column y cap -- rather than
+inferring them from `columns` and `rows`, because inferring them is exactly how a
+spec would end up advertising N = 6 and refusing half of them at collection time.
+
+**One consequence is not obvious and cost a whole box.**  The band bounds a batch's
+*centre*, and a one-Cookie batch's centre is the Cookie itself, which sits closer to
+the band's edge than a five-Cookie batch's centre does.  So at the shipped layout,
+dropping `per_grasp` to 1 loses the last three rows of every column: the supply
+falls from 40 to 34 and `boxes` from 4 to 3.  `per_grasp` is not free.
 
 ### 4. The lane, from the box count
 
@@ -348,8 +380,9 @@ otherwise -- and the reason is recorded in the config, not in a comment.
 ## Architecture
 
 ```
-src/a3_dual_arm_sim/scene_spec.py     NEW  pure derivation, no MuJoCo import
-src/a3_dual_arm_sim/batch_plan.py     NEW  the batch plan and slot grouping
+src/a3_dual_arm_sim/scene_spec.py     DONE  pure derivation, no MuJoCo import
+src/a3_dual_arm_sim/batch_plan.py     DONE  the batch plan and slot grouping
+tests/test_scene_spec.py              DONE  the two anchors, and every bound
 src/a3_dual_arm_sim/scene_spec_validate.py  NEW  the Monte-Carlo gate
 src/a3_dual_arm_sim/model.py               N target boxes instead of target+spare
 src/a3_dual_arm_sim/cookie_transfer.py     N boxes in randomization and reset
@@ -363,11 +396,16 @@ configs/generated/*.yaml                   the specs the shipped scenes decode t
 ```
 
 `scene_spec.py` must not import MuJoCo, for the same reason `tasks.py` does not:
-`training` imports on hosts where the simulator wheels will not load.
+`training` imports on hosts where the simulator wheels will not load.  It imports
+`batch_plan` and nothing else.
 
 The shipped YAML configs stay.  They become the *frozen artifacts* of two specs,
 and a test asserts `spec.derive_config()` reproduces them -- so the configs keep
-working for anyone who has them, and the derivation cannot silently drift.
+working for anyone who has them, and the derivation cannot silently drift.  The
+anchor compares the derived key set exactly and the *whole* shipped key set against
+`DERIVED_KEYS | TUNING_KEYS`, so adding a key to a config fails the test until
+someone decides whether it is derived or tuning.  That is the mechanism that makes
+"the derivation covers the config" a fact rather than a hope.
 
 ## Phases and gates
 
@@ -384,6 +422,26 @@ suite.  *Gate:* 154 tests pass, numbers recorded in the commit message.
 field by field within tolerance; the derived `boxes <= 4` and `per_grasp <= rows`
 bounds are asserted from the measurement tables in this document; a spec outside
 them raises with the number that was exceeded.
+
+*Done.*  24 tests in `tests/test_scene_spec.py`.  Both anchors reproduce to
+3.3e-11, which is the precision the configs are printed at.  The derivation is a
+function of eight geometry inputs, and the validation collects every problem rather
+than raising on the first.  What it found on the way is above: the source row pitch
+was wrong in the plan, the batch plan's remainder is per column, the push envelope
+falls off a cliff past the shipped station, and a small `per_grasp` costs source
+rows.  What it also settled: the station band is independent of the box's height,
+because a placement is aimed at a *column's* centre and a centred lattice has its
+column centres at the body's own y whatever the row count -- so a capacity of 18 is
+as reachable as a capacity of 10.
+
+The bounds it derives at the shipped station, for reference:
+
+```
+  per_grasp   <= min(target_rows, jaw limit) = min(5, 10) = 5   (10 at capacity 20)
+  capacity    <= 18      (34 at station x = 0.030, 26 at 0.050, 0 at 0.095)
+  boxes       <= 4       (source supply 40 over capacity 10)
+  source      <= 40 graspable of 80 laid out   (34 if per_grasp = 1)
+```
 
 **Phase 2 -- N boxes in the model and the env.**  *Gate:* the existing two-box
 tests pass unchanged, the relay is still 3/3, and a 3-box scene builds, resets and
