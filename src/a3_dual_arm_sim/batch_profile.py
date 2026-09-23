@@ -57,6 +57,13 @@ class BatchProfile:
     place_free_m_per_step: float
     place_far_m_per_step: float
     place_near_m_per_step: float
+    #: Rate of the retreat, and of opening the jaws.  Both are the tool *leaving* a
+    #: batch it has just placed inside a box, so both are the two rates to slow
+    #: first if a scene finds its box being dragged: measured on the two-box relay
+    #: (which does not use this profile), a 0.015 open with a 0.0050 retreat pulled
+    #: the box 7.8 mm sideways as the pads came off the batch, and 0.004 with
+    #: 0.0020 held it to 2.5 mm.  The single-box scenes are verified 5 of 5 at the
+    #: faster values below, so those are what this profile ships.
     open_m_per_step: float
     retract_m_per_step: float
     #: Rate of the ALIGN stage's base push, which meets the Cookie edges side-on.

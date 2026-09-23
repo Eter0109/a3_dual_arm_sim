@@ -188,12 +188,12 @@ class RightBoxCarryController:
 
     MOVE_SPEED_M_PER_STEP = 0.0008
     #: Finger opening of the pinch that carries the box, on the same 0..1 scale
-    #: as a joint target (0 is closed).  Tighter than it looks: the wall is a few
-    #: millimetres thick, so what holds the box against sliding is the pinch
+    #: as a joint target (0 is closed).  Tighter than it looks: the rear wall is a
+    #: few millimetres thick, so what holds the box against twisting is the pinch
     #: force, not the geometry.  This value goes with the undamped servo the relay
-    #: is calibrated for (see ``arm_actuator_damping``); an arm that holds its
-    #: command more rigidly needs a tighter 0.085, or the box twists against the
-    #: pads until the yaw guard reads it as lost.
+    #: is calibrated for (see ``arm_actuator_damping``): an arm that holds its
+    #: command more rigidly (actuator damping, which the fast fill needs) lets the
+    #: same box twist past the 10 deg guard, and needs a tighter 0.085.
     GRASP_OPENING = 0.10
     FORCE_LIMIT_N = 80.0
 

@@ -212,7 +212,17 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         self._contact_chain()
         phase_limit = 500 if self.phase is CookiePhase.ALIGN else 420
         if self.phase_steps > phase_limit:
-            self._fail(f"batch phase timeout; contacts={self._contact_chain()[1].tolist()}")
+            # Named, for the reason given in the base class: which phase ran out
+            # of steps is what identifies the move that failed.
+            stage = (
+                f" ({self._push_stage})" if self.phase is CookiePhase.ALIGN else ""
+            )
+            self._fail(
+                f"batch {self.batch_index + 1} {self.phase.name}{stage} timed out "
+                f"after {self.phase_steps} steps; "
+                f"pad forces={self._contact_chain()[1].tolist()} N, "
+                f"opening={self._opening:.3f}"
+            )
             return self.env.last_applied_action.copy()
         if self.phase is CookiePhase.ALIGN:
             if self._push_stage == "approach":
@@ -529,7 +539,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._retract_pos, self._retract_rotation, self._opening,
                 speed=self.profile.retract_m_per_step,
             )
-            if reached:
+            if reached or self._retreat_clear():
                 self._advance(CookiePhase.VERIFY_RELEASE)
             return action
         if self.phase is CookiePhase.VERIFY_RELEASE:
@@ -537,9 +547,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self.env.privileged_cookie_in_target(i)
                 for i in self.completed_cookie_indices + self.batch_indices
             )
-            released = not any(
-                any(self.env.privileged_left_finger_contacts(i)) for i in self.batch_indices
-            )
+            released = self._release_settled()
             self._stable = self._stable + 1 if all_inside and released else 0
             if self.phase_steps >= 80 and not all_inside:
                 bad = [
@@ -547,6 +555,12 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     if not self.env.privileged_cookie_in_target(i)
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
+                return self.env.last_applied_action.copy()
+            if self.phase_steps >= self.RELEASE_SETTLE_STEPS and self._stable == 0:
+                self._fail(
+                    f"batch {self.batch_index + 1} never settled in the box: "
+                    f"all contained={all_inside}, pad still on the batch={not released}"
+                )
                 return self.env.last_applied_action.copy()
             # The first batch only has to be released; the second is the one the
             # scene's success test watches, so it is the one that has to hold for

@@ -1,11 +1,14 @@
 # Independent two-box workflow: A is filled, pushed forward, then B slides into the same station.
 physics_hz: 1000
 control_hz: 20
-# The right arm's push and carry controllers are calibrated against the
-# undamped position servo: measured, with the arm's actuator damping on they let
-# the pinched box twist past 10 deg against the pads and the relay's yield drops
-# from 2/3 to 0/4.  The batch experts need it for their fast transit, so it is a
-# per-scene switch rather than a constant.
+# The fast profile *does* run the relay end to end -- measured, 2053 steps against
+# this profile's 4827 -- but not yet reliably, and this config keeps the reliable
+# one.  What it needs first: under the fast fill the carry leaves the box about
+# 2 deg off and 2.3 mm out, which is inside the fill's own reachability
+# pre-check's window (2.0 mm and 0.035 rad) by less than half a millimetre, so a
+# seed can be refused at "FILL_B setup: target column 2 unreachable" before the
+# fill starts.  The gap is in the carry's calibration, not in the profile; see
+# `batch_profile` and the README's speed section.
 arm_actuator_damping: 0.0
 # The relay's push and carry controllers were measured against the slower
 # baseline fill, so this scene runs the expert in that profile.

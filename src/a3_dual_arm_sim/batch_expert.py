@@ -22,6 +22,16 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: arrived.  A phase that ends while the arm is still swinging starts the
     #: next one from a moving target, which is what a fast rate would amplify.
     SERVO_SETTLED_QVEL = 0.25
+    #: How far short of the retreat height the tool may stop and still count as
+    #: clear of the box.  See ``_retreat_clear``.
+    RETREAT_HEIGHT_TOLERANCE_M = 0.002
+    #: Steps a release stage may wait for the batch to settle before it gives up
+    #: and says why.  ``VERIFY_RELEASE`` used to have a fail branch only for "a
+    #: Cookie is missing", so a batch that was all present but never settled --
+    #: or, before ``_release_settled``, never showed a clean pad -- waited out the
+    #: whole phase limit instead.  A bounded wait keeps every state either a pass
+    #: or a named failure.
+    RELEASE_SETTLE_STEPS = 200
     #: How far the plan may run ahead of the arm before it is pulled back, in the
     #: baseline profile only.  Measuring from the *commanded* pose removes the
     #: need for it (see ``arm_servo``), but the baseline plans from the measured
@@ -202,6 +212,64 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._jam_count = self._jam_count + 1 if max(forces) > threshold else 0
         return self._jam_count >= 3
 
+    def _release_settled(self) -> bool:
+        """Whether the just-placed batch may be counted as released.
+
+        The scene's own containment test decides this, not a contact query.
+        ``privileged_cookie_in_target`` already requires each Cookie to be
+        settled and -- whenever the scene sets ``require_released`` -- to be down
+        on the box floor, and a Cookie in a pad's grip is in neither state.  So
+        the separate "no finger contact on this batch" test the expert used to
+        add could only ever be satisfied *later* than the scene's own answer, and
+        there is a state where it is never satisfied at all: a Cookie that comes
+        to rest leaning against a retracted pad keeps a contact alive
+        indefinitely.  ``all_inside`` was then true while ``released`` was false,
+        so neither the pass nor the fail branch could fire and the phase parked
+        until its own timeout -- measured under the fast profile, 420 steps of a
+        two-box fill, reported only as a bare "batch phase timeout".
+
+        When a scene does *not* check release the contact query is what keeps
+        this honest, because without ``require_released`` a Cookie merely
+        *dangling* inside the box satisfies the containment geometry.  So it is
+        kept for that case only.
+        """
+
+        if self.env.task_config.require_released:
+            return True
+        return not any(
+            any(self.env.privileged_left_finger_contacts(i))
+            for i in self.batch_indices
+        )
+
+    def _retreat_clear(self) -> bool:
+        """Whether a retreat has lifted the tool to the height it commanded.
+
+        A retreat's job is to get the jaws up and out of the box, and that is a
+        statement about *height*: the retreat target is the placement pose plus
+        ``retract_m_per_step``'s full distance straight up, so reaching its z
+        means the tool is clear of the rim.  It used to end only on the servo's
+        own arrival test, which compares the *measured* tool pose against the
+        target in all three axes -- and a retreat that is dragging the box it
+        just filled cannot close the horizontal part of that gap: measured under
+        the fast profile, a two-box fill's second retreat had already lifted the
+        full 85 mm, with both pads clear of the rim, yet it sat 14 mm short
+        horizontally and oscillated at a four-step period for the whole 421-step
+        phase budget, pulling the box 5 mm sideways while it did.  The height is
+        what the phase is for; the horizontal residual is something the next
+        phase re-targets anyway.
+
+        This cannot fire early.  The height *is* the retreat distance, so a tool
+        that satisfies it has risen the whole way; an earlier version tested
+        instead whether the finger geoms' centres had passed the rim, which is
+        true while the pads are still inside the box -- the following approach
+        then swept sideways through the walls and threw the box 60 mm.
+        """
+
+        return bool(
+            self.data.site_xpos[self._l_site, 2]
+            >= self._retract_pos[2] - self.RETREAT_HEIGHT_TOLERANCE_M
+        )
+
     def _servo(self, position, rotation, opening, speed=0.0015):
         """Rate-limited Cartesian setpoint, advancing at most ``speed`` a step.
 
@@ -337,7 +405,17 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.phase_steps += 1
         self._contact_chain()
         if self.phase_steps > 420:
-            self._fail(f"batch phase timeout; contacts={self._contact_chain()[1].tolist()}")
+            # Named, because the phase is what says which move failed: a timeout
+            # in DESCEND means the insertion never seated, in CLOSE that the
+            # jaws closed on nothing, in LIFT that the batch was not held.  The
+            # pad forces alone cannot tell those apart -- all three read zero on
+            # a grasp that never formed.
+            self._fail(
+                f"batch {self.batch_index + 1} {self.phase.name} timed out after "
+                f"{self.phase_steps} steps; "
+                f"pad forces={self._contact_chain()[1].tolist()} N, "
+                f"opening={self._opening:.3f}"
+            )
             return self.env.last_applied_action.copy()
         if self.phase is CookiePhase.APPROACH:
             # Travel with the jaws fully open.  The target batch width is set
@@ -506,7 +584,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._retract_pos, self._retract_rotation, self._opening,
                 speed=self.profile.retract_m_per_step,
             )
-            if reached:
+            if reached or self._retreat_clear():
                 self._advance(CookiePhase.VERIFY_RELEASE)
             return action
         if self.phase is CookiePhase.VERIFY_RELEASE:
@@ -514,9 +592,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self.env.privileged_cookie_in_target(i)
                 for i in self.completed_cookie_indices + self.batch_indices
             )
-            released = not any(
-                any(self.env.privileged_left_finger_contacts(i)) for i in self.batch_indices
-            )
+            released = self._release_settled()
             self._stable = self._stable + 1 if all_inside and released else 0
             if self.phase_steps >= 80 and not all_inside:
                 bad = [
@@ -524,6 +600,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     if not self.env.privileged_cookie_in_target(i)
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
+                return self.env.last_applied_action.copy()
+            if self.phase_steps >= self.RELEASE_SETTLE_STEPS and self._stable == 0:
+                self._fail(
+                    f"batch {self.batch_index + 1} never settled in the box: "
+                    f"all contained={all_inside}, pad still on the batch={not released}"
+                )
                 return self.env.last_applied_action.copy()
             # The first batch only has to be released; the second is the one the
             # scene's success test watches, so it is the one that has to hold for
