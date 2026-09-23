@@ -925,12 +925,27 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     actuators = ET.SubElement(root, "actuator")
     for joint in source_joints.values():
         kp = 600.0 if joint.effort >= 60 else (400.0 if joint.effort >= 30 else 200.0)
+        # Velocity feedback on the arm position servos.  Without it a position
+        # command that moves faster than the joint can track is answered by
+        # overshoot and a sustained ring, because nothing but the joint's own
+        # damping removes the energy.  A fast Cartesian servo *is* such a
+        # command, so the ringing is what caps the rate rather than the
+        # mechanism: measured on the approach transit, the plan reaches its goal
+        # in six steps and the tool then swings between 1 mm and 15 mm away
+        # indefinitely while the servo slows down to hide it.  ``kp / 14`` is
+        # the ratio MuJoCo's own position actuator documents as critically
+        # damped, and ``arm_actuator_damping`` scales it because the two-box
+        # relay's right-arm controllers are tuned for the undamped response.
+        kv = (
+            40.0 if joint.effort >= 60 else (30.0 if joint.effort >= 30 else 15.0)
+        ) * config.arm_actuator_damping
         ET.SubElement(
             actuators,
             "position",
             name=f"{joint.name}_position",
             joint=joint.name,
             kp=str(kp),
+            kv=str(kv),
             ctrlrange=_vec(joint.limits),
             forcerange=f"{-joint.effort} {joint.effort}",
         )

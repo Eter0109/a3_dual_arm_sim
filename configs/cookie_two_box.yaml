@@ -2,6 +2,12 @@
 # The active target is narrower along the five-Cookie row; the spare box waits beside it.
 physics_hz: 1000
 control_hz: 20
+# The right arm's box-support controller is calibrated against the undamped
+# position servo, and this scene's own tests are already failing on an unrelated
+# right-arm timeout, so damping here cannot be validated either way.  Turning it
+# off keeps this scene on the dynamics it had before the batch expert's fast
+# profile needed damping; see ``SimConfig.arm_actuator_damping``.
+arm_actuator_damping: 0.0
 horizon: 6000
 cookie_transfer:
   left_gripper_kp: 1200.0

@@ -288,6 +288,22 @@ class SimConfig:
     ik_iterations: int = 8
     joint_damping: float = 0.8
     joint_armature: float = 0.02
+    # Velocity feedback on the arm position servos, as a fraction of the
+    # critically damped ratio for the actuator's own gain (see ``build_model``).
+    # A fast Cartesian servo needs it: without it a command the joint cannot
+    # track is answered by a sustained ring, and the batch expert's fast transit
+    # never satisfies its arrival test.  It is a config field rather than a
+    # constant because the two-box relay's right-arm push and carry controllers
+    # are calibrated against the *un*damped response -- measured, with damping on
+    # they let the pinched box twist more than 10 deg against the pads, and the
+    # relay's yield falls from 2/3 to 0/4.  So it is a property of the arm an
+    # expert was tuned for, and the relay's config turns it off.
+    arm_actuator_damping: float = 1.0
+    # Which of the batch expert's validated tunings to run; see
+    # ``batch_profile``.  "fast" is the one the README's speed section
+    # documents; "baseline" is the slower tuning the two-box relay is
+    # calibrated around.
+    batch_expert_profile: str = "fast"
     object_position_noise_m: float = 0.025
     home: HomeConfig = field(default_factory=HomeConfig)
     cameras: CameraConfig = field(default_factory=CameraConfig)

@@ -98,10 +98,17 @@ def test_compound_collision_preserves_mass_and_inertia():
 def test_batch_rejects_unreachable_table_box_before_grasping():
     from dataclasses import replace
 
+    # 60 mm further back than the layout this test used to use, which was not
+    # actually out of reach: measured there, the IK missed the placement pose by
+    # 1.2 mm and 2.1 deg, both inside the 1.5 mm and 0.045 rad the placement
+    # servo reports arrival against, so the expert could have placed into it.
+    # That made the old assertion a statement about the reachability check's
+    # former tighter bounds rather than about reach.  This layout is out of reach
+    # on its own terms -- measured 6.4-7.4 mm and about 10 deg of miss.
     config = load_config(CONFIG)
     config = replace(
         config, cookie_transfer=replace(
-            config.cookie_transfer, target_bin_world_position_m=(0.135, -0.015, 0.753)
+            config.cookie_transfer, target_bin_world_position_m=(0.135, -0.075, 0.753)
         )
     )
     env = A3CookieTransferEnv(config, render_cameras=False)
@@ -146,7 +153,16 @@ def test_batch_home_is_mirrored_and_near_first_approach():
         expert = A3SameColumnBatchExpert(env)
         expert.reset()
         expert._select_batch()
-        assert np.max(np.abs(expert._approach_q - env.DEPLOYMENT_HOME[:7])) < np.deg2rad(15)
+        # The property is that the expert starts from a nearby branch rather
+        # than crossing the workspace on its first move.  It used to be measured
+        # as the joint distance to a pre-solved approach target, because the
+        # first move was a joint-space trajectory to exactly that target; the
+        # transit is now a Cartesian servo that ends on arrival, so what it
+        # costs is the distance the move covers.  Measured at 56 mm; the bound
+        # is loose enough for another scene layout and tight enough that a
+        # transit to the far side would not pass.
+        start = env.data.site_xpos[expert._l_site]
+        assert np.linalg.norm(expert._approach_eef - start) < 0.15
     finally:
         env.close()
 

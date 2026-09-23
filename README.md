@@ -168,35 +168,96 @@ python examples/run_cookie_same_column.py --help
 上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率。**
 自那以后场景加入了随机化（见[场景随机化](#scene-variation)）：换 seed 会真实改变
 箱体位置与朝向，饼干随源盒刚性平移并继承其偏航。每个场景的随机幅度都按实测可达范围
-标定，单列场景在随机 seed 上实测 4/4 完成。双盒场景三 seed 实测 2/3 通过
-（4802 / 4751 步成功，一个 seed 在第二次填充时 IK 差 1.27 mm 被拒），视频见
-`outputs/videos/two_box_collection/`。开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，
+标定，单列场景在随机 seed 上实测 5/5 完成。双盒场景三 seed 实测 **3/3** 通过
+（4772 / 4993 / 4716 步），视频见 `outputs/videos/two_box_collection/`。开发时一轮
+无窗口运行约 21 分钟，对应约 92 秒仿真时间，
 当时还有另一轮诊断运行并行；这不是独占机器的性能基准。
 
-### 与 `main` 分支的速度差距（实测）
+### 与 `main` 分支的速度差距（已消除，单盒场景）
 
 `main` 与 dev 分支各自独立优化了批次专家的运动参数，本分支保留了自己的
-"共享基类 + 同列子类"结构。在同一场景（`a3_cookie_same_column`、同样的 10 mm 盒噪声）
-上实测同一 seed 的分阶段步数：
+"共享基类 + 同列子类"结构。此前本分支单盒整局约 1657 步，`main` 约 426 步。
 
-| 阶段 | 本分支 | `main` | 参数比 |
+**现在单盒场景实测 5 个 seed：440 / 542 / 433 / 456 / 475 步，均值 469，5/5 完成**
+（`main` 的 5-seed 均值是 425 步）。跨列场景（`a3_cookie_batch`）seed 0 也从约 1800 步
+降到 **479 步**并完成。双盒接力仍走原来的速率，3 个 seed 实测 4772 / 4993 / 4716 步，
+**3/3 完成**（改动前是 2/3，4802 / 4751 步）。
+
+差距的根因不是运动参数，而是伺服机构的参考点：
+
+| | 原实现 | 新实现（同 `main` 的思路） |
+| --- | --- | --- |
+| 计划参考 | 实测 TCP 位姿 | **上一帧命令的位姿**（`last_applied_action` 做正运动学） |
+| 抗积分饱和 | 把计划与实测的差钳在 8 mm | 不需要：计划不再从实测积分 |
+| 减速 | 无，靠低速保证到达柔和 | 末段 20 mm 内速率线性下降 |
+| 到位判据 | 位置 + 朝向 | 位置 + 朝向 + **关节速度 < 0.25** |
+
+原实现对实测位姿做速率限制，就必须同时钳住"计划能领先多少"，否则被挡住的运动会
+把计划卷成一根虚拟弹簧——而那根钳位又把速率封了顶，因为能容忍的滞后正是速度的
+代价。改成对命令位姿做规划后两者都不需要：计划保持速率，手臂跟在后面，末段斜坡
+负责让到达变柔和。
+
+**`kv` 阻尼是这套机制的前提。** actuator 的 position 伺服加上速度反馈
+（`kp / 14`，即 MuJoCo 文档给出的临界阻尼比）后，行程相位才真正收敛：没有它时
+规划在 6 步内到位，而实测 TCP 在 1–15 mm 之间持续振荡，`qvel` 判据永远不满足，
+相位永远不结束。加上后同一段行程 8 步收敛。
+
+逐相位速率：
+
+| 阶段 | 原速率 | 新速率 | `main` |
 | --- | --- | --- | --- |
-| `DESCEND` | 343 步 | 64 步 | 0.0006 vs 0.0024 m/步（**4x**） |
-| `DESCEND_TO_PLACE` | 319 | 54 | 0.0005 vs 0.0024（**5x**） |
-| `MOVE_TO_SLOT` | 311 | 84 | 0.0010 vs 0.0024（**2.4x**） |
-| `LIFT` | 260 | 68 | 0.0008 vs 0.0022（**2.8x**） |
-| `CLOSE` | 229 | 62 | 合爪 0.0015 vs 0.0060（**4x**） |
-| **整局** | **1657 步** | **426 步** | 5 个 seed 平均 425 步 |
+| 行程（空手，`APPROACH`） | 关节轨迹，12 步起 | 0.015 m/步 笛卡尔伺服 | 0.015 |
+| 插入下降 `DESCEND` | 0.0006 | 0.0035 远 / 0.0010 近 | 0.0035 / 0.0010 |
+| 合爪 `CLOSE` | 0.0015 | 0.0060 未接触 / 0.0030 已接触 | 0.0060 / 0.0030 |
+| 提升 `LIFT` | 0.0008 | 0.0018 起 / 0.0035 远 | 0.0018 / 0.0035 |
+| 运输 `MOVE_TO_SLOT` | 0.0010 | 0.0050 | 0.0050 |
+| 下放到槽 `DESCEND_TO_PLACE` | 0.0005 | 0.0030 远 / 0.0012 近 | 0.0030 / 0.0012 |
+| 张开 `OPEN` | 0.003 每步开合 | 0.015，稳定窗 45 → 8 | 0.015 / 8 |
+| 退出 `RETRACT` | 0.0016 | 0.0050 | 0.0050 |
+| 行程抬高 | 105 mm | 82 mm | 82 mm |
 
-把 `main` 的参数移植到本分支后，单盒场景从 1657 降到 596 步、3/3 通过；
-但**双盒 relay 从 2/3 掉到 0/5**，失败点各不相同（`CARRY_B` 丢抓、
-`PUSH_A` 侧漂、`FILL_B` 卡死）。原因是 relay 的推盒／搬盒控制器按慢速动力学标定，
-加速后接触力与夹持判据全部失准。因此本分支**不整体采用** `main` 的速度参数：
-速度不是瓶颈，产出率才是。要同时得到两者，需要只加速不接触货物的纯空中段，
-并把 relay 的力／速度判据一起重新标定。
+其余放宽项：`PRE_CLOSE` 稳定窗 3 → 2（容差 0.006 → 0.008）、`CLOSE` 稳定窗 8 → 3、
+插入卡阻判定窗口 185 → 100、释放稳定窗改为第一批 6 步 / 第二批用
+`success_hold_steps`。
 
-一处独立于加速的 `main` 改动也被否决：actuator `kv` 阻尼（40/30/15）会让双盒搬运
-的夹持力判据读到 0 N 并报"搬运中丢失空盒"，8 项双盒测试中 1 项失败；去掉后 8 项全过。
+### 两套档位：为什么快的那套不能全局启用
+
+上表的加速**只对单盒场景启用**。双盒接力按同样方式提速后实测 0/4，失败点各不相同，
+所以两套调参都被保留下来，作为数据放在
+[`src/a3_dual_arm_sim/batch_profile.py`](src/a3_dual_arm_sim/batch_profile.py) 里：
+
+| | `FAST` | `BASELINE` |
+| --- | --- | --- |
+| 计划参考 | 命令位姿（无需抗饱和钳位） | 实测位姿 + 8 mm 钳位 |
+| 行程 | 笛卡尔伺服 | 关节轨迹（首个动作留在镜像 IK 分支上） |
+| 需要手臂阻尼 | 是（否则到位判据永不满足） | 否 |
+| 单盒 | 5/5，均值 469 步 | 1657–1876 步 |
+| 双盒接力 | **0/4** | 3/3，均值 4827 步 |
+
+`FAST` 之下接力失败的原因是标定缺口，不是快档本身的缺陷：加速后填充阶段的落点
+姿态变了，搬运控制器的夹持就在新姿态下把箱体扭过它的 10° 判据（实测无阻尼手臂下
+峰值 2.03°，加速后 10.34°）。因此**修好接力应该从翻开一行开始**——把
+`configs/cookie_two_box_batch.yaml` 的 `batch_expert_profile` 改成 `"fast"`，再重新
+标定搬运——而不是从历史里恢复一份实现。
+
+`arm_actuator_damping` 同样是按场景的开关，两个双盒配置设为 `0.0`：接力按无阻尼
+手臂标定，阻尼会让手指更贴命令，箱体因此在夹持里转得更多。
+
+双盒 relay 的推盒／搬盒控制器按慢速动力学标定，本次**只改了两处**，速率未动：
+夹持丢失判据从"任一指垫力 < 0.08 N"改为"**两指垫都** < 0.08 N"（实测外指在
+0.04–0.2 N 之间徘徊，单指判据正好站在自己的阈值上）；旋转保护从"绝对朝向 > 10°"
+改为"**相对搬运开始时的朝向** > 10°"（场景本身会给备用盒随机偏航，绝对判据会把
+"本来就斜着"读成"搬运中转歪了"）。
+
+运输抬升高度也保持 85 mm。试过跟 `main` 一起降到 60 mm：单盒更快，但双盒的
+`FILL_B` 第二批在 `MOVE_TO_SLOT` 里耗尽了整个 421 步预算，整局被判超时——
+该高度离远端列太近，伺服不一定能到位。
+
+可达性预检的两个界（位置 2.0 mm、角度 0.035 rad）也按原值保留。它们**不是从伺服
+容差推导出来的，而是量出来的**：放松到 IK 自己的 4 mm 接受界，会放进一个差 2.06 mm
+的布局，然后在 `DESCEND_TO_PLACE` 里耗掉 421 步也不到位；收紧到放置伺服的 1.5 mm
+到位界，会拒掉一个差 1.53 mm 而基线能跑完的布局——因为**实测**工具位置同时取决于
+重力与接触，IK 的解误差不等于到位误差。所以这个窗口是真实的，两个界就是它的实测边缘。
 
 ### 文件导航与回归检查
 
@@ -212,6 +273,8 @@ python examples/run_cookie_same_column.py --help
 | [examples/run_cookie_two_box_batch.py](examples/run_cookie_two_box_batch.py) | 双盒接力演示、状态输出和 JSON 评估报告 |
 | [src/a3_dual_arm_sim/tasks.py](src/a3_dual_arm_sim/tasks.py) | 任务词表（名称、提示词、成功契约），不依赖 MuJoCo |
 | [src/a3_dual_arm_sim/collection.py](src/a3_dual_arm_sim/collection.py) | 场景注册表与唯一的数据采集驱动 |
+| [src/a3_dual_arm_sim/batch_profile.py](src/a3_dual_arm_sim/batch_profile.py) | 批次专家的两套已验证调参（`FAST` / `BASELINE`），按场景选择 |
+| [src/a3_dual_arm_sim/arm_servo.py](src/a3_dual_arm_sim/arm_servo.py) | 笛卡尔速率伺服：命令位姿前馈与末段减速斜坡 |
 | [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 原跨列批次专家 |
 | [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家与倾斜抓取实验逻辑 |
 | [src/a3_dual_arm_sim/two_box_batch.py](src/a3_dual_arm_sim/two_box_batch.py) | 双盒调度、右臂推满盒与夹移空盒 |
@@ -815,11 +878,15 @@ need only Pillow and PyAV; the `ffmpeg` binary is not required.
   pixel at `256x256`. Measured rollouts on that scene show the consequence: a policy tracks the
   demonstration for the first two or three cookies and then diverges without recovering. The fix is
   to collect from a scene that randomises, not to tune the policy further.
-- **Speed has not been traded for yield.** `main`'s expert parameters are 2.4–5x faster per phase
-  (426 vs 1657 steps on the same single-box seed), but porting them onto this branch drops the
-  two-box relay from 2 of 3 seeds to 0 of 5 — the relay's push and carry controllers are calibrated
-  against the slower dynamics. See the measured table in
-  [已验证的结果与限制](#已验证的结果与限制). Speed is therefore an open item, not a solved one.
+- **Speed and yield are now both held, but by two profiles rather than one.** The single-box scenes
+  run `FAST` (5 of 5 seeds, 469 steps against the 1657 the branch used to take, and `main`'s 425),
+  and the two-box relay runs `BASELINE`, the tuning it was calibrated against (3 of 3 seeds, 4827
+  steps). The split is honest rather than tidy: under `FAST` the relay's carry lets the pinched box
+  twist past its 10 deg guard, because the faster fill leaves the Cookies in slightly different
+  poses. That is a calibration gap in the relay, and
+  [`src/a3_dual_arm_sim/batch_profile.py`](src/a3_dual_arm_sim/batch_profile.py) keeps the baseline
+  reachable so closing it starts by flipping one config line instead of recovering an implementation
+  from history. See [已验证的结果与限制](#已验证的结果与限制).
 - **One episode is not a measurement.** SmolVLA's flow-matching sampler restarts from fresh noise at
   every re-plan, so identical seeds give materially different episodes.
 - **A partial policy runs to the horizon.** `terminate_on_success` fires only when the exact fill holds
@@ -1053,16 +1120,19 @@ older push parameters. The two-box scene has its own `randomization` ranges,
 including for the spare box; see [Scene variation](#scene-variation).
 
 Measured since, three seeds collected with `scripts/collect_cookie.sh`, one
-attempt each, at the scene's own randomisation: seeds 0 and 2 complete (4802 and
-4751 control steps, ten Cookies upright in each box) and seed 1 is rejected at the
-second fill, where the left arm's IK lands 5.27 mm from its target against a
-4.00 mm tolerance after the working box has been exchanged. The three episodes are
-`outputs/videos/two_box_collection/{seed0_success,seed1_failed,seed2_success}.mp4`.
+attempt each, at the scene's own randomisation: all three complete (4772, 4993
+and 4716 control steps, ten Cookies in each box). The step count is essentially
+unchanged from the 4802 and 4751 the earlier tuning measured, which is the
+expected result rather than a disappointment: the relay runs the `BASELINE`
+profile, so what it gains from this work is one more accepted seed, not a shorter
+episode. The three episodes are
+`outputs/videos/two_box_collection/{seed0_success,seed1_failed,seed2_success}.mp4`
+-- recorded against the earlier tuning, which rejected seed 1 at the second fill,
+where the left arm's IK landed 5.27 mm from its target against a 4.00 mm
+tolerance after the working box had been exchanged. Those videos are kept as the
+evidence for that failure rather than as a claim about the current yield.
 
-That 2-of-3 is the scene's working yield rather than a defect to chase: the
-failure is a millimetre-scale near miss in one arm pose, and a collection run asks
-for more attempts than episodes and keeps the accepted ones. A rejected episode
-now records *why* in its own metadata line:
+A rejected episode records *why* in its own metadata line:
 
 ```json
 {"seed": 1, "frames": 4900, "success": false,

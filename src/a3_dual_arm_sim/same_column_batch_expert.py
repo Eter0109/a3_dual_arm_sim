@@ -167,16 +167,22 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             self._pick_center + pad_height_axis * 0.010
             - self._grasp_rotation @ self._pad_offset
         )
-        self._high_eef = self._pick_eef + [0, 0, 0.105]
+        self._high_eef = self._pick_eef + [0, 0, self.profile.grasp_clearance_m]
         self._approach_eef = self._high_eef
         if self._aligned_grasp:
-            self._approach_eef = self._pick_eef + self._grasp_rotation[:, 1] * -0.105
-        # Seed from the measured deployment pose so the first motion remains
-        # on the nearby mirrored IK branch instead of taking the old transit
-        # branch with a large wrist/elbow rotation.
-        self._approach_q = self._solve_l(
-            self._approach_eef, self._grasp_quat, self.env.current_joint_action[:7]
-        )
+            self._approach_eef = (
+                self._pick_eef
+                + self._grasp_rotation[:, 1] * -self.profile.grasp_clearance_m
+            )
+        if self.profile.joint_transit:
+            # Seed from the measured deployment pose so the first motion stays on
+            # the nearby mirrored IK branch instead of taking the transit branch
+            # with a large wrist/elbow rotation.
+            self._approach_q = self._solve_l(
+                self._approach_eef,
+                self._grasp_quat,
+                self.env.current_joint_action[:7],
+            )
         if self.batch_index == 1 and self._grasp_tilt_deg > 10 and self._base_push_attempts < 2:
             base_y = positions[0, 1] - rotations[0, 1, 2] * self.env.COOKIE_HALF_SIZE[2]
             self._push_start = np.array(
@@ -184,10 +190,12 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             )
             self._push_end = self._push_start + [0, 0.016, 0]
             self._push_high = self._push_start + [0, 0, 0.075]
-            self._push_q = self._solve_l(
-                self._push_high, self._target_quat_canonical,
-                self.env.current_joint_action[:7],
-            )
+            if self.profile.joint_transit:
+                self._push_q = self._solve_l(
+                    self._push_high,
+                    self._target_quat_canonical,
+                    self.env.current_joint_action[:7],
+                )
             self._opening = 0.10
             self._advance(CookiePhase.ALIGN)
             self._push_stage = "approach"
@@ -208,15 +216,36 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             return self.env.last_applied_action.copy()
         if self.phase is CookiePhase.ALIGN:
             if self._push_stage == "approach":
-                action = self._trajectory_command(self._push_q, 1.0)
-                if self._motion_done and self._reached(self._push_q, tolerance=0.025):
+                # A transit: nothing is in the jaws, and the pose it is going to
+                # is above everything it could hit.
+                if self.profile.joint_transit:
+                    action = self._trajectory_command(self._push_q, 1.0)
+                    if self._motion_done and self._reached(
+                        self._push_q, tolerance=0.025
+                    ):
+                        self._push_stage = "preclose"
+                    return action
+                action, reached = self._servo(
+                    self._push_high,
+                    self._canonical,
+                    1.0,
+                    speed=self.profile.transit_m_per_step,
+                )
+                if reached:
                     self._push_stage = "preclose"
                 return action
             if self._push_stage == "preclose":
-                action = self._hold_command(self._push_q, self._opening)
-                if abs(self.env.current_joint_action[7] - self._opening) < 0.006:
+                if self.profile.joint_transit:
+                    action = self._hold_command(self._push_q, self._opening)
+                else:
+                    action, _ = self._servo(
+                        self._push_high,
+                        self._canonical,
+                        self._opening,
+                        speed=self.profile.hold_m_per_step,
+                    )
+                if abs(float(self.env.current_joint_action[7]) - self._opening) < 0.006:
                     self._push_stage = "descend"
-                    self._servo_pos = None
                 return action
             if self._push_stage in ("descend", "sweep"):
                 if self._insertion_jammed(self._total_pad_forces, limit=12.0):
@@ -225,7 +254,11 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 target = self._push_start if self._push_stage == "descend" else self._push_end
                 action, reached = self._servo(
                     target, self._canonical, self._opening,
-                    speed=0.0006 if self._push_stage == "descend" else 0.0003,
+                    speed=(
+                        self.profile.push_descend_m_per_step
+                        if self._push_stage == "descend"
+                        else self.profile.push_sweep_m_per_step
+                    ),
                 )
                 if reached:
                     if self._push_stage == "descend":
@@ -234,10 +267,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                         self._push_retract = self.data.site_xpos[self._l_site].copy()
                         self._push_retract[2] += 0.075
                         self._push_stage = "retract"
-                    self._servo_pos = None
                 return action
             action, reached = self._servo(
-                self._push_retract, self._canonical, self._opening, speed=0.001
+                self._push_retract, self._canonical, self._opening,
+                speed=self.profile.push_retract_m_per_step,
             )
             if reached:
                 self._base_push_attempts += 1
@@ -246,18 +279,38 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self.phase is CookiePhase.APPROACH:
             # Travel with the jaws fully open.  The target batch width is set
             # only once the tool is steady above the Cookies.
-            action = self._trajectory_command(self._approach_q, 1.0)
-            if self._motion_done and self._reached(self._approach_q, tolerance=0.025):
+            if self.profile.joint_transit:
+                action = self._trajectory_command(self._approach_q, 1.0)
+                if self._motion_done and self._reached(
+                    self._approach_q, tolerance=0.025
+                ):
+                    self._advance(CookiePhase.PRE_CLOSE)
+                return action
+            action, reached = self._servo(
+                self._approach_eef,
+                self._grasp_quat,
+                1.0,
+                speed=self.profile.transit_m_per_step,
+            )
+            if reached:
                 self._advance(CookiePhase.PRE_CLOSE)
             return action
         if self.phase is CookiePhase.PRE_CLOSE:
-            action = self._hold_command(self._approach_q, self._opening)
+            if self.profile.joint_transit:
+                action = self._hold_command(self._approach_q, self._opening)
+            else:
+                action, _ = self._servo(
+                    self._approach_eef,
+                    self._grasp_quat,
+                    self._opening,
+                    speed=self.profile.hold_m_per_step,
+                )
             actual_opening = float(self.env.current_joint_action[7])
-            if abs(actual_opening - self._opening) <= 0.006:
+            if abs(actual_opening - self._opening) <= self.profile.preclose_tolerance:
                 self._preclose_stable += 1
             else:
                 self._preclose_stable = 0
-            if self._preclose_stable >= 3:
+            if self._preclose_stable >= self.profile.preclose_stable_steps:
                 if self._aligned_gap_center is not None:
                     fingers = list(self.env._left_finger_geoms)
                     pad_projection = self.data.geom_xpos[fingers] @ self._rear_axis
@@ -301,13 +354,23 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             if self._insertion_jammed(self._total_pad_forces):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
                 return self.env.last_applied_action.copy()
+            insertion_distance = float(
+                np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
+            )
             action, reached = self._servo(
-                self._pick_eef, self._grasp_rotation, self._opening, speed=0.0006
+                self._pick_eef,
+                self._grasp_rotation,
+                self._opening,
+                speed=(
+                    self.profile.descend_far_m_per_step
+                    if insertion_distance > self.profile.near_m
+                    else self.profile.descend_near_m_per_step
+                ),
             )
             if (
                 not reached
                 and self.batch_index == 1
-                and self.phase_steps >= 185
+                and self.phase_steps >= self.profile.descend_jam_window
                 and np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site]) < 0.005
                 and max(self._total_pad_forces) > 0.1
             ):
@@ -324,10 +387,17 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail("batch closure blocked by excessive pad force")
                 return self.env.last_applied_action.copy()
             chain, forces = self._contact_chain()
+            # Close fast until the jaws touch anything, then at a rate the five
+            # Cookies can absorb.  The first half of the travel is free.
+            close_rate = (
+                self.profile.close_free_m_per_step
+                if (not chain or min(forces) < 0.5)
+                else self.profile.close_contact_m_per_step
+            )
             if (
                 self.batch_index == 1 and self._opening > 0.33
             ) or not chain or min(forces) < 1.3:
-                self._opening = max(0.28, self._opening - 0.0015)
+                self._opening = max(0.28, self._opening - close_rate)
             secure_width = self.batch_index == 0 or self._opening <= 0.33
             enough_depth = (
                 not self._rim_contact_stop
@@ -362,8 +432,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     self._far_pad_anchor - far_projection, -0.0006, 0.0006
                 )
                 self._pick_eef += correction * self._rear_axis
-            action, _ = self._servo(self._pick_eef, self._grasp_rotation, self._opening)
-            if self._stable >= 8:
+            action, _ = self._servo(
+                self._pick_eef, self._grasp_rotation, self._opening, speed=0.0008
+            )
+            if self._stable >= self.profile.close_stable_steps:
                 self._grip_reference = self._positions().copy()
                 self._lift_start_eef = self.data.site_xpos[self._l_site].copy()
                 self._advance(CookiePhase.LIFT)
@@ -372,8 +444,18 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             _, forces = self._contact_chain()
             if min(forces) < 1.0:
                 self._opening = max(0.28, self._opening - 0.001)
+            lifted_so_far = float(
+                np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
+            )
             action, reached = self._servo(
-                self._high_eef, self._grasp_rotation, self._opening, speed=0.0008
+                self._high_eef,
+                self._grasp_rotation,
+                self._opening,
+                speed=(
+                    self.profile.lift_near_m_per_step
+                    if lifted_so_far < self.profile.near_m
+                    else self.profile.lift_far_m_per_step
+                ),
             )
             lifted = self._positions()[:, 2] - self._grip_reference[:, 2]
             tool_rise = self.data.site_xpos[self._l_site, 2] - self._lift_start_eef[2]
@@ -406,22 +488,36 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail("Cookie slipped out of batch during transport")
                 return self.env.last_applied_action.copy()
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
-            clearance = 0.085 if moving else 0.0
+            clearance = self.profile.transport_clearance_m if moving else 0.0
             pos, rotation = self._place_pose(clearance)
+            if moving:
+                place_speed = self.profile.place_free_m_per_step
+            else:
+                to_place = float(np.linalg.norm(pos - self.data.site_xpos[self._l_site]))
+                place_speed = (
+                    self.profile.place_far_m_per_step
+                    if to_place > self.profile.near_m
+                    else self.profile.place_near_m_per_step
+                )
             action, reached = self._servo(
                 pos,
                 rotation,
                 self._opening,
-                speed=0.0010 if moving else 0.0005,
+                speed=place_speed,
             )
             if reached:
                 self._advance(CookiePhase.DESCEND_TO_PLACE if moving else CookiePhase.OPEN)
             return action
         if self.phase is CookiePhase.OPEN:
-            self._opening = min(0.49, self._opening + 0.003)
+            # The jaws are done with the batch; opening them is not a contact
+            # move, so it does not need to be slow, only synchronized with the
+            # servo that holds the placement pose.
+            self._opening = min(
+                0.49, self._opening + self.profile.open_m_per_step
+            )
             pos, rotation = self._place_pose()
-            action, _ = self._servo(pos, rotation, self._opening, speed=0.0005)
-            if self._opening >= 0.49 and self.phase_steps >= 45:
+            action, _ = self._servo(pos, rotation, self._opening, speed=0.0010)
+            if self._opening >= 0.49 and self.phase_steps >= 8:
                 self._retract_pos = (
                     self.data.site_xpos[self._l_site].copy() + rotation[:, 1] * -0.085
                 )
@@ -430,7 +526,8 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             return action
         if self.phase is CookiePhase.RETRACT:
             action, reached = self._servo(
-                self._retract_pos, self._retract_rotation, self._opening, speed=0.0016
+                self._retract_pos, self._retract_rotation, self._opening,
+                speed=self.profile.retract_m_per_step,
             )
             if reached:
                 self._advance(CookiePhase.VERIFY_RELEASE)
@@ -451,7 +548,15 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
                 return self.env.last_applied_action.copy()
-            if self._stable >= 20:
+            # The first batch only has to be released; the second is the one the
+            # scene's success test watches, so it is the one that has to hold for
+            # the full success window.
+            required_stable = (
+                self.env.task_config.success_hold_steps
+                if self.batch_index == 1
+                else self.profile.release_stable_first
+            )
+            if self._stable >= required_stable:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1

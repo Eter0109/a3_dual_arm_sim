@@ -187,6 +187,13 @@ class RightBoxCarryController:
     """Pinch an empty box's rear wall and slide it into the filling station."""
 
     MOVE_SPEED_M_PER_STEP = 0.0008
+    #: Finger opening of the pinch that carries the box, on the same 0..1 scale
+    #: as a joint target (0 is closed).  Tighter than it looks: the wall is a few
+    #: millimetres thick, so what holds the box against sliding is the pinch
+    #: force, not the geometry.  This value goes with the undamped servo the relay
+    #: is calibrated for (see ``arm_actuator_damping``); an arm that holds its
+    #: command more rigidly needs a tighter 0.085, or the box twists against the
+    #: pads until the yaw guard reads it as lost.
     GRASP_OPENING = 0.10
     FORCE_LIMIT_N = 80.0
 
@@ -220,6 +227,12 @@ class RightBoxCarryController:
         self._target_q = None
         self._move_goal_y = float(self.anchor[1])
         self._grasped = False
+        #: The box's yaw when the carry started.  The scene draws the spare box's
+        #: yaw (up to 5.7 deg), so the guard below has to ask what the carry did
+        #: to the box, not how the box happens to be standing: against an absolute
+        #: 10 deg, a box that started at 5.7 deg and turned 4.3 deg was reported
+        #: as "empty box rotated during carry".
+        self._initial_yaw = self.box_yaw_rad
 
     @property
     def box_position(self) -> np.ndarray:
@@ -265,7 +278,7 @@ class RightBoxCarryController:
             if abs(self.box_position[0] - self.initial_position[0]) > 0.015:
                 self.failed = "empty box drifted sideways during carry"
                 return self.env.last_applied_action.copy()
-            if abs(self.box_yaw_rad) > math.radians(10):
+            if abs(self.box_yaw_rad - self._initial_yaw) > math.radians(10):
                 self.failed = "empty box rotated during carry"
                 return self.env.last_applied_action.copy()
         timeout = {
@@ -302,7 +315,17 @@ class RightBoxCarryController:
                 if self.box_position[1] >= self.destination_y - 0.004:
                     self._advance("RELEASE")
                     return self.env.last_applied_action.copy()
-                if np.min(forces) < 0.08:
+                # "Grip lost" means the box is no longer held, and the test for
+                # that is that *neither* pad reads a force.  Measured: the rear
+                # wall is thin and the jaws are wide relative to it, so the two
+                # pads do not share the load evenly -- the inner pad carries
+                # 1.1-2.6 N while the outer one hovers between 0.04 and 0.2 N.
+                # Reading a single pad therefore sits right on its own
+                # threshold, and an arm that tracks its command more precisely
+                # (actuator `kv` damping) holds that pad lower more often
+                # without the box ever moving relative to the jaws.  The sum is
+                # what says the box is still held.
+                if np.max(forces) < 0.08:
                     self.stable += 1
                     if self.stable > 8:
                         self.failed = f"empty box grip lost during carry: {forces.tolist()} N"
@@ -314,6 +337,17 @@ class RightBoxCarryController:
                     self._move_goal_y + self.MOVE_SPEED_M_PER_STEP,
                     measured_y + 0.015,
                 )
+                # The pinch holds the box, so the pads and the box are one body
+                # and the slide stays on the line the grip was closed on.  Two
+                # ways of steering it sideways were tried and both fail, for the
+                # same reason: because the grip moves the box *with* the pads,
+                # commanding the box sideways drags it sideways and turns it.
+                # A yaw-dependent term fed that back (17.7 mm of drift, stopped
+                # by the sideways guard); aiming x straight at the station fixed
+                # a +6 mm start but not a -6 mm one (10.3 deg of yaw, stopped by
+                # the rotation guard).  So the box is placed where the grip was
+                # closed, and the station check is what decides whether that pose
+                # is reachable.
                 target = self.anchor.copy()
                 target[1] = self._move_goal_y
                 self._target_q = None
