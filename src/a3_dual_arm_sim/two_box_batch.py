@@ -197,6 +197,19 @@ class RightBoxCarryController:
     GRASP_OPENING = 0.10
     FORCE_LIMIT_N = 80.0
 
+    #: How close to the station the box must be before the carry lets go.
+    #: This is the landing's accuracy, and it has to be inside the window the
+    #: *next* stage accepts: the fill that follows refuses a box whose placement
+    #: pose its IK cannot reach, which is about 2 mm of box offset.  It used to be
+    #: 4 mm, so the carry deliberately let go up to 4 mm short and the fill's
+    #: reachability pre-check then refused the result -- measured, a relay run
+    #: ended at "FILL_B setup: target column 2 unreachable ... position error
+    #: 2.28 mm" with the box 3.4 mm from the station.
+    RELEASE_WITHIN_M = 0.0015
+    #: How far the slide goal may lead the pads' measured y, so a box that will not
+    #: slide is pushed with a bounded offset rather than an ever-growing one.
+    LEAD_M = 0.015
+
     def __init__(self, env: A3CookieTransferEnv, box_id: int, destination_y: float):
         self.env = env
         self.data = env.data
@@ -211,6 +224,7 @@ class RightBoxCarryController:
         mujoco.mju_mat2Quat(self.quat, rotation.ravel())
         pad_center = self.data.geom_xpos[self.helper.fingers].mean(axis=0)
         pad_offset = pad_center - self.data.site_xpos[self.helper.site]
+        self._pad_offset = pad_offset
         rear_wall_y = (
             self.initial_position[1]
             - env.config.cookie_transfer.target_bin_half_size_m[1]
@@ -312,7 +326,7 @@ class RightBoxCarryController:
                 action, _ = self._pose_command(self.anchor, self.GRASP_OPENING)
                 reached = bool(np.all(forces > 0.3))
             elif self.phase == "MOVE":
-                if self.box_position[1] >= self.destination_y - 0.004:
+                if self.box_position[1] >= self.destination_y - self.RELEASE_WITHIN_M:
                     self._advance("RELEASE")
                     return self.env.last_applied_action.copy()
                 # "Grip lost" means the box is no longer held, and the test for
@@ -335,19 +349,18 @@ class RightBoxCarryController:
                 measured_y = float(self.data.site_xpos[self.helper.site, 1])
                 self._move_goal_y = min(
                     self._move_goal_y + self.MOVE_SPEED_M_PER_STEP,
-                    measured_y + 0.015,
+                    measured_y + self.LEAD_M,
                 )
                 # The pinch holds the box, so the pads and the box are one body
-                # and the slide stays on the line the grip was closed on.  Two
-                # ways of steering it sideways were tried and both fail, for the
-                # same reason: because the grip moves the box *with* the pads,
-                # commanding the box sideways drags it sideways and turns it.
-                # A yaw-dependent term fed that back (17.7 mm of drift, stopped
-                # by the sideways guard); aiming x straight at the station fixed
-                # a +6 mm start but not a -6 mm one (10.3 deg of yaw, stopped by
-                # the rotation guard).  So the box is placed where the grip was
-                # closed, and the station check is what decides whether that pose
-                # is reachable.
+                # and the slide stays on the line the grip was closed on.  Steering
+                # it sideways was tried three ways and every one trades the two
+                # errors against each other rather than removing either: measured
+                # from the relay's own state, a 0.08 m/rad yaw term left the box
+                # 0.27 mm from the station but 5.41 deg off, and a rate-limited
+                # lateral loop on the station's x left it 6.4 mm out with 8.4 deg
+                # of yaw.  A pinch moves the box *with* the pads, so a sideways
+                # command is a sideways displacement, and the torque that produces
+                # is what the next fill's reachability pre-check reads.
                 target = self.anchor.copy()
                 target[1] = self._move_goal_y
                 self._target_q = None
