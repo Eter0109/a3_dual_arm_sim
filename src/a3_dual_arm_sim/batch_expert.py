@@ -64,7 +64,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 mujoco.mju_mat2Quat(actual_q, work.site_xmat[self._l_site])
                 mujoco.mju_subQuat(error, target_q, actual_q)
                 distance = np.linalg.norm(work.site_xpos[self._l_site] - position)
-                if distance > 0.002 or np.linalg.norm(error) > 0.035:
+                # The slot's tight axis allows 2.5 mm. A 2 mm preflight limit
+                # rejected reachable randomized box poses before servoing.
+                position_tol = getattr(self, "_target_preflight_position_tol", 0.0025)
+                rotation_tol = getattr(self, "_target_preflight_rotation_tol", 0.035)
+                if distance > position_tol or np.linalg.norm(error) > rotation_tol:
                     raise RuntimeError(
                         f"target column {column + 1} unreachable with vertical grasp: "
                         f"position error {distance * 1000:.2f} mm, "

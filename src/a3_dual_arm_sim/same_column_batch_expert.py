@@ -28,10 +28,26 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         self._jam_count = self._jam_count + 1 if max(forces) > threshold else 0
         return self._jam_count >= 3
 
+    def _approach_ready(self, target, rotation, reached):
+        if reached:
+            return True
+        if not getattr(self, "_wait_for_approach", False):
+            return self.phase_steps >= 15
+        position_error = np.linalg.norm(
+            np.asarray(target) - self.data.site_xpos[self._l_site]
+        )
+        desired_quat = np.empty(4)
+        mujoco.mju_mat2Quat(desired_quat, np.asarray(rotation).ravel())
+        actual_quat = np.empty(4)
+        mujoco.mju_mat2Quat(actual_quat, self.data.site_xmat[self._l_site])
+        rotation_error = np.empty(3)
+        mujoco.mju_subQuat(rotation_error, desired_quat, actual_quat)
+        return position_error < 0.008 and np.linalg.norm(rotation_error) < 0.14
+
     def _candidate_batches(self):
         """Take the exposed end of the same source column for both batches."""
         source = np.asarray(self.env.SOURCE_POSITIONS)
-        columns = sorted(set(source[:, 0]))
+        columns = getattr(self, "_column_order", sorted(set(source[:, 0])))
         if self.completed_cookie_indices:
             columns = [source[self.completed_cookie_indices[0], 0]]
         for x in columns:
@@ -114,6 +130,22 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 [[1, 0, 0], [0, c, s], [0, -s, c]], dtype=np.float64
             )
             self._grasp_rotation = fall_rotation @ self._canonical
+        pitch_by_column = getattr(self, "_column_tool_pitch_deg", None)
+        if pitch_by_column is not None:
+            source = np.asarray(self.env.SOURCE_POSITIONS)
+            columns = sorted(set(source[:, 0]))
+            column_x = source[self.batch_indices[0], 0]
+            column_rank = next(
+                index for index, x in enumerate(columns) if np.isclose(x, column_x)
+            )
+            pitch = np.deg2rad(pitch_by_column[column_rank])
+            c, s = np.cos(pitch), np.sin(pitch)
+            # Rotate around the jaw axis. The pads still close along the
+            # Cookie row while the wrist reaches farther source columns.
+            reach_rotation = np.array(
+                [[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64
+            )
+            self._grasp_rotation = reach_rotation @ self._grasp_rotation
         self._grasp_quat = np.empty(4)
         mujoco.mju_mat2Quat(self._grasp_quat, self._grasp_rotation.ravel())
         jaw_axis = self._grasp_rotation[:, 0]
@@ -196,8 +228,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self.phase is CookiePhase.ALIGN:
             if self._push_stage == "approach":
                 action, reached = self._servo(self._push_high, self._canonical, 1.0, speed=0.015)
-                if reached or self.phase_steps >= 15:
+                if self._approach_ready(self._push_high, self._canonical, reached):
                     self._push_stage = "preclose"
+                elif self.phase_steps >= 120:
+                    self._fail("could not reach the straightening approach pose")
                 return action
             if self._push_stage == "preclose":
                 action, _ = self._servo(self._push_high, self._canonical, self._opening, speed=0.001)
@@ -231,8 +265,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
 
         if self.phase is CookiePhase.APPROACH:
             action, reached = self._servo(self._approach_eef, self._grasp_rotation, 1.0, speed=0.015)
-            if reached or self.phase_steps >= 15:
+            if self._approach_ready(self._approach_eef, self._grasp_rotation, reached):
                 self._advance(CookiePhase.PRE_CLOSE)
+            elif self.phase_steps >= 120:
+                self._fail("could not reach the grasp approach pose")
             return action
 
         if self.phase is CookiePhase.PRE_CLOSE:
@@ -351,6 +387,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._opening = max(0.28, self._opening - 0.001)
             dist_lifted = np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
             lift_speed = 0.0018 if dist_lifted < 0.015 else 0.0035
+            lift_speed = min(lift_speed, getattr(self, "_max_lift_speed", lift_speed))
             action, reached = self._servo(
                 self._high_eef, self._grasp_rotation, self._opening, speed=lift_speed
             )
@@ -389,7 +426,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             clearance = 0.060 if moving else 0.0
             pos, rotation = self._place_pose(clearance)
             if moving:
-                servo_speed = 0.0050
+                servo_speed = getattr(self, "_transport_speed", 0.0050)
             else:
                 dist_to_place = np.linalg.norm(pos - self.data.site_xpos[self._l_site])
                 servo_speed = 0.0030 if dist_to_place > 0.015 else 0.0012
@@ -455,3 +492,82 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
 
         self._fail("unsupported batch phase")
         return self._hold_command(self._opening)
+
+
+class A3VariedColumnBatchExpert(A3SameColumnBatchExpert):
+    """Same physical grasp, with a reproducible source-column choice per episode."""
+
+    def _act_step(self, observation=None, task=""):
+        previous_phase = self.phase
+        action = super()._act_step(observation, task)
+        if previous_phase is CookiePhase.OPEN and self.phase is CookiePhase.RETRACT:
+            # The tilted place tool must lift clear of the small box before
+            # translating away; retreating along its tilted axis can jam.
+            self._retract_pos = self.data.site_xpos[self._l_site].copy()
+            self._retract_pos[2] += 0.060
+        return action
+
+    def _place_pose(self, clearance=0.0, column_index=None):
+        position, rotation = super()._place_pose(clearance, column_index)
+        target_column = self.batch_index if column_index is None else column_index
+        box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
+        if (
+            column_index is None
+            and self.phase in (CookiePhase.MOVE_TO_SLOT, CookiePhase.DESCEND_TO_PLACE, CookiePhase.OPEN)
+            and self.batch_indices
+        ):
+            batch_key = tuple(self.batch_indices)
+            if getattr(self, "_held_rotation_batch", None) != batch_key:
+                tool_rotation = self.data.site_xmat[self._l_site].reshape(3, 3)
+                middle_cookie = self.env._cookie_bodies[self.batch_indices[2]]
+                cookie_rotation = self.data.xmat[middle_cookie].reshape(3, 3)
+                self._held_cookie_rotation_local = tool_rotation.T @ cookie_rotation
+                self._held_rotation_batch = batch_key
+            # Preserve the measured Cookie-to-tool rotation. A tilted grasp
+            # must not become a tilted Cookie when the arm reaches the box.
+            batch_center = position + rotation @ self._group_offset
+            cookie_allowance = (
+                np.deg2rad(8.0)
+                if self.selected_source_column_index == 3 else 0.0
+            )
+            c, s = np.cos(cookie_allowance), np.sin(cookie_allowance)
+            reach_relief = np.array(
+                [[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=np.float64
+            )
+            rotation = box_rotation @ reach_relief @ self._held_cookie_rotation_local.T
+            position = batch_center - rotation @ self._group_offset
+        wall_clearance = 0.005 if target_column == 0 else 0.003
+        position = position + box_rotation[:, 0] * wall_clearance
+        return position, rotation
+
+    def reset(self, context=None):
+        # The 2.5 mm / 0.035 rad vertical IK probe is slightly conservative
+        # for tilted multi-column grasps. Keep the legacy experts unchanged.
+        self._target_preflight_position_tol = 0.0030
+        self._target_preflight_rotation_tol = 0.050
+        super().reset(context)
+        self._held_rotation_batch = None
+        self._wait_for_approach = True
+        # The far column needs a steeper approach when the source bin moves
+        # away under the diverse profile; -30 deg leaves up to 9 mm of
+        # unachievable descent on held-out layouts.
+        self._column_tool_pitch_deg = (0, -15, -35, -35)
+        columns = sorted(set(np.asarray(self.env.SOURCE_POSITIONS)[:, 0]))
+        requested = getattr(self, "requested_source_column_index", None)
+        if requested is None:
+            seed = 0 if context is None else context.seed
+            # Every consecutive group of four seeds covers all columns once,
+            # with a reproducibly shuffled order within each group.
+            group, offset = divmod(seed, len(columns))
+            selected = int(np.random.default_rng(group).permutation(len(columns))[offset])
+        else:
+            selected = int(requested)
+            if not 0 <= selected < len(columns):
+                raise ValueError(f"source column {selected} is outside 0..{len(columns) - 1}")
+        self.selected_source_column_index = selected
+        self._max_lift_speed = 0.0022 if selected == len(columns) - 1 else 0.0035
+        self._transport_speed = (
+            0.0030 if selected == len(columns) - 1
+            else 0.0035 if selected == 1 else 0.0050
+        )
+        self._column_order = [columns[selected]]

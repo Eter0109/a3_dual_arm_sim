@@ -11,8 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from a3_dual_arm_sim.batch_expert import A3CookieBatchExpert
-from a3_dual_arm_sim.same_column_batch_expert import A3SameColumnBatchExpert
+from a3_dual_arm_sim.same_column_batch_expert import (
+    A3SameColumnBatchExpert, A3VariedColumnBatchExpert,
+)
 from a3_dual_arm_sim.config import load_config
+from a3_dual_arm_sim.contracts import EpisodeContext
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 
@@ -20,9 +23,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--expert",
-        choices=("same_column", "cross_column"),
+        choices=("same_column", "cross_column", "varied_column"),
         default="same_column",
-        help="Batch expert strategy: 'same_column' (0-4 then 5-9, default) or 'cross_column' (0-4 then 20-24)",
+        help="Batch expert: first column, cross column, or seeded choice among four columns",
+    )
+    parser.add_argument(
+        "--source-column", type=int, choices=(1, 2, 3, 4),
+        help="With --expert varied_column, grasp this source column instead of choosing by seed",
     )
     parser.add_argument("--config", type=Path, default=Path("configs/cookie_batch.yaml"))
     parser.add_argument("--render", action="store_true")
@@ -36,6 +43,8 @@ def main():
     args = parser.parse_args()
     if args.max_steps < 1:
         parser.error("--max-steps must be positive")
+    if args.source_column is not None and args.expert != "varied_column":
+        parser.error("--source-column requires --expert varied_column")
     config = load_config(args.config)
     if args.physics_hz is not None:
         if args.physics_hz <= 0 or args.physics_hz % config.control_hz != 0:
@@ -63,12 +72,17 @@ def main():
     renderer = None
     try:
         obs, info = env.reset(seed=args.seed, options={"randomize_cookies": False})
-        expert = (
-            A3SameColumnBatchExpert(env)
-            if args.expert == "same_column"
-            else A3CookieBatchExpert(env)
-        )
-        expert.reset()
+        if args.expert == "same_column":
+            expert = A3SameColumnBatchExpert(env)
+        elif args.expert == "cross_column":
+            expert = A3CookieBatchExpert(env)
+        else:
+            expert = A3VariedColumnBatchExpert(env)
+            if args.source_column is not None:
+                expert.requested_source_column_index = args.source_column - 1
+        expert.reset(EpisodeContext(seed=args.seed, task="transfer 10 cookies", action_mode=env.action_mode))
+        if args.expert == "varied_column":
+            print(f"source_column={expert.selected_source_column_index + 1}", flush=True)
         if args.snapshots:
             import mujoco
             from PIL import Image
@@ -137,6 +151,14 @@ def main():
         result = {
             "seed": args.seed,
             "expert_type": args.expert,
+            "source_column_index": (
+                expert.selected_source_column_index
+                if args.expert == "varied_column" else None
+            ),
+            "source_column_number": (
+                expert.selected_source_column_index + 1
+                if args.expert == "varied_column" else None
+            ),
             "success": success,
             "steps": step,
             "wall_seconds": round(time.monotonic() - start, 2),

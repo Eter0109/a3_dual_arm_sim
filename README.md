@@ -1,647 +1,659 @@
 # A3 Dual-Arm MuJoCo Sandbox
 
-An independent, policy-neutral MuJoCo environment for the fourteen-axis A3 dual-arm robot.
-It supports code policies, keyboard teleoperation, canonical action replay, force feedback, and
-LeRobot v3 dataset collection. It does not modify or depend on `vla_ur5e_sim`.
+[中文说明](#中文说明) · [English](#english)
 
-## 中文快速上手
+面向 A3 十四轴双臂机器人的 MuJoCo 仿真、规则 Expert、随机化评估、LeRobot v3
+数据采集与 SmolVLA 训练项目。
 
-本项目已统一为**单盒 5＋5 批量装盒环境**（采用验证跑通的 1 mm 薄指垫与上下倒角配置），并同时保留与支持**两种专家模型**：
-1. **同列版专家（推荐）**：左臂先抓 0–4，再在同列紧接着抓 5–9，闭环读取倾角与缝隙，装满单个小盒（10 块）。
-2. **跨列版专家**：左臂先抓 0–4，再跨列抓 20–24，装满单个小盒（10 块）。
+MuJoCo simulation, scripted experts, randomized evaluation, LeRobot v3 data
+collection, and SmolVLA training for the 14-axis A3 dual-arm robot.
 
-两者均在同一个单盒物理环境（`configs/cookie_batch.yaml`）中运行，右臂停在待命位。
-这是读取仿真真值的闭环规则 Expert，**不是 VLA，也不是通过相机识别饼干**。
+---
 
-### 入口导航
+## 中文说明
 
-| 想做什么 | 推荐入口命令 | 说明 |
-| --- | --- | --- |
-| **同列版 5＋5（0–4、5–9）** | `python -u examples/run_cookie_batch.py --expert same_column --render` | 默认专家，亦可运行 `run_cookie_same_column.py` |
-| **跨列版 5＋5（0–4、20–24）** | `python -u examples/run_cookie_batch.py --expert cross_column --render` | 跨列抓取基线 |
-| 查看单盒初始场景 | `a3-sim run --scene cookie_transfer --policy a3_dual_arm_sim.policy:make_hold_policy --render --no-camera-render` | 机械臂原位待命观察 |
-| 查看三路相机预览 | `MUJOCO_GL=egl python examples/preview_cameras.py` | 渲染正前、左腕、右腕相机快照 |
-| 键盘遥控试操作 | `a3-sim teleop --scene cookie_transfer --no-camera-render` | 手动控制机械臂 |
-| 人工录制示范 | `a3-sim teleop --scene cookie_transfer --record ... --repo-id ...` | 需相机与数据集依赖 |
+### 当前主干是什么
 
-**JSON 评估报告、诊断截图和训练数据集是三件不同的事。** 批次脚本不自动录制，也不支持 `--record`。
+当前 `main` 是一个**单目标盒 5＋5 饼干装盒任务**：
 
-### 单盒环境与配置说明
+- 大源盒内有 4 × 20，共 80 块倒角饼干。
+- 左臂每次夹取 5 块，分两次向 2 × 5 小盒放入 10 块。
+- 默认使用同列 Expert：先搬 0–4，再搬 5–9。
+- 也保留跨列 Expert：先搬 0–4，再搬 20–24。
+- 右臂在当前批量基线中停在待命位。
 
-单盒环境统一采用同列版验证跑通的几何与动力学参数（[`configs/cookie_batch.yaml`](configs/cookie_batch.yaml) / [`configs/cookie_same_column.yaml`](configs/cookie_same_column.yaml)）：
-- **饼干尺寸**：约 50 × 6.333 × 25 mm（厚度缩为 1/3，高度减半）；上缘 2.5 mm 倒角供夹爪导入，下缘 1 mm 倒角增大支撑面。
-- **指垫**：左臂夹爪指垫厚度为 1 mm（半厚度 0.5 mm），可在 2.5 mm 紧密间隙中顺畅插入。
-- **布局**：大源盒 4 × 20 共 80 块，小目标盒 2 × 5 共 10 块。
-- **两种专家自由切换**：统一由 [`examples/run_cookie_batch.py`](examples/run_cookie_batch.py) 的 `--expert {same_column,cross_column}` 控制。
+Expert 会读取 MuJoCo 真值位置、姿态和接触信息，所以它是闭环规则控制器，**不是
+VLA，也不是通过相机识别目标**。它用于验证环境、生成成功示范，并为学习策略提供基线。
 
-### 运行与评估示例
+当前主干已经接通以下完整链路：
 
-```bash
-# 1. 带图形窗口观察同列版（默认）
-python -u examples/run_cookie_batch.py --render --debug --max-steps 6000
+1. 规则 Expert 运行与随机化评估。
+2. 三路 RGB 相机和机器人状态采集。
+3. 只保存成功 episode 的 LeRobot v3 数据集。
+4. 数据格式与成功标记审计。
+5. 使用本地 SmolVLA 基座进行微调。
+6. 通过统一 Policy 接口加载 checkpoint 并闭环运行或评估。
 
-# 2. 带图形窗口观察跨列版
-python -u examples/run_cookie_batch.py --expert cross_column --render --debug --max-steps 6000
+> 当前 `main` 不包含此前实验性的双盒接力文件。双盒并不是当前主干任务。
 
-# 3. 后台无窗口快速评估同列版并输出 JSON 报告
-python -u examples/run_cookie_batch.py --expert same_column --seed 0 --max-steps 6000 \
-  --output artifacts/cookie_batch_eval.json
-```
-
-### 安装与可视化
-
-以下命令在仓库根目录执行。已有环境的 WSL 用户先运行 `conda activate a3sim`。
-仅运行仿真和测试不需要安装 LeRobot：
-
-```bash
-python -m pip install -e ".[dev]"
-
-# 原版跨列 5＋5；默认读取 configs/cookie_batch.yaml，不录制数据。
-unset MUJOCO_GL
-python -u examples/run_cookie_batch.py --render --max-steps 6000
-
-# 同列 5＋5；使用独立的 configs/cookie_same_column.yaml。
-python -u examples/run_cookie_same_column.py --render --max-steps 6000
-```
-
-窗口中鼠标左键拖动旋转视角，右键拖动平移，滚轮缩放。
-`unset MUJOCO_GL` 是清除离屏渲染设置，不是修复 WSLg 的命令；如果窗口仍不显示，
-需要单独检查 WSLg/显示驱动。该演示默认不读取三路相机 RGB，图形窗口只用于观察。
-
-### 不开窗口，保存结果
-
-```bash
-python -u examples/run_cookie_same_column.py --seed 0 --max-steps 6000 \
-  --output artifacts/my_cookie_batch_eval.json
-
-# 可选：阶段截图，用于诊断，不是训练数据。
-MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
-  --snapshots artifacts/batch_snapshots --debug
-
-# 查看所有可用参数。
-python examples/run_cookie_same_column.py --help
-```
-
-成功应同时看到 `success: true`、`phase: DONE`、目标盒 10 块、源盒 70 块，
-以及两批的 `lifted: 5` 和 `released: true`。脚本成功返回 0，失败或超步数返回 1。
-仅“夹起来了”或“曾经放进去过”不算最终成功。
-
-### 这次具体改了什么
-
-以下改动指独立的同列版本；原 `run_cookie_batch.py`、`cookie_batch.yaml`
-和原批次专家保留为跨列基线。
-
-- **模型**：饼干约 50 × 6.333 × 25 mm；上缘保留 2.5 mm 倒角供夹爪导入，
-  batch 下缘改为 1 mm 倒角以扩大落地支撑面。箱体核心＋上下倒角碰撞体保留真实接触，
-  不把饼干绑定到夹爪。仅 batch 配置把左指垫厚度改为 1 mm；其他场景仍用原尺寸。
-- **场景**：仍为 4 × 20 共 80 块；batch 的间隙改为 2.5 mm，未预留整根手指宽的通道。
-  目标盒加宽并移到左臂可达位置，放在桌上；原默认场景的 0.4 mm 间隙保留。
-- **闭环控制**：读取实际位置、姿态、接触和抬升情况，依次选择同一列的 0–4、5–9，
-  先保持张开接近抓取点上方，再把夹爪预闭合到批次宽度并确认实测开度稳定，随后插入、
-  夹紧、验证抬升、搬运、释放、稳定检查后再选下一批。
-  第二批若倾斜，会先尝试低力拨正，再使夹爪沿实测倾角进入；后侧指垫以第 9、10 块
-  间的实测缝隙为基准保持位置，由前侧指垫收拢。若缝隙实际小于指垫厚度则停止，
-  不穿模、不预留专门空道，也不自动切换到另一列冒充同列成功。
-- **物理参数**：batch 默认物理 1000 Hz、控制 20 Hz、滑动摩擦系数 0.8。
-  摩擦在整个过程保持不变；插入阶段单侧指垫连续三个控制周期超过 20 N 会失败退出。
-  这些均为仿真参数，并非真实硬件的标定值或安全保证。
-- **判定**：要求十块释放后直立、稳定、完整进入小盒，源盒仍有七十块；
-  不再要求 batch 满足旧任务的精确槽位／四面贴壁条件。
-
-### 已验证的结果与限制
-
-`artifacts/cookie_batch_baseline_seed0.json` 保存的是此前固定布局 seed 0 的 5＋5
-基线：1844 个控制步、目标盒 10 块、源盒 70 块；两批为 ID 0–4 与 20–24，最大指垫力
-约 4.48 N。当前同列版本的 seed 0 无窗口实测见
-`artifacts/cookie_batch_same_column_seed0.json`：1860 控制步、目标盒 10 块、源盒
-70 块，先抓 ID 0–4，再抓同列 ID 5–9；两批均 `lifted: 5`、`released: true`，
-最大指垫力约 1.37 N。第一批后剩余饼干保持直立，因而**这轮验证的是同列搬运，
-不是倾倒后的倾角抓取成功**。倾斜抓取分支目前仍属于实验性功能。
-
-![5＋5 完成后的仿真画面](artifacts/cookie_batch_5plus5.png)
-
-上图来自旧固定布局的诊断运行。**这不是当前版本或随机布局的成功率**：目前只改 seed 不会改变饼干布局，
-也不保证任选五块、换尺寸或换摆放后仍能成功。源盒中部分剩余饼干可能倾倒。
-开发时一轮无窗口运行约 21 分钟，对应约 92 秒仿真时间，当时还有另一轮诊断运行并行；
-这不是独占机器的性能基准。当前优先验证接触与搬运，尚未优化到实时，暂不建议直接大规模采集。
-
-### 文件导航与回归检查
-
-| 文件 | 主要作用 |
-| --- | --- |
-| [configs/cookie_batch.yaml](configs/cookie_batch.yaml) | 统一单盒 5＋5 批量场景配置（薄指垫、倒角饼干、单目标盒） |
-| [configs/cookie_same_column.yaml](configs/cookie_same_column.yaml) | 同列版等价配置链接/别名 |
-| [examples/run_cookie_batch.py](examples/run_cookie_batch.py) | 单盒批量演示统一入口，支持 `--expert same_column` 与 `--expert cross_column` |
-| [examples/run_cookie_same_column.py](examples/run_cookie_same_column.py) | 同列 0–4、5–9 演示、结果 JSON、诊断截图 |
-| [src/a3_dual_arm_sim/batch_expert.py](src/a3_dual_arm_sim/batch_expert.py) | 跨列批次专家（0–4，再 20–24） |
-| [src/a3_dual_arm_sim/same_column_batch_expert.py](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批次专家（0–4，再 5–9）与倾斜自适应抓取逻辑 |
-| [src/a3_dual_arm_sim/model.py](src/a3_dual_arm_sim/model.py) | MuJoCo 单盒场景与倒角碰撞模型生成 |
-| [src/a3_dual_arm_sim/cookie_transfer.py](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干任务、接触查询、计数与成功判定 |
-| [src/a3_dual_arm_sim/config.py](src/a3_dual_arm_sim/config.py)、[configs/default.yaml](configs/default.yaml) | 配置定义与基础参数 |
-| [src/a3_dual_arm_sim/expert.py](src/a3_dual_arm_sim/expert.py) | 基础 Expert 接口与运动学规划 |
-| [tests/test_cookie_batch.py](tests/test_cookie_batch.py) | 跨列批次专家与单盒抓取几何回归测试 |
-| [tests/test_cookie_same_column.py](tests/test_cookie_same_column.py) | 同列版选取、接触链、失败保护等回归测试 |
-
-```bash
-python -m pytest tests/test_cookie_batch.py tests/test_cookie_same_column.py tests/test_model.py -q
-```
-
-这组单盒回归测试全部通过（33 项以上通过）。
-下文保留通用接口与训练说明：
-[动作与观测](#action-and-observation-contract) ·
-[策略与数据采集](#replaceable-policies-and-collection) ·
-[SmolVLA](#grasp-expert-and-smolvla) ·
-[遥控](#keyboard-teleoperation) ·
-[Batch 技术细节](#beveled-cookie-batch-expert-experimental)。
-
-## What is modeled
-
-- Seven URDF joints per arm, using the source link geometry, mass/inertia, limits, velocity, and
-  effort values.
-- Robotiq 2F-85 grippers using vendored robosuite visual meshes and an 85 mm, single-opening
-  simplified parallel-jaw collision model. Each gripper exposes two fingertip touch signals,
-  actuator force, and a wrist six-axis force/torque signal.
-- Front, left-wrist, and right-wrist `256x256` RGB cameras.
-- A central mast matching the photographed overhead mounting, a tabletop, deterministic reset,
-  position control, rate limiting, and an emergency stop.
-- Two separate scenes: the original three-object sandbox and a video-inspired cookie packing task
-  with a `4x20` source bin, a `2x5` target box, and eighty upright thin cookie proxies.
-
-The two source files `L_LAST_S.STL` and `R_LAST_S.STL` are invalid header-only files and are not
-used. The arm STL files are visual geometry; conservative capsules are used for collision.
-
-This is a **functional sandbox**, not a calibrated digital twin. The supplied robot package has
-no motor transmission model, identified damping/friction, calibrated zero pose, controller gains,
-camera calibration, or gripper calibration. The 2F-85 appearance comes from robosuite's MIT-licensed
-meshes, but its linkage dynamics are intentionally reduced to synchronized parallel jaw travel.
-Defaults are centralized in `configs/default.yaml` so they can later be replaced with measured parameters. Robot self-collision is also omitted in v1;
-robot-to-table and robot-to-object contacts remain active.
-
-## Install and inspect
-
-Python 3.10+ and MuJoCo 3.3+ are supported. LeRobot is optional unless recording, replaying,
-or training.
-
-```bash
-
-cd a3_dual_arm_sim/
-# Simulation and tests only:
-python -m pip install -e ".[dev]"
-# Add dataset support only when needed:
-python -m pip install -e ".[dataset,dev]"
-# Add the training extra when using SmolVLA:
-python -m pip install -e ".[train,dev]"
-
-a3-sim inspect --write-xml models/a3_generated.xml
-MUJOCO_GL=egl a3-sim smoke --steps 1000
-
-# Compile and headlessly stabilize the cookie-transfer variant.
-a3-sim inspect --scene cookie_transfer
-MUJOCO_GL=egl a3-sim smoke --scene cookie_transfer --steps 1000
-```
-
-Use `MUJOCO_GL=egl` for headless execution. Do not set it when your platform requires a different
-interactive OpenGL backend.
-
-The editable install includes Pillow, Matplotlib, and OpenCV for camera inspection and future live
-viewers. Save a labeled snapshot of all three policy cameras, or add `--show` to open it interactively:
-
-```bash
-MUJOCO_GL=egl python examples/preview_cameras.py
-MUJOCO_GL=egl python examples/preview_cameras.py --show
-```
-
-The output directory contains the three original `256x256` frames plus `all_cameras.png`.
-
-## Rendering modes
-
-Use viewer-only mode while checking teleoperation. It opens a dedicated A3 control panel beside
-MuJoCo's display-only Human Viewer, skips all three Policy RGB render passes, and does not record a
-dataset:
-
-```bash
-unset MUJOCO_GL
-a3-sim teleop --scene cookie_transfer --no-camera-render --steps 1000
-```
-
-The observation keys and shapes remain unchanged in this mode, but the three images are black. This
-keeps state-only policies and the runner contract stable while avoiding the expensive offscreen GL
-work. `--no-camera-render` is available on both `run` and `teleop`.
-
-Use headless capture/policy mode when images are required. Leave camera rendering enabled (the
-default), keep the Human Viewer off, and select EGL before the process starts:
-
-```bash
-MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
-  --policy your_package.your_policy:make_policy \
-  --record outputs/datasets/a3_cookie_policy \
-  --repo-id local/a3-cookie-policy --steps 1000
-```
-
-The CLI rejects `--no-camera-render` together with `--record` so an accidental debug launch cannot
-write a dataset containing black camera streams. Manual keyboard collection is the necessary
-exception to the viewer-off rule: `teleop --record ...` keeps both the Human Viewer and Policy RGB
-on; keyboard input comes from the dedicated A3 control panel, not the viewer.
-
-On the current Python 3.13/MuJoCo/GLFW combination, a process that has owned both the interactive
-viewer and offscreen camera renderer can otherwise segfault during interpreter shutdown even after
-both contexts were explicitly closed. Interactive CLI commands therefore flush/close all project
-state and bypass only that faulty native-library finalization step; their real exit status is still
-preserved. This workaround is local to the CLI and can be removed after the native stack is upgraded.
-
-## Action and observation contract
-
-The canonical `joint_position` action is a physical 16-vector:
+### 系统架构
 
 ```text
-[L_q1..L_q7, L_gripper, R_q1..R_q7, R_gripper]
+规则 Expert / 键盘遥控 / SmolVLA / 自定义 Policy
+                         │
+                         ▼
+        统一 Policy 接口：reset / act / close
+                         │
+          ┌──────────────┴──────────────┐
+          │                             │
+  14-D Cartesian delta          16-D joint target
+          │                             │
+          └──────► IK 与安全限幅 ◄─────┘
+                         │
+                         ▼
+                 MuJoCo A3 环境
+                         │
+            ┌────────────┴────────────┐
+            ▼                         ▼
+      固定 observation            LeRobot v3 Recorder
 ```
 
-Arm values are radians and grippers are normalized opening in `[0, 1]`. The optional normalized
-`cartesian_delta` adapter accepts:
+核心数据约定：
 
-```text
-[L_dx..L_dRz, L_gripper, R_dx..R_dRz, R_gripper]
-```
-
-Cartesian values are in `[-1, 1]`; gripper `-1` is closed and `+1` is open. Damped least-squares
-IK maps them to the canonical joint targets. Every recorder stores the post-IK, safety-limited
-16-vector so scripted, teleoperated, and learned episodes can be mixed.
-
-Each observation contains:
-
-| Key | Shape | Meaning |
+| 数据 | 形状 | 内容 |
 | --- | ---: | --- |
-| `observation.images.front` | `256x256x3` | front RGB |
-| `observation.images.left_wrist` | `256x256x3` | left wrist RGB |
-| `observation.images.right_wrist` | `256x256x3` | right wrist RGB |
-| `observation.state` | `16` | logical arm joints and gripper openings |
-| `observation.velocity` | `16` | matching velocities |
-| `observation.eef_pose` | `14` | two positions and quaternions |
-| `observation.force` | `18` | 12-D wrist wrench, four touch, two gripper forces |
-| `time`, `safety_stop` | scalar | simulator time and safety state |
+| `observation.images.front` | 256 × 256 × 3 | 固定前视 RGB |
+| `observation.images.left_wrist` | 256 × 256 × 3 | 左腕 RGB |
+| `observation.images.right_wrist` | 256 × 256 × 3 | 右腕 RGB |
+| `observation.state` | 16 | 左 7 关节＋左夹爪＋右 7 关节＋右夹爪 |
+| `observation.velocity` | 16 | 对应速度 |
+| `observation.eef_pose` | 14 | 双臂末端位置与四元数 |
+| `observation.force` | 18 | 双腕力/力矩、四个指尖触觉和夹爪力 |
+| `action` | 16 | 实际送入仿真的绝对关节/夹爪目标 |
 
-## Replaceable policies and collection
+Expert 内部产生 14 维末端增量动作，但 Recorder 保存经过 IK、关节限制和速率限制后的
+16 维实际动作。训练和部署使用同一套 16 维动作定义。
 
-A plugin is a zero-argument factory returning an object with `action_mode`, `reset(context)`,
-`act(observation, task)`, and `close()`:
+### Windows 安装
 
-```bash
-# Included code controller
-MUJOCO_GL=egl a3-sim run \
-  --policy a3_dual_arm_sim.policy:make_sine_policy \
-  --task "exercise both shoulders" --steps 200
+项目当前位于：
 
-# Collect a new LeRobot v3 episode (existing non-empty roots are protected)
-MUJOCO_GL=egl a3-sim run \
-  --policy a3_dual_arm_sim.examples.custom_policy:make_policy \
-  --record datasets/a3_scripted --repo-id local/a3-scripted --steps 200
-
-a3-sim replay --root datasets/a3_scripted --repo-id local/a3-scripted --episode 0 --render
+```text
+D:\download\a3_dual_arm_sim
 ```
 
-The adapter boundary is also used by the included SmolVLA wrapper; another VLA can implement the
-same four methods without changing the environment, runner, or recorder.
+推荐使用 Python 3.10 或 3.11。PowerShell：
 
-### Collect the randomized single-box benchmark
-
-The same-column expert can collect 100 successful single-box demonstrations directly in the
-LeRobot v3 format used by the included SmolVLA adapter:
-
-```bash
-MUJOCO_GL=egl python -u examples/collect_cookie_benchmark.py --episodes 100
+```powershell
+cd D:\download\a3_dual_arm_sim
+conda create -n a3sim python=3.10 -y
+conda activate a3sim
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 ```
 
-The default output is resolved from the project root as
-`datasets/a3_single_box_same_column_100`; no machine-specific path is embedded in the collector.
-Use `--root` or `--config` to override either path. The benchmark retains its randomized source
-and target boxes and Cookie jitter, advances seeds after every attempt, discards unsuccessful
-episodes, and stops after five consecutive failures for inspection.
+按需要安装额外能力：
 
-The expert produces Cartesian deltas, while every stored `action` is the post-IK and safety-limited
-16-D absolute `joint_position` target actually sent to the simulator. This matches the SmolVLA
-deployment interface. The dataset also contains three RGB cameras, 16-D measured state and
-velocity, 14-D end-effector pose, 18-D force feedback, the task instruction, and per-episode source
-action metadata.
+```powershell
+# 仅录制、读取和回放 LeRobot 数据集
+python -m pip install -e ".[dataset,dev]"
 
-Press Ctrl+C once to request a clean stop after the current episode. Resume a finalized partial
-dataset without overwriting it:
-
-```bash
-MUJOCO_GL=egl python -u examples/collect_cookie_benchmark.py \
-  --episodes 100 --resume
+# SmolVLA 训练与推理；已经包含数据集依赖
+python -m pip install -e ".[train,dev]"
 ```
 
-The collector validates the configuration before resuming and runs the SmolVLA dataset contract
-audit after all requested episodes are saved. `attempts.jsonl` records both successful and failed
-attempts; only successful episodes enter the LeRobot dataset.
+原生 Windows 不需要设置 `MUJOCO_GL`。Linux/WSL 无窗口渲染时可使用
+`MUJOCO_GL=egl`。
 
-## Cookie transfer scene
+### 1. 基础检查与相机预览
 
-This section describes the **default / legacy single-Cookie configuration**.
-The batch configuration overrides spacing, box geometry and support, contact settings,
-and success criteria; see [the batch baseline](#beveled-cookie-batch-expert-experimental).
+```powershell
+# 编译模型并打印关节、执行器和传感器信息
+a3-sim inspect --scene cookie_transfer
 
-`A3CookieTransferEnv` is a separate task variant based on the supplied deployment photograph and
-4.8-second packing video. The A3 base is carried by a central dark mast, the arms start in a hanging
-ready pose mirrored about the central stand. Eighty cookie proxies begin upright in four columns
-of twenty. Each piece is 50 mm wide, 6.333 mm thick, and 25 mm high (one-third of the
-previous thickness and half the previous height); mass scales by the same volume ratio to
-5.83 g. Their upper and lower long edges have a configurable 2.5 mm, 45-degree
-bevel in both the visible and collision meshes, while the full middle remains
-6.33 mm thick. Adjacent pieces still have only 0.4 mm clearance at the middle;
-the bevel guides finger contact but does not by itself guarantee a collision-free
-insertion. The source cavity is approximately
-207.2 × 140.27 mm, leaving 3 mm between the packed array and each wall;
-the empty destination cavity is 100.4 × 33.27 mm with 2 × 5 slots.
-Both boxes sit toward the right arm (world -y); the destination's two columns align
-with source columns 0/1, with matching row pitch and grid alignment.
-Source walls rise 30 mm above the inside floor; destination walls rise 25 mm,
-matching cookie height. Their geometry includes an additional 6 mm below the floor top.
-Box walls overlap at all four corners,
-so there are no corner escape gaps. Both boxes use the same uniform light-gray material while the
-cookie proxies alternate between two yellow-orange shades, making adjacent tightly packed pieces
-visually separable without debug markers. Look down into the boxes using the rotatable
-viewer to inspect the pieces behind the raised walls. The
-source material provides no metric calibration, so stand, bin, camera, and cookie dimensions are
-explicit approximations rather than claimed real-world measurements.
+# 无窗口稳定性检查
+a3-sim smoke --scene cookie_transfer --config configs\cookie_batch.yaml --steps 200
 
-Success is not inferred from an arm waypoint. Exactly ten complete pieces must be upright and stable
-inside the target box, with one piece assigned to each `2x5` slot and the packed array reaching all
-four inner walls, while the other seventy remain in the source bin. This exact fill must persist below the linear/angular speed limits for 20 consecutive
-control steps (one second). Counts, per-piece masks, slot occupancy, and the hold counter are reported
-in `info`; they remain privileged task/evaluation state and are not added to the policy observation.
-
-```bash
-# Open the scene with a stationary policy for visual inspection.
-unset MUJOCO_GL
-a3-sim run --scene cookie_transfer \
-  --policy a3_dual_arm_sim.policy:make_hold_policy --render --steps 1000
-
-# Keyboard demonstration, saved through the same canonical 16-D recorder.
-a3-sim teleop --scene cookie_transfer \
-  --task "transfer exactly ten upright square cookie blocks into the 2x5 box" \
-  --record outputs/datasets/a3_cookie_manual \
-  --repo-id local/a3-cookie-manual --steps 1000
-
-# Any code or VLA policy uses exactly the same scene/runner boundary.
-MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
-  --policy your_package.your_policy:make_policy \
-  --task "transfer exactly ten upright square cookie blocks into the 2x5 box" \
-  --record outputs/datasets/a3_cookie_policy \
-  --repo-id local/a3-cookie-policy --steps 1000
+# 保存三路策略相机图片，并打开合成预览
+python examples\preview_cameras.py --scene cookie_transfer --config configs\cookie_batch.yaml --output outputs\camera_preview --show
 ```
 
-`A3CookieTransferExpert` is a privileged, feedback-driven state machine rather than a VLA. It
-replans one Cookie at a time, verifies grasp/lift/release/slot outcomes from simulator truth, and
-retries failed phases. These privileged checks are Expert-only and are not added to policy
-observations.
+相机参数仍是原型估计值，不是标定结果。
 
-Run one visible demonstration or a headless evaluation report with:
+### 2. 运行单盒 5＋5 Expert
 
-```bash
-python examples/run_cookie_transfer.py --render
-python examples/evaluate_cookie_transfer.py --seeds 0-19 \
-  --output artifacts/cookie_transfer_dev.json
-python examples/evaluate_cookie_transfer.py --seeds 100-119 \
-  --output artifacts/cookie_transfer_validation.json
+同列版是默认方案：
+
+```powershell
+python -u examples\run_cookie_batch.py --expert same_column --render --debug --max-steps 1000
 ```
 
-The JSON report records success, verified grasp/lift, transfer drops, completed Cookies, failed
-Cookie and phase, failure reason, maximum left-gripper touch force, steps, final source/target
-counts, slot occupancy, and retries. With the current zero pose-noise configuration, different
-seeds intentionally share the same layout; seed sweeps become meaningful after noise is enabled.
+跨列版：
 
-## Grasp expert and SmolVLA
-
-`A3GraspEnv` randomizes a red cube in the reachable left-arm workspace. Its success check is
-physical rather than waypoint-based: both fingers must contact the cube, the cube must be centered
-inside the gripper and clear of the table, and it must remain at least 8 cm above its reset height
-with low linear/angular velocity for 20 consecutive control steps (one second). `A3GraspExpert`
-computes absolute joint waypoints with MuJoCo kinematics and then executes approach, two-finger
-closure, lift, and stable-hold phases. Object pose is privileged only to the scripted expert and is
-not part of the policy observation.
-
-Collect only successful demonstrations (failed attempts are discarded):
-
-```bash
-MUJOCO_GL=egl a3-sim collect-grasp \
-  --root outputs/datasets/a3_grasp_100 \
-  --repo-id local/a3-grasp-100 --episodes 100 --seed 0
+```powershell
+python -u examples\run_cookie_batch.py --expert cross_column --render --debug --max-steps 1000
 ```
 
-Every training launch first rejects non-v3 data, wrong camera/state/action shapes, inconsistent
-episode metadata, and unsuccessful episodes. The A3 adapter changes the supplied SmolVLA base from
-its original 10-D state, 7-D action, and two cameras to the A3 16-D state, 16-D action, and three
-cameras. SmolVLA already pads state and action to 32 internally, so this does not change learned
-weight shapes. The large base weights are symlinked into a generated runtime view instead of copied.
+四列随机（由 `--seed` 决定）或指定第 3 列观察动作：
 
-For the single-box dataset, use
-`datasets/a3_single_box_same_column_100` with repo ID
-`local/a3-single-box-same-column-100` in the same `train-smolvla` command below.
-
-```bash
-# Inspect the exact command and feature contract without starting training.
-a3-sim train-smolvla \
-  --root outputs/datasets/a3_grasp_100 --repo-id local/a3-grasp-100 \
-  --output outputs/train/a3_grasp_smolvla --dry-run
-
-# Formal GPU run. The default base checkpoint is the sibling reference repository's local asset;
-# use --model /path/to/pretrained_model to select another compatible SmolVLA checkpoint.
-a3-sim train-smolvla \
-  --root outputs/datasets/a3_grasp_100 --repo-id local/a3-grasp-100 \
-  --output outputs/train/a3_grasp_smolvla \
-  --steps 20000 --batch-size 4 --device cuda
+```powershell
+python -u examples\run_cookie_batch.py --expert varied_column --seed 0 --render --max-steps 1000
+python -u examples\run_cookie_batch.py --expert varied_column --source-column 3 --render --max-steps 1000
 ```
 
-Run a saved checkpoint through the same `EpisodeRunner` policy interface:
+这些命令只运行 Expert 并输出评估结果，**不会录制训练数据**。无窗口运行时删除
+`--render`，通常更快。单次成功需要最终目标盒中恰好有 10 块已释放、直立、稳定且
+被盒体包含，源盒剩余 70 块。
 
-```bash
-export A3_SMOLVLA_CHECKPOINT="$PWD/outputs/train/a3_grasp_smolvla/checkpoints/last/pretrained_model"
-export A3_SMOLVLA_DATASET_ROOT="$PWD/outputs/datasets/a3_grasp_100"
-export A3_SMOLVLA_REPO_ID="local/a3-grasp-100"
-export A3_SMOLVLA_DEVICE="cuda"
-MUJOCO_GL=egl a3-sim run \
-  --policy a3_dual_arm_sim.smolvla_policy:make_policy \
-  --task "pick up the red cube" --steps 300
+### 3. 随机化评估
+
+```powershell
+python -u examples\benchmark_cookie_batch.py --compare --episodes 20 --seed-start 0 --workers 4 --output artifacts\benchmark_results_local.json
 ```
 
-The one-step smoke proves loading, preprocessing, forward/backward, optimizer update, and checkpoint
-serialization only. It is not evidence that the model learned the task. A meaningful run needs many
-diverse successful demonstrations, held-out seeds, full training, and closed-loop success evaluation.
-On the current host PyTorch reports no usable CUDA driver, so long CPU training is intentionally not
-presented as the recommended workflow. TorchCodec may also warn on this installation; the recorder
-and trainer explicitly use the available PyAV image path.
+`20/20` 表示**同一个单盒任务独立 reset 并运行 20 个 episode，20 次全部成功**，
+不是一个场景中有 20 个盒子。比较模式会分别为同列和跨列 Expert 各运行 20 次。
 
-## Keyboard teleoperation
+默认评估包含：
 
-Idle Cartesian arms retain their last commanded joint positions, including while
-recording or controlling only the other arm. The cookie scene uses ideal model-based
-arm gravity compensation, routed through force-limited joints; payload tracking
-error can still occur. This is a simulator approximation requiring real calibration.
+- 源盒和目标盒位置各自最多约 ±1 cm 扰动。
+- 目标盒小角度偏航扰动。
+- 每块饼干 0.3 mm 位置扰动和 0.015 rad 偏航扰动。
+- 每轮按进入目标盒的数量计 0–10 分，同时记录成功率、步数、耗时和失败原因。
 
-The cookie scene starts with both tool axes pointing down, a 1.10 m base height,
-and separated bins. The target bin is a free rigid body initially resting on the
-table; it follows the right gripper only through contact, never through a weld or
-kinematic attachment. The legacy cooperative expert first approaches its near rim, verifies both
-finger contacts, raises it 3 cm, and commands an 8-degree tilt. The left arm then
-transfers cookies while the right arm holds its grasp. Missing support or unstable
-released cookies are reported as failures, not counted as completed transfers.
+仓库中的
+[`artifacts/benchmark_results.json`](artifacts/benchmark_results.json)
+报告 seeds 0–19 上：
 
-Tune `cookie_transfer.base_height_m`, `deployment_home`,
-`target_bin_world_position_m`, `box_lift_m`, `box_tilt_deg`, `right_grasp_pitch_deg`, and the two
-`*_gripper_kp` values in `configs/default.yaml`. These gains, contact parameters,
-box mass, and mount dimensions are prototype estimates. Changing mount height
-requires solving a compatible home pose again. The old `target_bin_attach_*`
-fields are retained for right wrist camera compatibility; they no longer attach
-the box to the arm.
+| Expert | 成功 episode | 平均步数 | 平均耗时 |
+| --- | ---: | ---: | ---: |
+| same-column | 20/20 | 429.6 | 63.13 s |
+| cross-column | 20/20 | 425.9 | 60.83 s |
 
-Cooperative expert preview (experimental, **not a verified ten-cookie expert**).
-The new thin 80-cookie scene changes grasp clearances and box dimensions; the
-existing expert's grasp waypoints still need retuning for this layout. Use the hold
-policy or teleoperation to inspect the updated environment.
+这是规则 Expert 的单盒结果，不是已训练 VLA 的成功率。
 
-```bash
-# Run from the repository root.
-unset MUJOCO_GL
-python examples/run_cookie_transfer.py \
-  --config configs/cookie_cooperative.yaml --render --max-steps 6000
+### 4. 采集单盒训练数据
+
+安装 `dataset` 或 `train` 依赖后运行：
+
+```powershell
+python -u examples\collect_cookie_benchmark.py --episodes 100
 ```
 
-The viewer starts in free-camera mode at the front oblique viewpoint: left-drag
-rotates, right-drag pans, and the wheel zooms. This does not change recorded policy
-camera poses. The current contact-based expert still encounters interference in
-the near rows. It stops on support loss, disturbed previously packed cookies, or
-placement timeout, rather than sweeping back through the loaded box. Check final
-`Success` and `Cookies in Target Bin`; a historical verified placement is not proof
-that the cookie remains packed. Do not use failed attempts as successful training
-demonstrations. The ideal gravity compensation and simplified Robotiq jaws are
-simulation approximations, not real-hardware controller calibration.
+默认输出：
 
-Historical regression on the previous 30-cookie layout (`--max-steps 6000`) stopped at step 2412:
-six historical verified placements, five cookies passing final containment checks,
-and `success=false` after a packed cookie was disturbed. Right box support remained
-verified (about 9.9 degrees tilt). The report is
-`artifacts/cooperative_guarded_seed0.json`; this is a partial failure result, not
-a ten-cookie success-rate benchmark.
-
-```bash
-a3-sim teleop --record datasets/a3_manual --repo-id local/a3-manual \
-  --task "manual tabletop demonstration"
+```text
+datasets/a3_single_box_same_column_100
+repo-id: local/a3-single-box-same-column-100
 ```
 
-Teleoperation opens two windows. Keep keyboard focus on **A3 Teleoperation Control**; use the MuJoCo
-Viewer only to watch the robot or adjust the viewing camera with the mouse. This prevents movement
-keys from activating MuJoCo's built-in wireframe, joint, geometry-group, and pause shortcuts. The
-control panel also provides press-and-hold buttons, arm selection, a speed slider, gripper controls,
-recording status, normal/discard exits, and a red emergency-stop button.
+采集器会：
 
-- `1`, `2`, `3`: select left, right, or both arms
-- `W/S`, `A/D`, `R/F`: world-frame `+X/-X`, `+Y/-Y`, `+Z/-Z` translation
-- `I/K`, `J/L`, `U/O`: world-frame `+Rx/-Rx`, `+Ry/-Ry`, `+Rz/-Rz` rotation
-- `[` / `]`: close / open gripper
-- `P`: pause/resume recording; `Space`: emergency stop
-- `Q`: save and quit; `X`: discard and quit
+- 使用随机化后的同列 Expert。
+- 渲染并保存三路策略相机。
+- 记录 16-D 状态、速度、14-D 末端位姿和 18-D 力反馈。
+- 保存经过 IK 与安全限制后的 16-D `joint_position` 动作。
+- 将失败尝试写入 `attempts.jsonl`，但不放入训练数据集。
+- 连续失败 5 次时停止，要求先检查环境。
+- 完成后自动审计 LeRobot v3 schema、相机尺寸、动作维度和成功标记。
 
-Keyboard and panel buttons keep moving while held and stop on release. The mouse keeps MuJoCo's
-standard orbit, pan, and zoom behavior for inspecting the scene.
+按一次 Ctrl+C 会在当前 episode 完成后干净停止。继续未完成的数据集：
 
-Episode metadata is stored in `a3_episode_metadata.jsonl`, including source controller, source
-action mode, canonical stored action mode, seed, task, frame count, and optional success label.
-
-## Beveled-Cookie batch expert (experimental)
-
-`run_cookie_batch.py` preserves the original 0–4 then 20–24 five-at-a-time
-baseline. `run_cookie_same_column.py` is the separate 0–4 then 5–9 version;
-`run_cookie_transfer.py` still runs the single-Cookie expert.
-
-```bash
-# Interactive trial; does NOT record a training dataset.
-unset MUJOCO_GL
-python -u examples/run_cookie_batch.py --render
-
-# Same source column, with its own expert and config.
-python -u examples/run_cookie_same_column.py --render
-
-# Headless evaluation; write only the requested JSON result.
-python -u examples/run_cookie_same_column.py --seed 0 --output artifacts/batch_eval_seed0.json
-
-# Controlled parameter comparison; the coefficient stays constant throughout.
-python -u examples/run_cookie_same_column.py --sliding-friction 0.8 --physics-hz 1000
-
-# Optional diagnostic screenshots (not training observations).
-MUJOCO_GL=egl python -u examples/run_cookie_same_column.py \
-  --snapshots artifacts/batch_snapshots --debug
+```powershell
+python -u examples\collect_cookie_benchmark.py --episodes 100 --resume
 ```
 
-The same-column configuration is `configs/cookie_same_column.yaml`. Cookie dimensions are
-unchanged. The upper bevel remains 2.5 mm; the lower bevel is 1 mm to widen
-the uniform support base. Only this batch configuration uses a 1 mm left
-fingertip; the other grippers retain their original pad geometry. The source
-has 80 Cookies, with a uniform initial 2.5 mm gap instead of 0.4 mm; there are
-**no pre-cut finger-width lanes**. The left gripper
-first reaches the pose above the Cookies with fully open jaws, then pre-closes
-to the computed five-Cookie width and waits for the measured opening to settle.
-It descends slowly through the bevels, compresses five neighbouring Cookies, checks
-a contact chain through all five, and verifies that each actually rises. The
-second batch must take the next five from the same source column. If they tip,
-the controller first attempts low-force base straightening, then aligns the
-gripper with the measured tilt and descends along the Cookie axis. It measures
-the actual gap after the fifth Cookie and anchors the far pad in that gap while
-closing the near pad. If the gap is narrower than the pad, it reports failure
-instead of penetrating the neighbour or quietly switching columns.
-Insertion stops if either pad exceeds 20 N for three consecutive control ticks;
-this is a simulation guard, not a calibrated real-hardware force limit.
-The target box is widened to leave space for the fingers to open and retract.
-Its table position is moved to (0.095, 0.100, 0.753) m so both columns are
-reachable with a vertical left-hand grasp. The expert checks both placement
-columns at low/high clearance before grasping; joint limits are not relaxed.
+需要更丰富的新数据时，用独立的多样化采集配置（不会改写上面的 100 组数据）：
 
-The batch uses an exact compound collision solid (box core plus upper/lower
-beveled mesh caps), preserving the visible shape and total collision mass.
-All pieces are included in finger/contact-chain detection. Sliding friction is
-0.8; it is constant through insertion and transport, not switched per phase.
-Thin stacked Cookies require tighter contact settings and a smaller integration
-step: this configuration uses 1000 Hz physics and 20 Hz control. These are
-simulation settings, not measured hardware/material calibration. Camera RGB
-rendering remains disabled during the trial, apart from explicitly requested
-diagnostic screenshots.
+```powershell
+python -u examples\collect_cookie_benchmark.py --profile diverse --episodes 100
+# 中途停止后继续同一批数据
+python -u examples\collect_cookie_benchmark.py --profile diverse --episodes 100 --resume
+```
 
-Success requires exactly ten Cookies released, upright, settled and geometrically
-inside the target, with seventy left in the source. The old exact-slot/wall-touch
-criterion is retained for the original task but is not required by this batch
-trial. A reported lift is not a successful placement. Read the final JSON
-`success`, `batches` and `failure_reason`; failed trials must not be labelled as
-successful demonstrations. The controller uses simulator truth, not a VLA, and
-never attaches or teleports Cookies during execution.
+它写入 `datasets/a3_single_box_diverse`（repo-id 为
+`local/a3-single-box-diverse`）。每个 seed 会改变大小盒位置、小盒角度、饼干
+初始姿态、三路相机位置/视角、灯光和颜色；此命令仍抓第一列。失败尝试
+只进 `attempts.jsonl`，不会混入训练数据。`collection_summary.json` 记录配置，恢复
+采集时会检查配置一致性。正在运行的训练仍使用启动时指定的旧数据集；要利用新数据，
+需要另行启动训练或续训。
 
-This batch trial intentionally uses a **tabletop target box**, with the right
-arm parked. Two top-down 2F85 housings interfere around the small box opening;
-continuous right-arm box holding is therefore not part of this baseline.
-The original cooperative single-Cookie example remains available separately.
-The runner currently fixes the Cookie layout: changing the seed alone is not a
-random-layout robustness test. This is an experimental contact-control baseline,
-not a guarantee of reliable demonstrations or a calibrated real-world model.
+盒位随机化上限为每个平面轴 ±2 cm，小盒偏航 ±0.08 rad；饼干之间缝隙很小，
+所以单块饼干的扰动保持在已验证的较小范围。若 Expert 判断随机到的盒位不可达，
+采集器会将该 seed 记为失败尝试后继续，而不会保存半成品 episode。
 
-Reference validation (2026-09-17, fixed layout, seed 0): two full replays
-completed 5 + 5 in 1844 control steps, with 10 released/upright/settled Cookies
-in the target and 70 remaining in the source. The final default-config replay
-included the insertion-force guard. It selected IDs 0-4 and 20-24 because the
-remaining ends of the first column had tilted. Maximum measured pad force was
-4.48 N and the maximum monitored Cookie/pad contact penetration was 0.095 mm.
-Thirty relevant model/contact/task tests passed; this is not a full legacy-expert
-suite pass or a randomized-layout success-rate result.
+如果要让 Expert 从四列中轮流选择来源列，使用独立的多列数据集：
 
-Current same-column validation (fixed layout, seed 0):
-`artifacts/cookie_batch_same_column_seed0.json` reports success at step
-1860 with IDs 0–4 and then 5–9, both lifted and released, ten upright/settled
-in the target, seventy left in the source, and maximum pad force 1.37 N.
-The wider lower support prevented the remaining Cookies from tipping in this
-replay, so this is **not** evidence that a fallen five-Cookie batch can yet be
-recovered. The angled insertion branch is guarded by measured gap and contact
-force, but still needs a physically tilted successful replay. Throughput is
-not yet optimized: the earlier development headless replay took
-about 21 minutes for roughly 92 seconds of simulated control, with another
-diagnostic replay running concurrently. Do not expect real-time playback or
-start large dataset collection on the basis of this one fixed-layout baseline.
+```powershell
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column random --episodes 100
+# 中途停止后继续
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column random --episodes 100 --resume
+# 或只指定第 3 列（1–4）
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column 3 --episodes 20
+```
 
+随机模式按 seed 每四次覆盖四列，独立写入
+`datasets/a3_single_box_diverse_all_columns`；指定列模式写入单独的 `..._column_3`
+目录。每个 episode 的语言任务会标明来源列。多列模式与上面的 `--profile diverse`
+使用完全相同的盒位、饼干、相机、光照和颜色扰动范围，只额外随机化来源列。
+这样不会影响原来的单列多样化数据或正在训练的模型；失败尝试仍不会保存为示范。
+每次仍是两批各五块，尚不支持 3+7 等可变批量。
+
+采集前可先用相同的随机化参数做 20 组成功率检查（不会录制数据）：
+
+```powershell
+python -u examples\benchmark_cookie_batch.py --policy varied_column --profile diverse --episodes 20 --seed-start 0 --workers 4 --output artifacts\cookie_diverse_all_columns_seed0_19.json
+```
+
+也可以用键盘遥控录制人工数据：
+
+```powershell
+a3-sim teleop --scene cookie_transfer --config configs\cookie_batch.yaml --record datasets\a3_manual --repo-id local/a3-manual --videos
+```
+
+`--no-camera-render` 只适合不录制的交互调试；程序会拒绝将它与 `--record`
+同时使用，避免保存黑色图像。
+
+### 5. 训练 SmolVLA
+
+训练代码已经实现，但需要你提供本地 SmolVLA 基座目录。该目录至少应包含：
+
+```text
+config.json
+model.safetensors
+```
+
+基座配置必须是 `type: smolvla`，并支持至少 16 维状态和 16 维动作。独立克隆本项目时，
+默认的相邻 `vla_ur5e_sim/assets/policy/base/pretrained_model` 通常不存在，因此建议
+始终显式传入 `--model`。训练进程使用离线模式，基座依赖的 VLM/tokenizer 也必须已在
+本地或 Hugging Face 缓存中。
+
+先审计数据并查看实际训练命令：
+
+```powershell
+a3-sim train-smolvla --root datasets\a3_single_box_same_column_100 --repo-id local/a3-single-box-same-column-100 --model D:\models\smolvla\pretrained_model --output outputs\train\a3_cookie_smolvla --steps 20000 --batch-size 4 --device cuda --dry-run
+```
+
+确认无误后删除 `--dry-run`：
+
+```powershell
+a3-sim train-smolvla --root datasets\a3_single_box_same_column_100 --repo-id local/a3-single-box-same-column-100 --model D:\models\smolvla\pretrained_model --output outputs\train\a3_cookie_smolvla --steps 20000 --batch-size 4 --device cuda
+```
+
+注意：
+
+- `--output` 指向的目录必须尚不存在，防止覆盖训练结果。
+- `--device cpu` 可以用于兼容性检查，但完整训练通常应使用 CUDA GPU。
+- Windows 无符号链接权限时，程序会依次尝试硬链接和复制权重。
+- 一步 smoke/dry-run 只验证加载、数据、前后向和保存链路，不证明模型学会任务。
+
+### 6. 加载 checkpoint 并评估
+
+PowerShell 中配置策略：
+
+```powershell
+$env:A3_SMOLVLA_CHECKPOINT = "D:\download\a3_dual_arm_sim\outputs\train\a3_cookie_smolvla\checkpoints\<step>\pretrained_model"
+$env:A3_SMOLVLA_DATASET_ROOT = "D:\download\a3_dual_arm_sim\datasets\a3_single_box_same_column_100"
+$env:A3_SMOLVLA_REPO_ID = "local/a3-single-box-same-column-100"
+$env:A3_SMOLVLA_DEVICE = "cuda"
+```
+
+查看单次闭环运行：
+
+```powershell
+a3-sim run --scene cookie_transfer --config configs\cookie_batch.yaml --policy a3_dual_arm_sim.smolvla_policy:make_policy --task "transfer 10 cookies into target box" --steps 1000 --render
+```
+
+先用训练过的 seed 做单次闭环排查，再用未参与训练的 seed 检查泛化：
+
+```powershell
+python -u examples\benchmark_cookie_batch.py --policy a3_dual_arm_sim.smolvla_policy:make_policy --episodes 1 --seed-start 0 --max-steps 600 --workers 1 --output artifacts\smolvla_train_seed_diagnostic.json
+python -u examples\benchmark_cookie_batch.py --policy a3_dual_arm_sim.smolvla_policy:make_policy --episodes 20 --seed-start 200 --workers 1 --output artifacts\smolvla_validation.json
+```
+
+评估外部策略时，基准程序会自动生成三路 policy RGB；规则 Expert 则默认关相机以加速。
+终端和 JSON 报告里的 `Policy RGB Cameras` / `policy_rgb_cameras` 可以核对这一点。
+`--render` 只控制供人观看的窗口，与模型相机画面是两回事。GPU 策略建议
+`--workers 1`，避免多个进程重复加载模型。建议先确认训练 seed 闭环成功，再花时间跑
+20 个未见过的 seed；训练 loss 下降不等于装盒成功。SmolVLA 的推理采样也会随
+episode seed 重置，便于复测。报告里的 `min_cookies_in_source` 表示过程中源盒最少
+剩几块；它和最后的 `cookies_in_source` 不同，可识别“拿出后又掉回去”的情况。
+
+如需把问题拆开，可先比较保存的专家帧和模型的即时动作（左臂/右臂分别计误差）：
+
+```powershell
+python -u examples\diagnose_smolvla_actions.py --checkpoint outputs\train\a3_cookie_smolvla\checkpoints\020000\pretrained_model --dataset-root datasets\a3_single_box_same_column_100 --repo-id local/a3-single-box-same-column-100 --device cuda --indices 0 50 100 300
+```
+
+这只测“给定正确专家画面时下一步动作有多准”；**不能替代**上面的闭环成功率。
+
+### 遥控按键
+
+遥控会打开 MuJoCo Viewer 和独立控制面板。键盘焦点应放在 **A3 Teleoperation
+Control** 面板上：
+
+| 按键 | 功能 |
+| --- | --- |
+| `1 / 2 / 3` | 选择左臂 / 右臂 / 双臂 |
+| `W/S`, `A/D`, `R/F` | 世界坐标 XYZ 平移 |
+| `I/K`, `J/L`, `U/O` | 世界坐标 Rx/Ry/Rz 旋转 |
+| `[` / `]` | 夹爪闭合 / 张开 |
+| `P` | 暂停或继续录制 |
+| `Space` | 紧急停止 |
+| `Q` | 保存并退出 |
+| `X` | 丢弃并退出 |
+
+仅调试、不渲染三路策略 RGB：
+
+```powershell
+a3-sim teleop --scene cookie_transfer --config configs\cookie_batch.yaml --no-camera-render
+```
+
+### 主要文件
+
+| 路径 | 用途 |
+| --- | --- |
+| [`configs/default.yaml`](configs/default.yaml) | 通用仿真、相机和默认任务参数 |
+| [`configs/cookie_batch.yaml`](configs/cookie_batch.yaml) | 当前单盒 5＋5 基线配置 |
+| [`examples/run_cookie_batch.py`](examples/run_cookie_batch.py) | 同列/跨列 Expert 单轮运行 |
+| [`examples/benchmark_cookie_batch.py`](examples/benchmark_cookie_batch.py) | 随机化多 episode 评估 |
+| [`examples/collect_cookie_benchmark.py`](examples/collect_cookie_benchmark.py) | 成功示范采集与恢复 |
+| [`src/a3_dual_arm_sim/env.py`](src/a3_dual_arm_sim/env.py) | 双臂环境、动作转换、观测和安全限制 |
+| [`src/a3_dual_arm_sim/cookie_transfer.py`](src/a3_dual_arm_sim/cookie_transfer.py) | 饼干场景、随机化和任务判定 |
+| [`src/a3_dual_arm_sim/batch_expert.py`](src/a3_dual_arm_sim/batch_expert.py) | 跨列批量 Expert |
+| [`src/a3_dual_arm_sim/same_column_batch_expert.py`](src/a3_dual_arm_sim/same_column_batch_expert.py) | 同列批量 Expert |
+| [`src/a3_dual_arm_sim/benchmark.py`](src/a3_dual_arm_sim/benchmark.py) | Policy/Expert 统一评估 |
+| [`src/a3_dual_arm_sim/recording.py`](src/a3_dual_arm_sim/recording.py) | LeRobot v3 数据写入 |
+| [`src/a3_dual_arm_sim/training.py`](src/a3_dual_arm_sim/training.py) | 数据审计和 SmolVLA 训练启动 |
+| [`src/a3_dual_arm_sim/smolvla_policy.py`](src/a3_dual_arm_sim/smolvla_policy.py) | checkpoint 推理适配器 |
+| [`src/a3_dual_arm_sim/cli.py`](src/a3_dual_arm_sim/cli.py) | `a3-sim` 命令行入口 |
+
+### 测试
+
+```powershell
+python -m pytest -q
+```
+
+仅检查当前主任务：
+
+```powershell
+python -m pytest -q tests\test_cookie_batch.py tests\test_cookie_same_column.py tests\test_benchmark.py tests\test_training.py
+```
+
+### 已知边界
+
+- 机器人、相机、摩擦、控制增益和盒子尺寸仍是原型估计，不是实机标定。
+- 夹爪使用简化的同步平行指动力学；机器人自碰撞尚未纳入。
+- 规则 Expert 使用 privileged state，不能当作视觉策略。
+- 已提交的 20/20 报告属于 Expert，不属于 SmolVLA。
+- 仓库提供采集、训练和推理代码，但不附带 100-episode 数据集或训练完成的 checkpoint。
+- 当前主干是单盒任务；双盒接力不在 `main`。
+- 从仿真迁移到实机仍需要相机外参、关节零位、执行器、摩擦和安全限制标定。
+
+---
+
+## English
+
+### Project status
+
+The current `main` branch implements a **single-target-bin 5+5 Cookie packing
+task**. The source bin contains 80 beveled Cookie proxies in a 4 × 20 layout.
+The left arm grasps five at a time and fills one 2 × 5 target bin in two
+transfers.
+
+Two scripted experts share the same environment:
+
+- `same_column` (default): IDs 0–4, then 5–9.
+- `cross_column`: IDs 0–4, then 20–24.
+
+The experts use MuJoCo ground truth for closed-loop control. They are not VLA
+policies. The repository does provide an end-to-end pipeline for randomized
+expert evaluation, successful LeRobot v3 demonstration collection, dataset
+auditing, SmolVLA fine-tuning, checkpoint loading, and closed-loop evaluation.
+
+The experimental two-box relay is not present on the current `main` branch.
+
+### Architecture and data contract
+
+```text
+scripted expert / teleoperation / SmolVLA / custom policy
+                              │
+                              ▼
+                 common Policy protocol
+                              │
+              Cartesian delta or joint target
+                              │
+                              ▼
+                 IK, limits, and rate limiting
+                              │
+                              ▼
+                      MuJoCo environment
+                              │
+                 observation + applied action
+                              │
+                              ▼
+                    LeRobot v3 recorder
+```
+
+The observation contract contains three 256 × 256 RGB streams, 16-D joint and
+gripper state, 16-D velocity, 14-D dual-end-effector pose, and 18-D force
+feedback. Scripted batch experts request 14-D Cartesian-delta actions. The
+environment applies IK and safety limits, and the recorder stores the actual
+16-D absolute joint/gripper target sent to MuJoCo. Training and inference
+therefore use the same 16-D action definition.
+
+### Setup on Windows
+
+```powershell
+cd D:\download\a3_dual_arm_sim
+conda create -n a3sim python=3.10 -y
+conda activate a3sim
+python -m pip install --upgrade pip
+
+# Simulation and tests
+python -m pip install -e ".[dev]"
+
+# Add recording support
+python -m pip install -e ".[dataset,dev]"
+
+# Add SmolVLA training and inference support
+python -m pip install -e ".[train,dev]"
+```
+
+Do not set `MUJOCO_GL` on native Windows. For headless Linux/WSL rendering,
+use `MUJOCO_GL=egl`.
+
+### Quick start
+
+```powershell
+# Inspect and smoke-test the Cookie scene
+a3-sim inspect --scene cookie_transfer
+a3-sim smoke --scene cookie_transfer --config configs\cookie_batch.yaml --steps 200
+
+# Preview the three policy cameras
+python examples\preview_cameras.py --scene cookie_transfer --config configs\cookie_batch.yaml --show
+
+# Run the default same-column expert
+python -u examples\run_cookie_batch.py --expert same_column --render --debug --max-steps 1000
+
+# Run the cross-column expert
+python -u examples\run_cookie_batch.py --expert cross_column --render --debug --max-steps 1000
+
+# Choose a source column by seed, or specify column 3 (1–4)
+python -u examples\run_cookie_batch.py --expert varied_column --seed 0 --render --max-steps 1000
+python -u examples\run_cookie_batch.py --expert varied_column --source-column 3 --render --max-steps 1000
+```
+
+The expert runners do not record training data.
+
+### Randomized benchmark
+
+```powershell
+python -u examples\benchmark_cookie_batch.py --compare --episodes 20 --seed-start 0 --workers 4 --output artifacts\benchmark_results_local.json
+```
+
+`20/20` means twenty independent resets of the same single-bin task, not
+twenty bins in one scene. The committed report records 20/20 successful
+episodes for each scripted expert on seeds 0–19, averaging 429.6 steps for
+same-column and 425.9 for cross-column. These are expert results, not SmolVLA
+results.
+
+### Collect a LeRobot v3 Cookie dataset
+
+```powershell
+python -u examples\collect_cookie_benchmark.py --episodes 100
+
+# Continue a cleanly paused partial dataset
+python -u examples\collect_cookie_benchmark.py --episodes 100 --resume
+```
+
+For a separate, more varied dataset, use:
+
+```powershell
+python -u examples\collect_cookie_benchmark.py --profile diverse --episodes 100
+python -u examples\collect_cookie_benchmark.py --profile diverse --episodes 100 --resume
+```
+
+This writes to `datasets/a3_single_box_diverse` with repo ID
+`local/a3-single-box-diverse`; it does not alter the baseline 100 episodes.
+Source/target poses, cookie poses, cameras, lighting, and colors vary within
+bounded ranges. This command still grasps the first column. Failed
+attempts remain in `attempts.jsonl` only. Resume checks the saved configuration.
+An already-running training job continues to use its original dataset until a
+new training run is launched.
+Box centers vary by up to ±2 cm per planar axis, and target yaw by ±0.08 rad.
+Per-cookie jitter remains small because the source stack is tightly packed.
+Unreachable randomized layouts are logged as failed attempts, not saved demos.
+
+To collect from all four source columns in a separate dataset, or target one
+specific column, use:
+
+```powershell
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column random --episodes 100
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column random --episodes 100 --resume
+python -u examples\collect_cookie_benchmark.py --profile diverse --source-column 3 --episodes 20
+```
+
+The random mode covers all four columns per four seeds and writes to
+`datasets/a3_single_box_diverse_all_columns`; a fixed column uses its own
+`..._column_3` dataset. Each episode records the selected source column in
+its language task. Multi-column mode uses exactly the same box, Cookie, camera,
+lighting, and color randomization ranges as `--profile diverse`, and also varies
+the source column. Only strict
+successes are saved. Batch sizes remain five plus five; 3+7 is not yet supported.
+
+To check success rate on 20 seeds with the same randomization before collecting
+data (without recording episodes):
+
+```powershell
+python -u examples\benchmark_cookie_batch.py --policy varied_column --profile diverse --episodes 20 --seed-start 0 --workers 4 --output artifacts\cookie_diverse_all_columns_seed0_19.json
+```
+
+The default output is `datasets/a3_single_box_same_column_100`, with repo ID
+`local/a3-single-box-same-column-100`. Only successful episodes enter the
+dataset; all attempts are logged. The collector saves three 256 × 256 RGB
+cameras, 16-D state and velocity, 14-D end-effector pose, 18-D force feedback,
+the language task, and the final applied 16-D joint action.
+
+### Train SmolVLA
+
+Provide a local compatible SmolVLA base checkpoint. A standalone clone normally
+does not contain the CLI's default sibling checkpoint, so pass `--model`
+explicitly. The base model and its VLM/tokenizer dependencies must already be
+available locally or in the Hugging Face cache because training launches in
+offline mode.
+
+```powershell
+# Audit the dataset and print the exact training command
+a3-sim train-smolvla --root datasets\a3_single_box_same_column_100 --repo-id local/a3-single-box-same-column-100 --model D:\models\smolvla\pretrained_model --output outputs\train\a3_cookie_smolvla --steps 20000 --batch-size 4 --device cuda --dry-run
+
+# Remove --dry-run to start training.
+```
+
+The output directory must not already exist. CPU is supported for compatibility
+checks but is generally impractical for full training. On Windows, the runtime
+checkpoint view falls back from a symbolic link to a hard link or file copy.
+
+### Run and evaluate a trained checkpoint
+
+```powershell
+$env:A3_SMOLVLA_CHECKPOINT = "D:\path\to\checkpoint\pretrained_model"
+$env:A3_SMOLVLA_DATASET_ROOT = "D:\download\a3_dual_arm_sim\datasets\a3_single_box_same_column_100"
+$env:A3_SMOLVLA_REPO_ID = "local/a3-single-box-same-column-100"
+$env:A3_SMOLVLA_DEVICE = "cuda"
+
+a3-sim run --scene cookie_transfer --config configs\cookie_batch.yaml --policy a3_dual_arm_sim.smolvla_policy:make_policy --task "transfer 10 cookies into target box" --steps 1000 --render
+
+python -u examples\benchmark_cookie_batch.py --policy a3_dual_arm_sim.smolvla_policy:make_policy --episodes 1 --seed-start 0 --max-steps 600 --workers 1 --output artifacts\smolvla_train_seed_diagnostic.json
+python -u examples\benchmark_cookie_batch.py --policy a3_dual_arm_sim.smolvla_policy:make_policy --episodes 20 --seed-start 200 --workers 1 --output artifacts\smolvla_validation.json
+```
+
+External policies automatically receive all three rendered policy RGB images;
+scripted experts leave camera rendering off for speed. Check `Policy RGB Cameras`
+in the terminal or `policy_rgb_cameras` in the JSON report. `--render` only opens
+the human viewer and does not control policy cameras. Start with a training seed
+to test closed-loop imitation, then evaluate on held-out seeds. Keep `--workers 1`
+for a GPU policy to avoid loading multiple model copies. Low training loss alone
+does not demonstrate successful placement.
+SmolVLA inference sampling is seeded at each episode reset, so repeating a
+benchmark seed is comparable. `min_cookies_in_source` records the lowest source
+count reached during an episode and can reveal a temporary extraction that
+later falls back into the box.
+
+For a teacher-forced action check on saved expert frames (separate left/right
+arm errors), run:
+
+```powershell
+python -u examples\diagnose_smolvla_actions.py --checkpoint outputs\train\a3_cookie_smolvla\checkpoints\020000\pretrained_model --dataset-root datasets\a3_single_box_same_column_100 --repo-id local/a3-single-box-same-column-100 --device cuda --indices 0 50 100 300
+```
+
+This diagnostic does not replace closed-loop evaluation.
+
+### Teleoperation and manual recording
+
+```powershell
+# Responsive viewer-only debugging; policy RGB is disabled
+a3-sim teleop --scene cookie_transfer --config configs\cookie_batch.yaml --no-camera-render
+
+# Manual LeRobot recording with all three policy cameras
+a3-sim teleop --scene cookie_transfer --config configs\cookie_batch.yaml --record datasets\a3_manual --repo-id local/a3-manual --videos
+```
+
+Keep keyboard focus on the separate **A3 Teleoperation Control** panel. Select
+the left, right, or both arms with `1/2/3`; translate with `W/S`, `A/D`,
+`R/F`; rotate with `I/K`, `J/L`, `U/O`; and close/open the gripper with
+`[`/`]`. `Space` is the emergency stop, `Q` saves and exits, and `X`
+discards the episode. Recording cannot be combined with
+`--no-camera-render`.
+
+### Key files
+
+- [`examples/run_cookie_batch.py`](examples/run_cookie_batch.py): one expert rollout.
+- [`examples/benchmark_cookie_batch.py`](examples/benchmark_cookie_batch.py): randomized evaluation.
+- [`examples/collect_cookie_benchmark.py`](examples/collect_cookie_benchmark.py): successful demonstration collection.
+- [`src/a3_dual_arm_sim/env.py`](src/a3_dual_arm_sim/env.py): actions, observations, safety, and rendering.
+- [`src/a3_dual_arm_sim/benchmark.py`](src/a3_dual_arm_sim/benchmark.py): shared expert/policy evaluator.
+- [`src/a3_dual_arm_sim/recording.py`](src/a3_dual_arm_sim/recording.py): LeRobot v3 writer.
+- [`src/a3_dual_arm_sim/training.py`](src/a3_dual_arm_sim/training.py): dataset audit and SmolVLA launcher.
+- [`src/a3_dual_arm_sim/smolvla_policy.py`](src/a3_dual_arm_sim/smolvla_policy.py): checkpoint inference adapter.
+
+### Validation and limitations
+
+```powershell
+python -m pytest -q
+```
+
+- Geometry, dynamics, controller gains, and camera poses are prototype values,
+  not hardware calibration.
+- The scripted experts use privileged simulator state.
+- The repository does not ship a 100-episode dataset, a SmolVLA base model, or a
+  trained task checkpoint.
+- A smoke run proves software compatibility, not that the model learned the task.
+- Sim-to-real use still requires robot, gripper, camera, contact, and safety
+  calibration.
+
+## License and asset provenance
+
+See [`assets/a3/PROVENANCE.md`](assets/a3/PROVENANCE.md) for source robot assets.
+The Robotiq visual meshes retain the license documented in
+[`assets/a3/ROBOSUITE_LICENSE.txt`](assets/a3/ROBOSUITE_LICENSE.txt).

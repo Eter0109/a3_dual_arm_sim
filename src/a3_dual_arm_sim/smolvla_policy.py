@@ -18,6 +18,7 @@ class SmolVLAPolicyPlugin:
     """LeRobot SmolVLA checkpoint adapter for the common A3 policy protocol."""
 
     action_mode: ActionMode = "joint_position"
+    requires_camera_rendering = True
 
     def __init__(self, checkpoint: Path, dataset_root: Path, repo_id: str, device: str) -> None:
         try:
@@ -65,6 +66,9 @@ class SmolVLAPolicyPlugin:
         self._policy.eval()
 
     def reset(self, context: EpisodeContext) -> None:
+        # SmolVLA samples an action chunk. Seed that sampling per episode so a
+        # benchmark seed controls both the MuJoCo scene and policy rollout.
+        self._torch.manual_seed(context.seed)
         self._policy.reset()
 
     def act(self, observation: dict[str, Any], task: str) -> np.ndarray:

@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
-from a3_dual_arm_sim.benchmark import CookieBatchBenchmark, run_cookie_batch_benchmark
+from a3_dual_arm_sim.benchmark import CookieBatchBenchmark, DIVERSE_RANDOMIZATION
 
 
 def main() -> int:
@@ -22,6 +22,10 @@ def main() -> int:
         "--policy",
         default="same_column",
         help="Policy to benchmark: 'same_column', 'cross_column', or 'module:factory' (default: same_column)",
+    )
+    parser.add_argument(
+        "--profile", choices=("baseline", "diverse"), default="baseline",
+        help="Randomization profile; diverse matches data collection exactly",
     )
     parser.add_argument(
         "--episodes",
@@ -87,13 +91,20 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    randomization = (
+        DIVERSE_RANDOMIZATION.copy()
+        if args.profile == "diverse"
+        else {
+            "target_bin_noise_m": args.target_box_noise,
+            "source_bin_noise_m": args.source_box_noise,
+        }
+    )
     benchmark = CookieBatchBenchmark(
         max_steps=args.max_steps,
         randomize_boxes=not args.no_randomize_boxes,
-        target_bin_noise_m=args.target_box_noise,
-        source_bin_noise_m=args.source_box_noise,
         randomize_cookies=not args.no_randomize_cookies,
         render=args.render,
+        **randomization,
     )
 
     workers = 1 if args.render else args.workers

@@ -22,9 +22,28 @@ from .batch_expert import A3CookieBatchExpert
 from .config import load_config
 from .contracts import ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
-from .same_column_batch_expert import A3SameColumnBatchExpert
+from .same_column_batch_expert import A3SameColumnBatchExpert, A3VariedColumnBatchExpert
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "cookie_batch.yaml"
+DEFAULT_TASK_INSTRUCTION = "transfer 10 cookies into target box"
+DIVERSE_RANDOMIZATION = {
+    "source_bin_noise_m": 0.020,
+    "target_bin_noise_m": 0.020,
+    "target_bin_yaw_noise_rad": 0.080,
+    "cookie_noise_m": 0.0003,
+    "cookie_yaw_noise_rad": 0.015,
+    "camera_position_noise_m": 0.009,
+    "camera_fovy_noise_deg": 2.0,
+    "light_noise_fraction": 0.20,
+    "color_noise_fraction": 0.15,
+}
+
+
+def column_task_instruction(column_index: int) -> str:
+    return (
+        f"Transfer 10 cookies from source column {column_index + 1} "
+        "into the target box in two batches of five."
+    )
 
 
 @runtime_checkable
@@ -85,6 +104,23 @@ def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = N
             if env is not None:
                 adapter.bind_env(env)
             return adapter
+        if spec in ("varied_column", "varied-column"):
+            adapter = ExpertPolicyAdapter(A3VariedColumnBatchExpert, name="varied_column")
+            if env is not None:
+                adapter.bind_env(env)
+            return adapter
+        if spec.startswith("column_") and spec[7:] in ("0", "1", "2", "3"):
+            selected = int(spec[7:])
+
+            def fixed_column_factory(e: A3CookieTransferEnv) -> A3VariedColumnBatchExpert:
+                expert = A3VariedColumnBatchExpert(e)
+                expert.requested_source_column_index = selected
+                return expert
+
+            adapter = ExpertPolicyAdapter(fixed_column_factory, name=spec)
+            if env is not None:
+                adapter.bind_env(env)
+            return adapter
         if spec in ("cross_column", "cross-column", "cross", "batch"):
             adapter = ExpertPolicyAdapter(A3CookieBatchExpert, name="cross_column")
             if env is not None:
@@ -130,8 +166,17 @@ class EpisodeScore:
     wall_seconds: float = 0.0
     cookies_in_target: int = 0
     cookies_in_source: int = 70
+    max_cookies_in_target: int = 0
+    min_cookies_in_source: int = 80
     target_bin_pos: list[float] = field(default_factory=list)
     source_bin_pos: list[float] = field(default_factory=list)
+    source_column_index: int | None = None
+    source_column_number: int | None = None
+    task_instruction: str = ""
+    target_slot_occupancy: list[int] = field(default_factory=list)
+    source_initially_filled: bool = False
+    target_touches_all_walls: bool = False
+    success_hold_count: int = 0
     phase: str = ""
     failure_reason: str | None = None
 
@@ -155,6 +200,7 @@ class BenchmarkResult:
     mean_wall_seconds: float
     score_distribution: dict[int, int]
     episodes: list[EpisodeScore]
+    policy_rgb_cameras: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +216,7 @@ class BenchmarkResult:
                 "mean_steps": round(self.mean_steps, 1),
                 "mean_wall_seconds": round(self.mean_wall_seconds, 2),
                 "score_distribution": self.score_distribution,
+                "policy_rgb_cameras": self.policy_rgb_cameras,
             },
             "episodes": [ep.to_dict() for ep in self.episodes],
         }
@@ -184,6 +231,7 @@ class BenchmarkResult:
             f"Success Rate (10/10): {self.success_rate * 100:.1f}%",
             f"Mean Steps / Ep     : {self.mean_steps:.1f}",
             f"Mean Wall Time / Ep : {self.mean_wall_seconds:.2f}s",
+            f"Policy RGB Cameras  : {self.policy_rgb_cameras}",
             f"Score Distribution  : {dict(sorted(self.score_distribution.items(), reverse=True))}",
         ]
         return "\n".join(lines)
@@ -204,6 +252,10 @@ class CookieBatchBenchmark:
         randomize_cookies: bool = True,
         cookie_noise_m: float = 0.0003,
         cookie_yaw_noise_rad: float = 0.015,
+        camera_position_noise_m: float = 0.0,
+        camera_fovy_noise_deg: float = 0.0,
+        light_noise_fraction: float = 0.0,
+        color_noise_fraction: float = 0.0,
         render: bool = False,
     ):
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
@@ -215,6 +267,10 @@ class CookieBatchBenchmark:
         self.randomize_cookies = randomize_cookies
         self.cookie_noise_m = cookie_noise_m
         self.cookie_yaw_noise_rad = cookie_yaw_noise_rad
+        self.camera_position_noise_m = camera_position_noise_m
+        self.camera_fovy_noise_deg = camera_fovy_noise_deg
+        self.light_noise_fraction = light_noise_fraction
+        self.color_noise_fraction = color_noise_fraction
         self.render = render
 
         self.config = load_config(self.config_path)
@@ -232,6 +288,22 @@ class CookieBatchBenchmark:
             render_cameras=render_cameras,
         )
 
+    @staticmethod
+    def policy_uses_cameras(policy: Any) -> bool:
+        """Render RGB for external policies, while leaving expert rollouts fast."""
+        if isinstance(policy, str):
+            # Built-in names are privileged-state experts; module:factory is external.
+            return ":" in policy
+        if isinstance(policy, ExpertPolicyAdapter):
+            return False
+        if isinstance(policy, (A3CookieBatchExpert, A3SameColumnBatchExpert)):
+            return False
+        if isinstance(policy, type) and issubclass(
+            policy, (A3CookieBatchExpert, A3SameColumnBatchExpert)
+        ):
+            return False
+        return bool(getattr(policy, "requires_camera_rendering", True))
+
     def run_episode(
         self,
         policy: Any,
@@ -241,9 +313,15 @@ class CookieBatchBenchmark:
         recorder: Any | None = None,
     ) -> EpisodeScore:
         should_close_env = False
+        needs_cameras = recorder is not None or self.policy_uses_cameras(policy)
         if env is None:
-            env = self.create_env(render_cameras=recorder is not None)
+            env = self.create_env(render_cameras=needs_cameras)
             should_close_env = True
+        elif needs_cameras and getattr(env, "render_cameras", True) is False:
+            raise ValueError(
+                "This policy or recorder requires RGB cameras, but the supplied environment "
+                "has render_cameras=False. Create it with render_cameras=True."
+            )
 
         reset_options = {
             "randomize_cookies": self.randomize_cookies,
@@ -253,25 +331,56 @@ class CookieBatchBenchmark:
             "source_bin_noise_m": self.source_bin_noise_m,
             "target_bin_noise_m": self.target_bin_noise_m,
             "target_bin_yaw_noise_rad": self.target_bin_yaw_noise_rad,
+            "camera_position_noise_m": self.camera_position_noise_m,
+            "camera_fovy_noise_deg": self.camera_fovy_noise_deg,
+            "light_noise_fraction": self.light_noise_fraction,
+            "color_noise_fraction": self.color_noise_fraction,
         }
 
         observation, info = env.reset(seed=seed, options=reset_options)
 
-        runner_policy = make_policy_adapter(policy, env=env)
-        if hasattr(runner_policy, "bind_env") and getattr(runner_policy, "expert", None) is None:
-            runner_policy.bind_env(env)
-        if hasattr(runner_policy, "reset"):
-            context = EpisodeContext(
-                seed=seed, task="transfer 10 cookies into target box", action_mode=env.action_mode
+        try:
+            runner_policy = make_policy_adapter(policy, env=env)
+            if hasattr(runner_policy, "bind_env") and getattr(runner_policy, "expert", None) is None:
+                runner_policy.bind_env(env)
+            if hasattr(runner_policy, "reset"):
+                context = EpisodeContext(
+                    seed=seed, task=DEFAULT_TASK_INSTRUCTION, action_mode=env.action_mode
+                )
+                runner_policy.reset(context)
+        except RuntimeError as exc:
+            if "unreachable with vertical grasp" not in str(exc):
+                if should_close_env:
+                    env.close()
+                raise
+            if should_close_env:
+                env.close()
+            return EpisodeScore(
+                episode=episode_idx,
+                seed=seed,
+                score=0,
+                success=False,
+                cookies_in_target=int(info.get("cookies_in_target", 0)),
+                cookies_in_source=int(info.get("cookies_in_source", 80)),
+                task_instruction=DEFAULT_TASK_INSTRUCTION,
+                failure_reason=f"expert_preflight: {exc}",
             )
-            runner_policy.reset(context)
+
+        selected_column = getattr(
+            getattr(runner_policy, "expert", None), "selected_source_column_index", None
+        )
+        task_instruction = (
+            DEFAULT_TASK_INSTRUCTION
+            if selected_column is None
+            else column_task_instruction(selected_column)
+        )
 
         t_start = time.monotonic()
         if recorder is not None:
             recorder.start_episode(
                 EpisodeContext(
                     seed=seed,
-                    task="transfer 10 cookies into target box",
+                    task=task_instruction,
                     action_mode=runner_policy.action_mode,
                 ),
                 getattr(runner_policy, "name", type(runner_policy).__name__),
@@ -279,6 +388,8 @@ class CookieBatchBenchmark:
         steps = 0
         terminated = False
         truncated = False
+        max_cookies_in_target = int(info.get("cookies_in_target", 0))
+        min_cookies_in_source = int(info.get("cookies_in_source", 80))
 
         try:
             while steps < self.max_steps:
@@ -286,7 +397,7 @@ class CookieBatchBenchmark:
                 if hasattr(runner_policy, "act"):
                     try:
                         action = runner_policy.act(
-                            observation, "transfer 10 cookies into target box"
+                            observation, task_instruction
                         )
                     except TypeError:
                         action = runner_policy.act(observation)
@@ -299,6 +410,12 @@ class CookieBatchBenchmark:
 
                 previous_observation = observation
                 observation, _, terminated, truncated, info = env.step(action)
+                max_cookies_in_target = max(
+                    max_cookies_in_target, int(info.get("cookies_in_target", 0))
+                )
+                min_cookies_in_source = min(
+                    min_cookies_in_source, int(info.get("cookies_in_source", 80))
+                )
                 if recorder is not None:
                     recorder.add_frame(previous_observation, info["applied_action"])
 
@@ -345,6 +462,19 @@ class CookieBatchBenchmark:
                 runner_policy.expert, "failed", False
             ):
                 failure_reason = getattr(runner_policy.expert, "failure_reason", "expert_failed")
+            elif cookies_in_target == 10 and cookies_in_source != 70:
+                failure_reason = f"source box contains {cookies_in_source}/70 remaining cookies"
+            elif cookies_in_target == 10 and not info.get("exact_2x5_fill", False):
+                failure_reason = (
+                    "target box is not an exact stable 2x5 fill; "
+                    f"slots={list(info.get('target_slot_occupancy', []))}, "
+                    f"walls={info.get('target_touches_all_walls', False)}"
+                )
+            elif cookies_in_target == 10:
+                failure_reason = (
+                    "target fill did not remain stable for the required hold; "
+                    f"hold={info.get('success_hold_count', 0)}"
+                )
             else:
                 failure_reason = f"only {cookies_in_target}/10 cookies in target box"
 
@@ -361,8 +491,17 @@ class CookieBatchBenchmark:
             wall_seconds=round(wall_time, 2),
             cookies_in_target=cookies_in_target,
             cookies_in_source=cookies_in_source,
+            max_cookies_in_target=max_cookies_in_target,
+            min_cookies_in_source=min_cookies_in_source,
             target_bin_pos=target_pos,
             source_bin_pos=source_pos,
+            source_column_index=selected_column,
+            source_column_number=None if selected_column is None else selected_column + 1,
+            task_instruction=task_instruction,
+            target_slot_occupancy=list(info.get("target_slot_occupancy", [])),
+            source_initially_filled=bool(info.get("source_initially_filled", False)),
+            target_touches_all_walls=bool(info.get("target_touches_all_walls", False)),
+            success_hold_count=int(info.get("success_hold_count", 0)),
             phase=phase,
             failure_reason=failure_reason,
         )
@@ -395,6 +534,7 @@ class CookieBatchBenchmark:
                 f" Randomization: boxes={self.randomize_boxes}, cookies={self.randomize_cookies}, workers={workers}",
                 flush=True,
             )
+            print(f" Policy RGB cameras: {self.policy_uses_cameras(policy)}", flush=True)
             print("=======================================================", flush=True)
 
         episode_results: list[EpisodeScore] = []
@@ -417,6 +557,10 @@ class CookieBatchBenchmark:
                     "randomize_cookies": self.randomize_cookies,
                     "cookie_noise_m": self.cookie_noise_m,
                     "cookie_yaw_noise_rad": self.cookie_yaw_noise_rad,
+                    "camera_position_noise_m": self.camera_position_noise_m,
+                    "camera_fovy_noise_deg": self.camera_fovy_noise_deg,
+                    "light_noise_fraction": self.light_noise_fraction,
+                    "color_noise_fraction": self.color_noise_fraction,
                 }
                 for ep_i in range(num_episodes)
             ]
@@ -443,12 +587,16 @@ class CookieBatchBenchmark:
                         )
                 episode_results = [results_by_idx[i] for i in range(num_episodes)]
         else:
-            env = self.create_env()
+            # A model checkpoint is expensive to load; share one instance across
+            # serial episodes and let run_episode() reset its action queue each time.
+            owns_policy = isinstance(policy, str) and ":" in policy
+            episode_policy = make_policy_adapter(policy) if owns_policy else policy
+            env = self.create_env(render_cameras=self.policy_uses_cameras(episode_policy))
             try:
                 for ep_i in range(num_episodes):
                     seed = seed_start + ep_i
                     ep_result = self.run_episode(
-                        policy=policy,
+                        policy=episode_policy,
                         seed=seed,
                         episode_idx=ep_i + 1,
                         env=env,
@@ -470,6 +618,8 @@ class CookieBatchBenchmark:
                         )
             finally:
                 env.close()
+                if owns_policy and hasattr(episode_policy, "close"):
+                    episode_policy.close()
 
         total_score = sum(r.score for r in episode_results)
         max_possible = num_episodes * 10
@@ -492,6 +642,7 @@ class CookieBatchBenchmark:
             mean_wall_seconds=float(np.mean(wall_times)) if wall_times else 0.0,
             score_distribution=score_dist,
             episodes=episode_results,
+            policy_rgb_cameras=self.policy_uses_cameras(policy),
         )
 
         if verbose:
@@ -511,6 +662,10 @@ def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
         randomize_cookies=args["randomize_cookies"],
         cookie_noise_m=args["cookie_noise_m"],
         cookie_yaw_noise_rad=args["cookie_yaw_noise_rad"],
+        camera_position_noise_m=args["camera_position_noise_m"],
+        camera_fovy_noise_deg=args["camera_fovy_noise_deg"],
+        light_noise_fraction=args["light_noise_fraction"],
+        color_noise_fraction=args["color_noise_fraction"],
         render=False,
     )
     return benchmark.run_episode(

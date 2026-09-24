@@ -131,6 +131,60 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         self._success_hold_count = 0
         self._source_initially_filled = False
+        # MuJoCo resetData resets qpos, not MjModel appearance or camera fields.
+        # Keep pristine values so every episode starts from the same visual base.
+        self._base_cam_pos = self.model.cam_pos.copy()
+        self._base_cam_fovy = self.model.cam_fovy.copy()
+        self._base_light_diffuse = self.model.light_diffuse.copy()
+        self._base_geom_rgba = self.model.geom_rgba.copy()
+        self._base_mat_rgba = self.model.mat_rgba.copy()
+        self._appearance_geom_ids = tuple(
+            geom for geom in range(self.model.ngeom)
+            if (name := mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom))
+            and name.endswith("_visual")
+            and (name.startswith("cookie_") or "bin_" in name)
+        )
+
+    def _randomize_appearance(self, options: dict[str, Any]) -> None:
+        camera_noise = float(options.get("camera_position_noise_m", 0.0))
+        fovy_noise = float(options.get("camera_fovy_noise_deg", 0.0))
+        light_noise = float(options.get("light_noise_fraction", 0.0))
+        color_noise = float(options.get("color_noise_fraction", 0.0))
+        if min(camera_noise, fovy_noise, light_noise, color_noise) < 0:
+            raise ValueError("appearance randomization ranges must be nonnegative")
+
+        self.model.cam_pos[:] = self._base_cam_pos
+        self.model.cam_fovy[:] = self._base_cam_fovy
+        self.model.light_diffuse[:] = self._base_light_diffuse
+        self.model.geom_rgba[:] = self._base_geom_rgba
+        self.model.mat_rgba[:] = self._base_mat_rgba
+        if camera_noise:
+            self.model.cam_pos[:] += self.np_random.uniform(
+                -camera_noise, camera_noise, size=self.model.cam_pos.shape
+            )
+        if fovy_noise:
+            self.model.cam_fovy[:] += self.np_random.uniform(
+                -fovy_noise, fovy_noise, size=self.model.cam_fovy.shape
+            )
+        if light_noise:
+            scale = self.np_random.uniform(
+                1 - light_noise, 1 + light_noise, size=(self.model.nlight, 1)
+            )
+            self.model.light_diffuse[:] = np.clip(self._base_light_diffuse * scale, 0, 1)
+        if color_noise:
+            tint = self.np_random.uniform(1 - color_noise, 1 + color_noise, size=3)
+            for geom in self._appearance_geom_ids:
+                local_tint = self.np_random.uniform(
+                    1 - color_noise / 4, 1 + color_noise / 4, size=3
+                )
+                self.model.geom_rgba[geom, :3] = np.clip(
+                    self._base_geom_rgba[geom, :3] * tint * local_tint, 0, 1
+                )
+            self.model.mat_rgba[:, :3] = np.clip(
+                self._base_mat_rgba[:, :3]
+                * self.np_random.uniform(1 - color_noise, 1 + color_noise, size=(self.model.nmat, 1)),
+                0, 1,
+            )
 
     @property
     def cookie_positions(self) -> np.ndarray:
@@ -275,6 +329,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.set_cookie_pose(index, (base_x + sdx + dx, base_y + sdy + dy, self.COOKIE_RESET_Z), quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
+        self._randomize_appearance(options)
         self.data.time = 0.0
         self._success_hold_count = 0
         source_center = (
