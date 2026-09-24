@@ -16,10 +16,10 @@ from .expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
 from .grasp import A3GraspEnv, GraspTaskConfig
 from .policy import Policy
 from .recording import LeRobotV3Recorder
+from .relay_batch_expert import RelayBatchExpert
 from .runner import EpisodeRunner
 from .same_column_batch_expert import A3SameColumnBatchExpert
 from .tasks import TASKS, TaskSpec
-from .two_box_batch import TwoBoxBatchExpert
 
 
 @dataclass
@@ -77,7 +77,7 @@ class TwoBoxCollectionPolicy:
     here) while the runner passes one.
     """
 
-    expert: TwoBoxBatchExpert
+    expert: RelayBatchExpert
     hold_steps: int = 40
     action_mode: ActionMode = "joint_position"
     _steps_since_done: int = 0
@@ -294,9 +294,7 @@ def collect_dataset(
     # could move without anyone having to find the config.
     randomization = env.config.randomization
     scene_randomization = {
-        name: [axis.low, axis.high]
-        for name, axis in randomization.axes().items()
-        if axis.movable
+        name: [axis.low, axis.high] for name, axis in randomization.axes().items() if axis.movable
     }
     scene_randomization["min_box_clearance_m"] = randomization.min_box_clearance_m
     try:
@@ -378,10 +376,10 @@ def collect_dataset(
     )
     if accepted < episodes:
         raise RuntimeError(
-            f"collected only {accepted}/{episodes} successful episodes "
-            f"in {len(results)} attempts"
+            f"collected only {accepted}/{episodes} successful episodes in {len(results)} attempts"
         )
     return summary
+
 
 # --------------------------------------------------------------------------- scenes
 #
@@ -585,7 +583,7 @@ def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
 
     def build_policy(env: A3DualArmEnv) -> Policy:
         return TwoBoxCollectionPolicy(
-            expert=TwoBoxBatchExpert(env),  # type: ignore[arg-type]
+            expert=RelayBatchExpert(env),  # type: ignore[arg-type]
             hold_steps=hold_steps,
         )
 

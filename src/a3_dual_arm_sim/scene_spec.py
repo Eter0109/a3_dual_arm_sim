@@ -565,12 +565,32 @@ class SceneSpec:
         )
 
     @property
+    def source_center_live_m(self) -> tuple[float, float]:
+        """Where the source layout and its bin actually sit, offset included.
+
+        The layout and the bin move *together*, which is the whole reason a lane can
+        move the bin out of its way: the Cookies are laid out relative to the live body
+        (see ``A3CookieTransferEnv.reset``), so a bin that moved without its contents
+        would be a bin with a strip of empty floor at one end and Cookies on the floor
+        at the other.
+
+        Getting this wrong is not hypothetical -- it was, until Phase 4's tests measured
+        it: the three-box lane's bin was offset 46 mm while its layout was generated
+        about the un-offset centre, so only **64 of the 80 Cookies** registered as being
+        in the source after a reset, and every criterion that counts them was wrong by
+        16.
+        """
+
+        x, y = self.source_center_m
+        return (x, y + self.source_offset_m)
+
+    @property
     def source_rows(self) -> int:
         return math.ceil(self.source_cookies / self.source_columns)
 
     @property
     def source_positions_m(self) -> tuple[tuple[float, float], ...]:
-        """The source layout, row-major, centred on the nominal centre.
+        """The source layout, row-major, centred on :attr:`source_center_live_m`.
 
         The rows are generated in full -- ``source_columns * source_rows``
         positions, which may exceed ``source_cookies`` when the count does not
@@ -581,7 +601,7 @@ class SceneSpec:
         geometry = self.geometry
         column_pitch = geometry.source_column_pitch_m
         row_pitch = geometry.source_row_pitch_m
-        center_x, center_y = self.source_center_m
+        center_x, center_y = self.source_center_live_m
         half_columns = (self.source_columns - 1) / 2.0
         half_rows = (self.source_rows - 1) / 2.0
         return tuple(
@@ -595,12 +615,18 @@ class SceneSpec:
 
     @property
     def source_bin_half_size_m(self) -> tuple[float, float]:
-        """Outer half size of the source bin: the grid, the Cookie, a margin, a wall."""
+        """Outer half size of the source bin: the grid, the Cookie, a margin, a wall.
+
+        Computed from the lattice's *extent* rather than from the placed positions,
+        because a width does not depend on where the centre is -- and going through
+        :attr:`source_positions_m` would close a cycle, since that centre is the one the
+        bin's offset moves.  It is the same number for a symmetric lattice: the widest
+        row is ``(rows - 1) / 2 * pitch`` from the middle.
+        """
 
         geometry = self.geometry
-        positions = self.source_positions_m
-        half_x = max(abs(x - self.source_center_m[0]) for x, _ in positions)
-        half_y = max(abs(y - self.source_center_m[1]) for _, y in positions)
+        half_x = (self.source_columns - 1) / 2.0 * geometry.source_column_pitch_m
+        half_y = (self.source_rows - 1) / 2.0 * geometry.source_row_pitch_m
         margin_x, margin_y = geometry.source_bin_margin_m
         return (
             half_x + geometry.half_size_m[0] + margin_x + geometry.bin_wall_thickness_m,
@@ -974,9 +1000,7 @@ class SceneSpec:
         if self.boxes >= 2:
             yaw_bound = envelopes.station_window_dyaw_rad
             box_half_x, box_half_y = self.target_bin_half_size_m
-            yawed_half_y = (
-                math.cos(yaw_bound) * box_half_y + math.sin(yaw_bound) * box_half_x
-            )
+            yawed_half_y = math.cos(yaw_bound) * box_half_y + math.sin(yaw_bound) * box_half_x
             budget = self.queue_gap - 2.0 * yawed_half_y - self.min_box_clearance_m
             if budget <= 0:
                 problems.append(
@@ -1012,9 +1036,9 @@ class SceneSpec:
         """
 
         self.validate()
-        source_center_x, source_center_y = self.source_center_m
+        source_center_x, source_center_y = self.source_center_live_m
         config: dict[str, Any] = {
-            "source_bin_center_m": [source_center_x, source_center_y + self.source_offset_m],
+            "source_bin_center_m": [source_center_x, source_center_y],
             "source_bin_half_size_m": list(self.source_bin_half_size_m),
             "target_bin_half_size_m": list(self.target_bin_half_size_m),
             "target_bin_world_position_m": [

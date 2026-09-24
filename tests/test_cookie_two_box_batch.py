@@ -2,7 +2,6 @@
 
 from dataclasses import replace
 from pathlib import Path
-
 from types import SimpleNamespace
 
 import mujoco
@@ -10,13 +9,12 @@ import numpy as np
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
-from a3_dual_arm_sim.same_column_batch_expert import A3SameColumnBatchExpert
-from a3_dual_arm_sim.two_box_batch import (
+from a3_dual_arm_sim.relay_batch_expert import (
+    RelayBatchExpert,
     RightBoxCarryController,
     RightBoxPushController,
-    TwoBoxBatchExpert,
 )
-
+from a3_dual_arm_sim.same_column_batch_expert import A3SameColumnBatchExpert
 
 ROOT = Path(__file__).resolve().parents[1]
 DUAL_CONFIG = ROOT / "configs" / "cookie_two_box_batch.yaml"
@@ -44,12 +42,14 @@ def test_dual_box_coordinator_starts_with_a_and_counts_boxes_independently():
     env = A3CookieTransferEnv(DUAL_CONFIG, render_cameras=False)
     try:
         env.reset(seed=0, options=FIXED_SCENE)
-        expert = TwoBoxBatchExpert(env)
+        expert = RelayBatchExpert(env)
         expert.reset()
-        assert expert.stage == "FILL_A"
+        assert expert.stage == "FILL"
+        assert expert.index == 0
         assert expert.box_a != expert.box_b
         assert env._target_bin_body == expert.box_a
         assert expert.counts() == (0, 0)
+        assert expert.all_counts() == [0, 0]
         assert env._target_bin_body == expert.box_a
         for name in ("target_bin_free", "spare_target_bin_free"):
             assert env.model.joint(name).type == mujoco.mjtJoint.mjJNT_FREE
@@ -125,9 +125,7 @@ def test_right_gripper_carries_spare_box_into_station_without_rotation():
         a_joint = env.model.joint("target_bin_free")
         env.data.qpos[a_joint.qposadr + 1] = 0.105
         mujoco.mj_forward(env.model, env.data)
-        pusher = RightBoxCarryController(
-            env, env.model.body("spare_target_bin").id, 0.030
-        )
+        pusher = RightBoxCarryController(env, env.model.body("spare_target_bin").id, 0.030)
         for y in (pusher.anchor[1], pusher.anchor[1] + 0.160):
             target = pusher.anchor.copy()
             target[1] = y
@@ -165,30 +163,26 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
         b_id = env.model.body("spare_target_bin").id
         a_addr = int(env.model.joint("target_bin_free").qposadr[0])
         b_addr = int(env.model.joint("spare_target_bin_free").qposadr[0])
-        env.data.qpos[a_addr:a_addr + 3] = [0.060, 0.120, 0.7493]
-        env.data.qpos[b_addr:b_addr + 3] = [0.0732, 0.0251, 0.7494]
+        env.data.qpos[a_addr : a_addr + 3] = [0.060, 0.120, 0.7493]
+        env.data.qpos[b_addr : b_addr + 3] = [0.0732, 0.0251, 0.7494]
         yaw = np.deg2rad(0.5)
-        env.data.qpos[b_addr + 3:b_addr + 7] = [
-            np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)
-        ]
+        env.data.qpos[b_addr + 3 : b_addr + 7] = [np.cos(yaw / 2), 0, 0, np.sin(yaw / 2)]
         mujoco.mj_forward(env.model, env.data)
         env._target_bin_body = b_id
         half_y = env.config.cookie_transfer.target_bin_half_size_m[1]
         wall = env.config.cookie_transfer.bin_wall_thickness_m
         edge_gap = env.data.xpos[a_id, 1] - env.data.xpos[b_id, 1] - 2 * (half_y + wall)
         assert edge_gap > 0.015
-        assert mujoco.mj_name2id(
-            env.model, mujoco.mjtObj.mjOBJ_GEOM, "box_exchange_guide_left"
-        ) == -1
+        assert (
+            mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "box_exchange_guide_left") == -1
+        )
         filler = A3SameColumnBatchExpert(env)
         filler.reset()
         work = mujoco.MjData(env.model)
         work.qpos[:] = env.data.qpos
         # The batch that fills the *far* column: the place pose is per batch now, so
         # asking for it by column means asking for the group whose column that is.
-        far_column_batch = next(
-            group for group in filler.plan.groups if group.column == 1
-        )
+        far_column_batch = next(group for group in filler.plan.groups if group.column == 1)
         for clearance in (0.0, 0.085):
             pos, rot = filler._place_pose(clearance, far_column_batch)
             quat = np.empty(4)
@@ -196,7 +190,8 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
             work.qpos[filler._l_qpos] = filler._solve_l(pos, quat, filler.q_transit)
             mujoco.mj_forward(env.model, work)
             assert not any(
-                a_id in (
+                a_id
+                in (
                     env.model.geom_bodyid[contact.geom1],
                     env.model.geom_bodyid[contact.geom2],
                 )
@@ -204,14 +199,14 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
                     env.model.geom(geom_id).name.startswith("L_")
                     for geom_id in (contact.geom1, contact.geom2)
                 )
-                for contact in work.contact[:work.ncon]
+                for contact in work.contact[: work.ncon]
             )
     finally:
         env.close()
 
 
 def _push_a_clear_and_fill(env, expert) -> list[int]:
-    """Put the relay in the state `VERIFY_B` is meant to see.
+    """Put the relay in the state the carry verify is meant to see.
 
     Box A is placed clear of the station rather than pushed there -- the push is not
     what these tests are about, and doing it physically would cost minutes.  The
@@ -288,26 +283,26 @@ def test_verify_b_never_parks_between_its_pass_and_fail_thresholds():
         )
         try:
             env.reset(seed=0, options=FIXED_SCENE)
-            expert = TwoBoxBatchExpert(env)
+            expert = RelayBatchExpert(env)
             expert.reset()
             station = np.asarray(env.config.cookie_transfer.target_bin_world_position_m[:2])
             indices = _push_a_clear_and_fill(env, expert)
             _place_box_b(env, station, offset_mm / 1000.0)
 
-            expert.stage = "VERIFY_B"
+            expert.stage = "VERIFY_CARRY"
             expert._settled_steps = 0
             expert._verify_steps = 0
-            expert._a_indices = indices
+            expert.indices[0] = indices
             expert.pusher = SimpleNamespace(done=True)
 
             resolved = False
-            for _ in range(TwoBoxBatchExpert.VERIFY_SETTLE_STEPS + 10):
+            for _ in range(RelayBatchExpert.VERIFY_SETTLE_STEPS + 10):
                 env.step(expert.act())
-                if expert.failed or expert.stage != "VERIFY_B":
+                if expert.failed or expert.stage != "VERIFY_CARRY":
                     resolved = True
                     break
             assert resolved, (
-                f"box B at {offset_mm} mm parked in VERIFY_B: neither the pass "
+                f"box B at {offset_mm} mm parked in the carry verify: neither the pass "
                 f"condition nor the failure fired"
             )
             if offset_mm >= 8.0:
@@ -318,18 +313,19 @@ def test_verify_b_never_parks_between_its_pass_and_fail_thresholds():
                     f"the failure should quote the measured distance, got: {expert.failed}"
                 )
             else:
-                assert expert.stage == "FILL_B", (
+                assert expert.stage == "FILL", (
                     f"a box inside the pass threshold should advance, got {expert.stage}"
                 )
+                assert expert.index == 1, "and the lane should have moved on to box 2"
         finally:
             env.close()
 
 
-def test_verify_a_never_parks_when_a_overshoots_its_failure_threshold():
-    """Box A pushed 50-85 mm used to stall `VERIFY_A` the same way.
+def test_verify_push_never_parks_when_a_box_overshoots_its_failure_threshold():
+    """A box pushed 50-85 mm used to stall the push verify the same way.
 
     The pass condition was 85 mm of clearance and the failure fired only below
-    50 mm, so an A that ended up in between parked the stage.
+    50 mm, so a box that ended up in between parked the stage.
     """
 
     env = A3CookieTransferEnv(
@@ -341,7 +337,7 @@ def test_verify_a_never_parks_when_a_overshoots_its_failure_threshold():
     )
     try:
         env.reset(seed=0, options=FIXED_SCENE)
-        expert = TwoBoxBatchExpert(env)
+        expert = RelayBatchExpert(env)
         expert.reset()
         station = np.asarray(env.config.cookie_transfer.target_bin_world_position_m[:2])
         indices = _push_a_clear_and_fill(env, expert)
@@ -354,18 +350,18 @@ def test_verify_a_never_parks_when_a_overshoots_its_failure_threshold():
         mujoco.mj_forward(env.model, env.data)
         _fill_box(env, expert, indices)
 
-        expert.stage = "VERIFY_A"
+        expert.stage = "VERIFY_PUSH"
         expert._settled_steps = 0
         expert._verify_steps = 0
-        expert._a_indices = indices
+        expert.indices[0] = indices
         expert.pusher = SimpleNamespace(done=True)
 
-        for _ in range(TwoBoxBatchExpert.VERIFY_SETTLE_STEPS + 10):
+        for _ in range(RelayBatchExpert.VERIFY_SETTLE_STEPS + 10):
             env.step(expert.act())
             if expert.failed:
                 break
         assert expert.failed is not None, (
-            "box A at 65 mm of clearance parked in VERIFY_A instead of being reported"
+            "box A at 65 mm of clearance parked in the push verify instead of being reported"
         )
         assert "65.0 mm" in expert.failed, (
             f"the failure should quote the measured clearance, got: {expert.failed}"

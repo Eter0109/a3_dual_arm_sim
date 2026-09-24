@@ -15,7 +15,7 @@ from pathlib import Path
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
-from a3_dual_arm_sim.two_box_batch import TwoBoxBatchExpert
+from a3_dual_arm_sim.relay_batch_expert import RelayBatchExpert
 
 
 def main() -> int:
@@ -57,7 +57,7 @@ def main() -> int:
     expert = None
     try:
         env.reset(seed=args.seed, options={"randomize_cookies": False})
-        expert = TwoBoxBatchExpert(env)
+        expert = RelayBatchExpert(env)
         expert.reset()
         last_status = None
         for steps in range(1, args.max_steps + 1):

@@ -403,7 +403,8 @@ src/a3_dual_arm_sim/model.py              DONE  N target boxes instead of target
 src/a3_dual_arm_sim/cookie_transfer.py    DONE  N boxes in randomization and reset
 src/a3_dual_arm_sim/batch_expert.py        DONE  batch plan instead of the literal 5
 src/a3_dual_arm_sim/same_column_batch_expert.py   DONE  same, and `_is_later_batch`
-src/a3_dual_arm_sim/relay_batch_expert.py  NEW  TwoBoxBatchExpert generalised to N
+src/a3_dual_arm_sim/relay_batch_expert.py  DONE  the lane relay, N boxes
+tests/test_relay_lane.py              DONE  the stages, the push distance, the final check
 src/a3_dual_arm_sim/tasks.py               contract strings derived from the spec
 src/a3_dual_arm_sim/collection.py          one spec-driven scene builder
 src/a3_dual_arm_sim/cli.py                 --scene-spec key=value,...
@@ -593,6 +594,50 @@ over the lane, with the line-shove push and the carry's timeout scaled by the
 slide distance.  *Gate:* N=2 unchanged at 3/3; N=3 measured, and the parked line's
 x drift and yaw recorded (they are not currently graded, so they have to be
 *measured* to know whether they can be ignored).
+
+*Done, and the anchor is exact again.*  The module is `relay_batch_expert.py` and the
+coordinator is `RelayBatchExpert`, with stages named for what they do rather than for
+which box they touch: `FILL`, `PUSH`, `VERIFY_PUSH`, `CARRY`, `VERIFY_CARRY`,
+`VERIFY_ALL`.  `index` says which box is at the station, and the lane is worked from
+the station backwards.
+
+**The push is what generalises.**  A box pushed out of the station arrives at
+``station + push_distance``; a box already parked there is shoved along by *contact*, so
+the line advances by one push distance per fill and the pads never touch a parked box.
+Pad travel is therefore the same whatever the box count, which is what the measured
+envelope requires -- the pads reach 99 mm at the shipped station, so they can only ever
+follow the box they are pushing.  That is also why the parked boxes' x and yaw are
+reported but not graded: they were moved by contact, not by a controller.
+
+**The anchor is checked by hashing the action stream**, as in Phase 3: 1500 steps of a
+two-box episode, identical digest `c5d52832...` against the previous commit.  A longer
+comparison covering the push stage is recorded in the commit.
+
+**Two real bugs fell out of writing the tests, and both were in Phase 5's work rather
+than this phase's:**
+
+* **A lane's source bin moved without its Cookie layout.**  `derive_config` offset
+  `source_bin_center_m` by `source_offset_m` while generating `cookie_source_positions_m`
+  about the un-offset centre, so the three-box lane had a bin with a strip of empty floor
+  at one end and a row of Cookies on the floor at the other: measured, **64 of 80
+  Cookies** registered as being in the source after a reset, and every criterion that
+  counts them was wrong by 16.  Fixed by `source_center_live_m`, which the layout, the
+  bin and the half size all read.  The half size had to be computed from the lattice's
+  *extent* rather than from the placed positions, because going through the positions
+  would close a cycle -- the centre is what the offset moves -- and the two are the same
+  number for a symmetric lattice.
+* **The final check demanded that every box past the station sit within 8 mm of it**,
+  which only the last one ever does.  Measured on a three-box lane laid out exactly as
+  intended -- box 2 at the station, boxes 1 and 0 parked at 90 and 180 mm -- the middle
+  box was 90 mm out and the criterion refused it.  It now grades the last box by
+  *arrival* and every box behind it by *clearance*, which for two boxes is the shipped
+  pair of statements exactly.
+
+The `push_distance` is a parameter with its measured default (90 mm), not the derived
+`lane_pitch` (87 mm): the derived pitch would also satisfy the 85 mm clearance, but 90 is
+what the push and the carry were calibrated against and changing it by 3 mm would
+invalidate a yield that took an 80-minute run to measure.  It is documented as the number
+`source_offset_m` is computed from, so the two cannot drift apart silently.
 
 **Phase 5 -- derived randomization and the gate.**  *Gate:* for every config in
 the test matrix, 500 drawn layouts pass reach + clearance + lane checks; and a

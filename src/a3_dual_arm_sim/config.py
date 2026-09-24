@@ -418,6 +418,18 @@ class SimConfig:
     #: The smallest grasp size whose grasp has been measured to work.  See
     #: :attr:`batch_expert_per_grasp` for the numbers behind it.
     min_verified_batch_expert_per_grasp: int = 5
+    #: How far the relay's push moves a filled box out of the filling station, in
+    #: metres.  It is the spacing the lane compacts to and therefore what the source
+    #: bin's clearance is computed from (see ``SceneSpec.source_offset_m``), so the
+    #: two have to agree.
+    #:
+    #: 90 mm is the relay's measured value.  It is deliberately *not* the derived
+    #: ``lane_pitch`` (87 mm for this box) even though that would satisfy the 85 mm
+    #: clearance the push is verified at: 90 is what the push and the carry were
+    #: calibrated against, and changing it by 3 mm would invalidate a yield that took
+    #: an 80-minute run to measure.  So it is a parameter with its measured default,
+    #: like ``min_push_m``, rather than a formula.
+    relay_push_distance_m: float = 0.090
     object_position_noise_m: float = 0.025
     home: HomeConfig = field(default_factory=HomeConfig)
     cameras: CameraConfig = field(default_factory=CameraConfig)
@@ -435,6 +447,10 @@ class SimConfig:
         if self.batch_expert_per_grasp < 1:
             raise ValueError(
                 f"batch_expert_per_grasp must be at least 1, got {self.batch_expert_per_grasp}"
+            )
+        if self.relay_push_distance_m <= 0:
+            raise ValueError(
+                f"relay_push_distance_m must be positive, got {self.relay_push_distance_m}"
             )
         # The plan supports any size; the *grasp* does not, and this refuses the gap
         # between them rather than collecting episodes nobody has measured.
