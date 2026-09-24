@@ -287,32 +287,50 @@ def test_a_lane_at_the_push_pitch_is_refused_because_its_layout_is_too_tight():
     The push pitch is `box_extent_y + min_box_clearance`, which is the spacing the
     line compacts to *after* a shove, and it is what the source bin's clearance is
     computed from.  Laying a lane out at it is a different question and the answer is
-    no: two boxes 87 mm apart have 13 mm between their outer extents, against the
+    no: two boxes 87 mm apart have 13 mm between their *outer* extents, against the
     25 mm the scene draws within.
 
-    Worth pinning because the scene would still *reset*: the redraw loop finds a
-    layout for the draws that happen to spread the queue out, so the mistake looks
-    like a working scene.  What it really does is constrain the draws -- measured
-    over 40 seeds at the derived pitch, the queue's offsets from nominal are
-    non-increasing on 40 of 40, against 18 of 40 at the relay's gap.  A tight lane
-    does not lose episodes, it loses *variation*, which is the thing the ranges exist
-    to produce and the thing a dataset is collected for.
-
-    So the refusal is at load, where the mistake is, and the message names the gap.
+    This pins the measurement rather than a message, because at the derived pitch the
+    queue-budget check fires first and refuses the lane before anything gets as far as
+    the layout check -- see
+    `test_a_lane_at_the_push_pitch_has_no_room_for_its_own_yaw`.  Both refusals are
+    true; the sharper one is the one a caller sees.
     """
 
-    tight = render_config(BASE_CONFIG, replace(THREE_BOX_SPEC, queue_gap_m=None))
-    path = THREE_BOX_CONFIG.parent / "tmp_tight_pitch_lane.yaml"
-    path.write_text(tight, encoding="utf-8")
-    try:
-        with pytest.raises(ValueError) as excinfo:
-            load_config(path)
-        message = str(excinfo.value)
-        assert "the nominal box layout leaves only" in message
-        assert "outer extents" in message
-        assert "min_box_clearance_m" in message
-    finally:
-        path.unlink()
+    tight = replace(THREE_BOX_SPEC, queue_gap_m=None)
+    assert tight.lane_pitch == pytest.approx(0.087)
+    assert tight.queue_gap == tight.lane_pitch
+    # The measurement: the layout spacing leaves 13 mm, not the 25 mm it draws within.
+    outer_half_y = tight.target_bin_half_size_m[1] + tight.geometry.bin_wall_thickness_m
+    nominal_gap = tight.queue_gap - 2.0 * outer_half_y
+    assert nominal_gap == pytest.approx(0.013, abs=1e-9)
+    assert nominal_gap < tight.min_box_clearance_m
+    # And that is what `CookieSceneConfig.worst_nominal_box_gap_m` reports, so the
+    # load-time check would catch it too if the lane got that far.
+    config = load_config(THREE_BOX_CONFIG)
+    assert config.cookie_transfer.worst_nominal_box_gap_m == pytest.approx(0.086, abs=1e-9)
+    assert (
+        config.cookie_transfer.worst_nominal_box_gap_m >= config.randomization.min_box_clearance_m
+    )
+
+
+def test_a_lane_at_the_push_pitch_has_no_room_for_its_own_yaw():
+    """The same lane, refused one step earlier and by a sharper number.
+
+    Rendering it calls `SceneSpec.validate`, which since Phase 5 also checks that the
+    queue has room for the yaw its boxes arrive with -- and at the derived pitch it
+    does not, because the pitch is exactly `box_extent_y + clearance` while a box
+    turned by the 4 deg the fill tolerates is 70.6 mm wide.  So the message names the
+    gap the lane would need (95.6 mm) rather than only saying the layout is too tight,
+    which is the more useful of the two refusals.
+    """
+
+    tight = replace(THREE_BOX_SPEC, queue_gap_m=None)
+    with pytest.raises(ValueError) as excinfo:
+        tight.derive_config()
+    message = str(excinfo.value)
+    assert "leaves nothing for the queue to move" in message
+    assert "the gap has to exceed 95.6 mm" in message
 
 
 def test_the_source_bin_clears_the_line_the_fills_will_leave_behind():

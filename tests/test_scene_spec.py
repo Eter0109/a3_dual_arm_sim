@@ -321,14 +321,20 @@ def test_the_lane_wants_its_station_as_far_in_as_the_band_allows():
 
 
 def test_a_station_below_the_measured_band_is_refused():
-    """The fill's own pre-check is the authority, and the band's floor is measured."""
+    """The fill's own pre-check is the authority, and the band's floor is measured.
+
+    The floor is 22 mm at the relay's station on the 2 mm grid this table was taken
+    on.  It read 30 mm while the table came from a 30 mm grid, which only ever
+    *overstates* a floor -- so the earlier number was conservative rather than wrong,
+    and the finer sweep is what Phase 5 needed to derive a range from.
+    """
 
     spec = replace(two_box_spec(), station_y_m=0.020)
     with pytest.raises(ValueError) as excinfo:
         spec.validate()
     message = str(excinfo.value)
     assert "station y = 20.0 mm is inside the fill's reach" in message
-    assert "it starts at 30.0 mm" in message
+    assert "it starts at 22.0 mm" in message
 
 
 def test_an_unmeasured_station_is_refused_rather_than_extrapolated():
@@ -364,8 +370,12 @@ def test_the_measured_tables_round_outwards():
     assert envelopes.pad_y_cap(0.075) == 0.099
     # Below the sweep's first entry, the first entry's value.
     assert envelopes.pad_y_cap(0.010) == 0.124
-    assert envelopes.station_min_y(0.010) == 0.030
-    assert envelopes.station_min_y(0.080) == 0.060
+    # The band's floor, from the 2 mm sweep: 16 mm at the first entry, and 40 mm at
+    # 0.090 -- not the 60 mm a 30 mm grid reported, which is the sampling artefact
+    # the finer sweep was run to remove.
+    assert envelopes.station_min_y(0.010) == 0.016
+    assert envelopes.station_min_y(0.080) == 0.034
+    assert envelopes.station_min_y(0.090) == 0.040
 
 
 def test_every_problem_is_reported_at_once():

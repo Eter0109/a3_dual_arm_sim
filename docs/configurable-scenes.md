@@ -395,11 +395,14 @@ src/a3_dual_arm_sim/batch_plan.py     DONE  the batch plan and slot grouping
 tests/test_scene_spec.py              DONE  the two anchors, and every bound
 scripts/generate_scene_config.py      DONE  spec -> config, for a new layout
 tests/test_scene_lanes.py             DONE  N boxes: config, model, reset, clearance
-src/a3_dual_arm_sim/scene_spec_validate.py  NEW  the Monte-Carlo gate
+tests/test_batch_grasp_size.py        DONE  the plan at every grasp size, and its floor
+src/a3_dual_arm_sim/scene_spec_validate.py  DONE  the corner sweep and the draws
+tests/test_scene_randomization_spec.py DONE the derived ranges, and the gate
+scripts/check_scene_randomization.py  DONE  the derivation, corners and fit, per scene
 src/a3_dual_arm_sim/model.py              DONE  N target boxes instead of target+spare
 src/a3_dual_arm_sim/cookie_transfer.py    DONE  N boxes in randomization and reset
-src/a3_dual_arm_sim/batch_expert.py        batch plan instead of the literal 5
-src/a3_dual_arm_sim/same_column_batch_expert.py   same
+src/a3_dual_arm_sim/batch_expert.py        DONE  batch plan instead of the literal 5
+src/a3_dual_arm_sim/same_column_batch_expert.py   DONE  same, and `_is_later_batch`
 src/a3_dual_arm_sim/relay_batch_expert.py  NEW  TwoBoxBatchExpert generalised to N
 src/a3_dual_arm_sim/tasks.py               contract strings derived from the spec
 src/a3_dual_arm_sim/collection.py          one spec-driven scene builder
@@ -409,7 +412,12 @@ configs/generated/*.yaml                   the specs the shipped scenes decode t
 
 `scene_spec.py` must not import MuJoCo, for the same reason `tasks.py` does not:
 `training` imports on hosts where the simulator wheels will not load.  It imports
-`batch_plan` and nothing else.
+`batch_plan` and `config` (which is also MuJoCo-free) and nothing else.
+
+`scene_spec_validate.py` is the opposite: it imports the simulator, because its whole
+job is to run the scene's own checks on drawn layouts.  Nothing that only wants to
+*describe* a scene should import it -- which is why the derivation and the gate are two
+modules rather than one.
 
 The shipped YAML configs stay.  They become the *frozen artifacts* of two specs,
 and a test asserts `spec.derive_config()` reproduces them -- so the configs keep
@@ -590,6 +598,63 @@ x drift and yaw recorded (they are not currently graded, so they have to be
 the test matrix, 500 drawn layouts pass reach + clearance + lane checks; and a
 deliberately over-wide range is refused with a reason naming the box and the
 distance.
+
+*Done, and the gate does not work the way the plan said.*  Two findings, both of
+which changed the design:
+
+**A range fails at its corners, and random draws do not reach them.**  The relay's
+derived ranges have four failing corners; six random draws report *nothing*.  So a
+shrink loop driven by draws alone returned the failing range unchanged -- which is
+what the first version of this did.  The gate therefore checks the corners of every
+range explicitly (deterministic, 4 s for a three-box scene) and uses the draws as a
+backstop.  The draw count is 40 by default rather than the plan's 500 because a
+`reset` is **5.4 s** -- 500 draws would be 45 minutes a config -- while the three
+checks on a layout already drawn are 65 ms together.  The corners are what a range
+fails on, so the cheap deterministic check is the one that matters.
+
+**The relay's shipped range has a corner outside its own window.**  It draws x up to
++4 mm with y down to -6 mm, and the fill's pre-check refuses that combination:
+"position error 2.11 mm, angle error 1.86 deg".  No per-axis bound predicts it -- the
++x reach at the nominal y is wider, and so is the -y reach at the nominal x.  It is a
+2 mm by 2 mm triangle of a range 84 mm wide and 46 mm tall, so about 1 episode in
+2000, far below the resolution of the 3-seed measurement those ranges were validated
+by.  It is recorded rather than "fixed", and it is the argument for having a gate.
+
+What is derived, per box, and the distinction that makes it tractable -- **a box's y
+offset does not survive the carry, but its x and yaw do**:
+
+```
+station   x: the acceptance window's -x bound, and the +x that keeps the corner inside
+          y: [-y] the band floor at that x; [+y] lane_pitch - min_push_m (a lane)
+             or the window's own edge (a single box, which never pushes)
+queue     y: the pairwise clearance formula, on the box's YAWED outer extent
+          x, yaw: the fill's window, because those are what arrive at the station
+source    y: its clearance to the station box, the pair a lane never moves
+```
+
+The `+x` comes from the band table read the other way round -- the window is *one*
+curve in (x, y), and tabulating it twice (once as a floor, once as an x limit) produced
+a table in offsets from one station that could not be used at another: the single-box
+scene derived `+x = -4 mm`, a box forbidden from moving towards the arm at all, from a
+window measured 60 mm away and 70 mm lower.
+
+The measured envelopes changed with the finer sweeps this phase needed:
+
+* the fill band's floor is **14-20 mm lower** than the 30 mm grid said (0.022 at the
+  relay's station, not 0.030) -- a coarse grid only ever overstates a floor;
+* the window's `+x` at `dy = 0` is about +6 mm and rises to +12 mm by `dy = +4 mm`;
+* the carry's `x` envelope is **-75 to +65 mm**, an order of magnitude wider than the
+  shipped `+/-4 mm`, so a queue box's x is not bounded by the carry at all.
+
+What the loop converges to, and what it costs: `fit_randomization` shrinks uniformly
+(0.75 a step, 21 s) to `x[-79, 0] y[-5, +21]` for the relay -- whose -x lands within a
+millimetre of the range a person tuned by hand (-80 mm), a pleasant check that it is
+not merely shrinking towards nothing.  Uniform rather than per-axis because the
+windows are coupled: the relay's failure is at `(+4, -6)` and the derived one at
+`(-140, +37)`, so the axis that is "wrong" is not the one that has to move.
+
+`scripts/check_scene_randomization.py` prints the derivation, the corners and the fit
+for every shipped scene.
 
 **Phase 6 -- one profile for every layout.**  Re-tune the carry for
 `arm_actuator_damping = 1.0`, then flip the relay to `fast`.  *Gate:* relay 3/3 at

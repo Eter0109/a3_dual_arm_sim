@@ -49,6 +49,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .batch_plan import BatchPlan
+from .config import AxisRange
 
 #: Height of the tabletop the boxes stand on, and therefore the z of every box's
 #: body.  The table's own top face is at 0.750; the 3 mm is the boxes' floor
@@ -185,7 +186,13 @@ class MeasuredEnvelopes:
     #: The y at which the fill's own reachability pre-check starts accepting a
     #: station, by x.  Below it the placement pose's IK misses by more than its
     #: 2 mm / 0.035 rad rule.  The band is diagonal: a box further out in x has to
-    #: be further out in y as well.  Measured by rebuilding the env at each pose.
+    #: be further out in y as well.
+    #:
+    #: Measured on a 2 mm grid, one env with the box moved by writing its free joint
+    #: (about 65 ms a point, against a 5.4 s reset).  A coarse 30 mm grid was used
+    #: first and overstated the floor by up to 20 mm -- which is only *conservative*,
+    #: but it also made the table misleading to read and would have shrunk a derived
+    #: range for no reason.
     #:
     #: It is a function of x alone, and in particular independent of how tall the
     #: box is: the placement pose is aimed at a *column's* centre, and a centred
@@ -193,12 +200,53 @@ class MeasuredEnvelopes:
     #: So a tall box does not push this band outwards, which is what makes a
     #: capacity of 16 as feasible as a capacity of 10.
     station_min_y_by_x_m: tuple[tuple[float, float], ...] = (
-        (0.030, 0.030),
-        (0.060, 0.030),
-        (0.075, 0.030),
-        (0.090, 0.060),
-        (0.110, 0.090),
+        (0.030, 0.016),
+        (0.050, 0.018),
+        (0.060, 0.018),
+        (0.075, 0.022),
+        (0.085, 0.034),
+        (0.090, 0.040),
+        (0.100, 0.056),
+        (0.110, 0.072),
     )
+    #: How far out in +x a station may sit, as a function of how far out in +y it is.
+    #: This is *the same boundary* as :attr:`station_min_y_by_x_m` read the other way
+    #: round -- at x = 0.085 the floor is 0.034 and the boundary's +x limit at
+    #: dy = +4 mm is +10 mm, which is the same point -- so it is not tabulated
+    #: separately.  See :meth:`MeasuredEnvelopes.station_max_x`.
+    #:
+    #: It was tabulated separately, briefly, and the duplication was worse than
+    #: redundant: a table in *offsets* from one station cannot be used at another, and
+    #: the single-box scene's station at (0.095, 0.100) derived a +x range of -4 mm --
+    #: a box forbidden from moving towards the arm at all -- from a window measured
+    #: 60 mm away and 70 mm lower.
+    #:
+    #: How far in -x a station may sit, at the nominal y.  Two sweeps agree to within
+    #: 10 mm and disagree about which is tighter, because the bound is a property of
+    #: *where* the station is rather than a constant: measured here at the relay's
+    #: station it is -150 mm (and -160 mm missed by 3.13 mm), while the single-box
+    #: scene's own sweep reports -140 mm at its station.  The tighter of the two is
+    #: used, so a derived range is safe at either.
+    #:
+    #: The shipped relay draws x up to +4 mm with y down to -6 mm, and the boundary
+    #: there is about +2 mm: a *corner* of its range is outside the window, measured
+    #: as "position error 2.27 mm, angle error 2.00 deg" against a 2.005 deg bound.
+    #: That corner is a 2 mm by 2 mm triangle of a range 84 mm wide and 46 mm tall,
+    #: so it costs about 1 episode in 2000 -- far below the resolution of the 3-seed
+    #: measurement the shipped ranges were validated by, which is why it is recorded
+    #: rather than "fixed" by narrowing a range whose yield has been measured.
+    station_window_dx_min_m: float = -0.140
+    #: How far out in +y a station may sit, at the nominal x.  The sweep's own edge:
+    #: every step from +8 mm to +52 mm was accepted, so this is a floor on the real
+    #: bound rather than the bound itself.  A lane does not use it -- its +y is set by
+    #: the push it still has to perform -- but a single-box scene has no push and
+    #: nothing else measured to bound it.
+    station_window_dy_max_m: float = 0.052
+    #: How far a station may yaw, at the nominal pose.  Also the sweep's edge: every
+    #: step from 0 to +/-4 deg was accepted, so the real bound is wider.  What stops
+    #: a yaw in practice is not the yaw alone but the yaw *combined* with an x and y
+    #: offset, which is the same coupling as above.
+    station_window_dyaw_rad: float = math.radians(4.0)
     #: A source column is usable if its x is at or below this.  The shipped layout
     #: puts its four columns at 0.0994 / 0.1498 / 0.2002 / 0.2506 and only the
     #: first two are: at 0.2002 a five-Cookie batch's approach pose misses by
@@ -261,6 +309,101 @@ class MeasuredEnvelopes:
             column_x_m,
             "the source grasp band",
         )
+
+    def station_max_x(self, y_m: float, x_ceiling_m: float) -> float:
+        """The largest x whose band floor is at or below ``y_m``.
+
+        The band's boundary is one curve in (x, y), so this reads
+        :attr:`station_min_y_by_x_m` the other way round rather than tabulating the
+        same measurements twice.  ``x_ceiling_m`` caps the answer at something the
+        sweep covered, because past the last entry there is nothing to say.
+        """
+
+        widest = self.station_min_y_by_x_m[0][0]
+        for entry_x, floor in self.station_min_y_by_x_m:
+            if floor > y_m + 1e-12:
+                break
+            widest = entry_x
+        return min(widest, x_ceiling_m)
+
+
+@dataclass(frozen=True)
+class BoxRange:
+    """One box's draw ranges, as offsets from its nominal pose."""
+
+    x_m: AxisRange = field(default_factory=AxisRange)
+    y_m: AxisRange = field(default_factory=AxisRange)
+    yaw_rad: AxisRange = field(default_factory=AxisRange)
+
+    @property
+    def enabled(self) -> bool:
+        return self.x_m.movable or self.y_m.movable or self.yaw_rad.movable
+
+
+@dataclass(frozen=True)
+class SceneRandomizationSpec:
+    """How far each thing in the scene may move between episodes.
+
+    Derived rather than hand-tuned, which is what the user asked for: *"how do we
+    make sure that with n boxes the randomization does not let the boxes hit each
+    other"*.  The answer has three parts and they are worth keeping apart, because
+    only the first is a formula:
+
+    1. **A pairwise clearance formula.**  Two neighbours ``gap`` apart, each drawn
+       within its own range, must still leave ``min_box_clearance_m`` between their
+       *outer* extents -- and a yawed box's outer extent is wider than its half size,
+       so the formula uses the yawed one.  For symmetric ranges that is
+       ``2r <= gap - yawed_extent - clearance``, and the station box's own range
+       eats into the same budget, so ``r <= gap - yawed_extent - clearance -
+       |station_y_low|``.  This is exact for a pair, and adjacent pairs are the
+       binding ones.
+    2. **The measured windows**, for what the formula cannot see: the fill's
+       acceptance window bounds where a box may sit or yaw when it is *filled*, and
+       the band floor bounds how far -y that is.
+    3. **A gate**, because 1 and 2 are per-axis bounds measured with the other axes
+       at nominal, and the windows are *coupled* -- the relay's shipped range has a
+       corner outside its own window, which no per-axis bound predicts.  See
+       :mod:`a3_dual_arm_sim.scene_spec_validate`.
+
+    The distinction that makes the derivation tractable: **a box's y offset does not
+    survive the carry, but its x and yaw do.**  The carry slides the queue's boxes to
+    the station's y whatever y they started at, so the queue's y range is bounded only
+    by the clearance formula and the arm's reach, while its x and yaw ranges are
+    bounded by the fill's window -- because those are what arrive with it.
+    """
+
+    station: BoxRange = field(default_factory=BoxRange)
+    queue: BoxRange = field(default_factory=BoxRange)
+    source: BoxRange = field(default_factory=BoxRange)
+    arm_home_rad: AxisRange = field(default_factory=AxisRange)
+    min_box_clearance_m: float = 0.025
+    max_clearance_attempts: int = 200
+
+    def as_config(self) -> dict[str, Any]:
+        """The top-level ``randomization`` section, in the config's own key names.
+
+        The station's ranges keep the ``target_bin_*`` names and every box behind it
+        shares the ``spare_bin_*`` ones, because those are roles rather than indices
+        -- see ``A3CookieTransferEnv._apply_scene_randomization``.
+        """
+
+        def pair(axis: AxisRange) -> list[float]:
+            return [axis.low, axis.high]
+
+        return {
+            "source_bin_x_m": pair(self.source.x_m),
+            "source_bin_y_m": pair(self.source.y_m),
+            "source_bin_yaw_rad": pair(self.source.yaw_rad),
+            "target_bin_x_m": pair(self.station.x_m),
+            "target_bin_y_m": pair(self.station.y_m),
+            "target_bin_yaw_rad": pair(self.station.yaw_rad),
+            "spare_bin_x_m": pair(self.queue.x_m),
+            "spare_bin_y_m": pair(self.queue.y_m),
+            "spare_bin_yaw_rad": pair(self.queue.yaw_rad),
+            "arm_home_rad": pair(self.arm_home_rad),
+            "min_box_clearance_m": self.min_box_clearance_m,
+            "max_clearance_attempts": self.max_clearance_attempts,
+        }
 
 
 @dataclass(frozen=True)
@@ -333,6 +476,14 @@ class SceneSpec:
     #: guessing.  Until then a lane states its gap, and the two shipped two-box
     #: scenes state theirs as 160 mm because that is what they were built with.
     queue_gap_m: float | None = None
+    #: How much push a lane's fill must still have left to perform, which is what
+    #: bounds the station box's +y draw.  A box that starts most of the way to the
+    #: parking position has no push left, and the push is the mechanism the whole
+    #: relay is built on -- so this is a *workflow* bound rather than a geometric one,
+    #: and it is a field because nothing about the arm measures it.  The shipped
+    #: relay's +40 mm draw against a 90 mm push leaves 50 mm of push, which is where
+    #: this default comes from.
+    min_push_m: float = 0.050
 
     geometry: CookieGeometry = field(default_factory=CookieGeometry)
     envelopes: MeasuredEnvelopes = field(default_factory=MeasuredEnvelopes)
@@ -575,6 +726,133 @@ class SceneSpec:
         source_front = self.source_center_m[1] - self.source_bin_half_size_m[1]
         return max(0.0, parked_front + self.min_box_clearance_m - source_front)
 
+    # ------------------------------------------------------------- randomization
+    @property
+    def randomization(self) -> SceneRandomizationSpec:
+        """The draw ranges this spec derives, as the formula's answer.
+
+        Not a promise: these are per-axis bounds taken from measurements made with
+        the other axes at nominal, and the acceptance windows are *coupled*.  What
+        says whether a range is usable is the gate in
+        :mod:`a3_dual_arm_sim.scene_spec_validate`, which draws layouts and runs the
+        scene's own checks on each.  This is the starting point it validates.
+
+        What each range comes from, and why the station and the queue differ:
+
+        * the **station** box is filled where it stands, so its y is bounded below by
+          the band floor and above by the push it still has to perform, and its x by
+          the window at that y.  Those two are coupled -- the floor rises with x --
+          so the pair is solved by a short fixpoint, which converges because the
+          shipped numbers make it a one-step correction.
+        * the **queue** boxes are *carried* to the station, and the carry slides them
+          to the station's y whatever y they started at.  So their y is bounded only
+          by the clearance formula, while their x and yaw are bounded by the fill's
+          window -- because x and yaw are what arrive with them.
+        * the **source** bin is bounded by its clearance to the station box, which is
+          the pair the lane does not move.
+        """
+
+        envelopes = self.envelopes
+        yaw_bound = AxisRange(
+            low=-envelopes.station_window_dyaw_rad, high=envelopes.station_window_dyaw_rad
+        )
+
+        # --- the station
+        # +y: a lane is bounded by the push it must still perform; a single box has
+        # no push, so it is bounded by the window's own edge.
+        if self.boxes >= 2:
+            station_y_high = self.lane_pitch - self.min_push_m
+        else:
+            station_y_high = envelopes.station_window_dy_max_m
+        # -y: the band floor.  The floor rises with x and x is drawn independently,
+        # so the floor is taken at the far end of the x range -- and the x range's
+        # far end depends on the floor.  Two monotone steps settle it: the shipped
+        # numbers converge on the first.
+        x_high = 0.0
+        for _ in range(8):
+            y_low = envelopes.station_min_y(self.station_x_m + x_high) - self.station_y_m
+            settled = (
+                envelopes.station_max_x(
+                    self.station_y_m + y_low,
+                    envelopes.station_min_y_by_x_m[-1][0],
+                )
+                - self.station_x_m
+            )
+            if abs(settled - x_high) < 1e-12:
+                break
+            x_high = settled
+        station = BoxRange(
+            x_m=AxisRange(low=envelopes.station_window_dx_min_m, high=x_high),
+            y_m=AxisRange(low=y_low, high=station_y_high),
+            yaw_rad=yaw_bound,
+        )
+
+        # --- the queue.  A single-box scene has no queue, so its ranges are empty:
+        # the keys still exist in a config, and the env ignores them when there is no
+        # box to move.
+        #
+        # The yawed extent is the honest width for the clearance formula: a box turned
+        # by the yaw bound is wider than its half size, and the boxes are tens of
+        # millimetres apart, so ignoring that would pass a draw that overlaps.  The
+        # *box's* half size, not the Cookie's -- the first version of this used
+        # `geometry.half_size_m` and got a 4 mm box instead of a 63 mm one, which made
+        # the y range six times too wide.
+        #
+        # The budget can come out negative, and that is the Phase 2 finding restated:
+        # a lane laid out at the *derived* pitch has no room for the yaw the fill
+        # tolerates, because the pitch is exactly `box_extent_y + clearance` and the
+        # yaw widens the extent.  It is reported by `validate` with the number rather
+        # than clamped silently.
+        box_half_x, box_half_y = self.target_bin_half_size_m
+        yaw_magnitude = max(abs(yaw_bound.low), abs(yaw_bound.high))
+        yawed_half_y = math.cos(yaw_magnitude) * box_half_y + math.sin(yaw_magnitude) * box_half_x
+        budget = self.queue_gap - 2.0 * yawed_half_y - self.min_box_clearance_m
+        if self.boxes >= 2:
+            # The station's own range eats into the same budget, and a symmetric queue
+            # range has to clear the box below it as well as the station above it.
+            queue_y_half = max(0.0, min(budget - abs(y_low), budget / 2.0))
+            queue = BoxRange(
+                x_m=AxisRange(low=envelopes.station_window_dx_min_m, high=x_high),
+                y_m=AxisRange(low=-queue_y_half, high=queue_y_half),
+                yaw_rad=yaw_bound,
+            )
+        else:
+            queue = BoxRange()
+
+        # --- the source bin, against the station box: the pair the lane never moves.
+        # One box's half size each, not two: the gap is between centres, and the
+        # clearance is what is left after both outer extents are taken off it.
+        source_gap = self.source_center_m[1] - self.station_y_m
+        source_budget = (
+            source_gap
+            - self.source_bin_half_size_m[1]
+            - self.target_bin_half_size_m[1]
+            - self.min_box_clearance_m
+        )
+        # The station box can move up into the source, so what is left for the bin's
+        # own downward draw is the budget less that.
+        source_y_half = max(0.0, source_budget - station_y_high)
+        source = BoxRange(
+            y_m=AxisRange(low=-source_y_half, high=source_y_half),
+            yaw_rad=AxisRange(low=-0.05, high=0.05),
+        )
+
+        return SceneRandomizationSpec(
+            station=station,
+            queue=queue,
+            source=source,
+            #: Kept at the measured value: the arm's start jitter is not bounded by
+            #: any of the geometry above, only by the arm still being able to reach
+            #: its first pose from wherever it starts.
+            arm_home_rad=AxisRange(low=-0.04, high=0.04),
+            min_box_clearance_m=self.min_box_clearance_m,
+        )
+
+    def derive_randomization(self) -> dict[str, Any]:
+        """The ``randomization`` section for :meth:`randomization`."""
+
+        return self.randomization.as_config()
+
     # --------------------------------------------------------------- validation
     def validate(self) -> None:
         """Refuse a spec that is outside the measured bounds, naming the number.
@@ -685,6 +963,30 @@ class SceneSpec:
                 f"out in +y, past the {envelopes.source_offset_cap_m * 1000:.1f} mm it "
                 f"can move"
             )
+
+        # A lane's queue has to have room for the yaw its boxes arrive with.  The
+        # budget is the queue gap less both boxes' *yawed* outer extents and the
+        # clearance, and it can come out negative -- which is the Phase 2 finding
+        # restated: a lane laid out at the derived pitch has no room at all, because
+        # the pitch is exactly `box_extent_y + clearance` and the yaw widens the
+        # extent.  Reported rather than clamped, because a zero-width range is a
+        # scene that cannot vary and would look like a working configuration.
+        if self.boxes >= 2:
+            yaw_bound = envelopes.station_window_dyaw_rad
+            box_half_x, box_half_y = self.target_bin_half_size_m
+            yawed_half_y = (
+                math.cos(yaw_bound) * box_half_y + math.sin(yaw_bound) * box_half_x
+            )
+            budget = self.queue_gap - 2.0 * yawed_half_y - self.min_box_clearance_m
+            if budget <= 0:
+                problems.append(
+                    f"a queue gap of {self.queue_gap * 1000:.1f} mm leaves nothing for "
+                    f"the queue to move: two boxes turned by the {math.degrees(yaw_bound):.1f} "
+                    f"deg the fill tolerates are {2.0 * yawed_half_y * 1000:.1f} mm wide, "
+                    f"against the {self.min_box_clearance_m * 1000:.1f} mm clearance, so "
+                    f"the gap has to exceed "
+                    f"{(2.0 * yawed_half_y + self.min_box_clearance_m) * 1000:.1f} mm"
+                )
 
         if problems:
             listed = "\n".join(f"  - {problem}" for problem in problems)
