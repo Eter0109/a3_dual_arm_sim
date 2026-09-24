@@ -396,6 +396,28 @@ class SimConfig:
     # documents; "baseline" is the slower tuning the two-box relay is
     # calibrated around.
     batch_expert_profile: str = "fast"
+    #: How many Cookies one grasp takes.  The expert's batch size, and what the
+    #: fill's plan is built from: this many Cookies are grasped in a line and placed
+    #: into this many consecutive slots of *one* target column, so a batch cannot
+    #: span two columns and the value is bounded above by a column's row count
+    #: (``ceil(capacity / columns)``) as well as by the jaw travel
+    #: (``per_grasp * source_row_pitch - pad_thickness <= 0.085``).
+    #:
+    #: **Five is currently the only value the grasp itself is verified at**, and the
+    #: config refuses anything below it rather than collecting at a yield nobody has
+    #: measured.  What was measured, at three seeds each on the same-column scene:
+    #: five places ten Cookies in 483-543 steps, while one, two and three all fail at
+    #: their *first* batch with the pads closed to the floor and at most 0.06 N of
+    #: contact.  The plan is not the problem -- it derives correctly for every size
+    #: from 1 to 10, and a test partitions all of them -- so what is missing is the
+    #: grasp's own tuning: the pads descend onto the batch's outer Cookies and
+    #: compress them, and how far they have to close to build force is a property of
+    #: how many bevels are in the line.  Opening this range up means measuring that,
+    #: not relaxing this check.
+    batch_expert_per_grasp: int = 5
+    #: The smallest grasp size whose grasp has been measured to work.  See
+    #: :attr:`batch_expert_per_grasp` for the numbers behind it.
+    min_verified_batch_expert_per_grasp: int = 5
     object_position_noise_m: float = 0.025
     home: HomeConfig = field(default_factory=HomeConfig)
     cameras: CameraConfig = field(default_factory=CameraConfig)
@@ -410,6 +432,38 @@ class SimConfig:
             raise ValueError("physics_hz must be an integer multiple of control_hz")
         if self.horizon < 1 or self.image_width < 1 or self.image_height < 1:
             raise ValueError("horizon and image dimensions must be positive")
+        if self.batch_expert_per_grasp < 1:
+            raise ValueError(
+                f"batch_expert_per_grasp must be at least 1, got {self.batch_expert_per_grasp}"
+            )
+        # The plan supports any size; the *grasp* does not, and this refuses the gap
+        # between them rather than collecting episodes nobody has measured.
+        if self.batch_expert_per_grasp < self.min_verified_batch_expert_per_grasp:
+            raise ValueError(
+                f"batch_expert_per_grasp is {self.batch_expert_per_grasp}, but only "
+                f"{self.min_verified_batch_expert_per_grasp} and above have a measured "
+                f"grasp: at 1, 2 and 3 Cookies the fill closes the jaws to its floor "
+                f"and reads at most 0.06 N of pad contact, so it never forms the "
+                f"chain the grasp needs, while 5 places all ten Cookies in 483-543 "
+                f"steps.  The plan derives correctly for every size from 1 to 10 -- "
+                f"what is missing is the grasp's own tuning, which is a measurement "
+                f"rather than a parameter"
+            )
+        # A batch is placed into one column, so it cannot be longer than that
+        # column.  Checked here rather than in the expert because it is a property of
+        # the box and the grasp size together, and it is knowable from the config
+        # alone -- the same reason the nominal box gap is checked here.
+        slots = self.cookie_transfer.target_slots_local_m
+        if slots:
+            columns = len({slot[0] for slot in slots})
+            rows = math.ceil(len(slots) / columns)
+            if self.batch_expert_per_grasp > rows:
+                raise ValueError(
+                    f"batch_expert_per_grasp is {self.batch_expert_per_grasp} but a "
+                    f"target column holds {rows} rows ({len(slots)} slots over "
+                    f"{columns} columns), so a batch could not be placed in one "
+                    f"column; use at most {rows}"
+                )
         if len(self.home.left) != 7 or len(self.home.right) != 7:
             raise ValueError("each arm home pose must contain seven joints")
         if len(self.home.grippers) != 2:

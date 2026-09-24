@@ -504,6 +504,82 @@ clearance it never draws against, and nothing is wrong with it.
 step-identical to today (the anchor again, this time in the simulator); 3 seeds
 each at `per_grasp` 1, 2 and 3 all reach ten in the box.
 
+**Half met, and the half that failed is the more useful result.**  The anchor is
+exact and the plan is right for every size; the *grasp* only works at five, so the
+config now refuses anything below it rather than collecting at a yield nobody has
+measured.
+
+*Done, and the anchor is exact.*  `batch_expert_per_grasp` is a config field, the
+env derives `batch_plan` from its own slot lattice and that field (so the expert
+reads one source of truth rather than deriving its own), and the fill takes each
+batch's size from the plan rather than from `per_grasp` -- a capacity that does not
+divide by the column count gives a *short* batch, and grasping the full size for a
+short batch would leave a Cookie with nowhere to go.
+
+The anchor is checked by hashing the whole action stream of an episode against the
+previous commit: 498 steps, ten Cookies placed, **identical digest**
+(`ead5b159...`).  The phase trace alone would not have been enough, and getting
+there found two real differences that a phase trace hides:
+
+* **`_place_pose` must not average the x.**  Every slot of a column shares its x, so
+  reading the batch's first slot is exact and is the same number the old per-column
+  formula took out of `np.unique`.  A mean of five identical values is one ulp off,
+  and that one ulp propagates through the IK into *every* action of the episode.
+* **The source row pitch is not the layout's nominal pitch.**  The configs write row
+  positions to seven decimals, so the differences between the written values are not
+  all equal -- they alternate 0.0088334 and 0.0088333 -- and their median differs
+  from `rows[1] - rows[0]` in the eighth significant figure.  That is 5 nm, but it is
+  a real difference rather than rounding, and the expert keeps its old expression.
+  A one-Cookie batch has no spacing to measure (`np.median` of an empty difference is
+  NaN), so it falls back to the layout's pitch.
+
+Both are the same lesson as Phase 2's queue gap in a different register: the
+"obviously equivalent" rewrite of an expression is not always equivalent, and the
+only way to know is to measure the thing rather than the shape of it.
+
+`_place_pose` now aims at the batch's own slots rather than at the column's centre.
+For the shipped plan the two are the same point, which is *why* the anchor holds
+here; for a plan with two batches in a column they differ, and using the centre for
+both would drop the second batch in the wrong place.
+
+The same-column expert's first-batch-versus-the-rest tuning is now named
+(`_is_later_batch`, in the base class) rather than spelled `batch_index == 0` in one
+place and `batch_index == 1` in four.  For the shipped two-batch plan those are the
+same two statements, so the anchor is unaffected -- and the docstring records that
+generalising it to *every* later batch of a longer plan is untested, because the
+anchor only pins the two-batch case.
+
+**What failed: the grasp does not scale down.**  A latent bug was found and fixed on
+the way -- the CLOSE phase's narrowest opening was a flat `0.28` of the stroke, which
+is 23.8 mm of jaw gap against a three-Cookie batch 24.0 mm wide, so the phase *opened*
+the jaws from 26.6 mm to 30.2 mm and read 0.00 N for its whole budget.  That floor is
+now scaled by the batch size, exactly reproducing the shipped value at five.
+
+But the grasp still does not form below five, and the remaining cause is not
+plumbing.  Measured, three seeds each on the same-column scene:
+
+```
+  per_grasp   placed   steps   outcome
+         5       10     483-543   ok
+         3        0     ~475      CLOSE timed out; pad forces <= 0.06 N
+         2        0     ~477      CLOSE timed out; pad forces <= 0.06 N
+         1        0     ~477      CLOSE timed out; pad forces 0.00 N
+```
+
+and the geometry at the moment CLOSE starts is the *same* shape in both cases -- the
+pads sit 2.56 mm wider than the batch's outer extent, at 44.23 mm against 41.67 mm for
+five and 26.56 mm against 24.00 mm for three.  What differs is how far they have to
+close to build force: five reaches 1.27 N after 11.68 mm of pad travel, three reaches
+only 3.35 mm before its floor.  So the force a squeeze builds is a property of how
+many bevels are in the line, and the floor -- now proportional to the batch -- is
+still not the right shape for it.
+
+**The bound is therefore declared at five**, with the measurement in the message:
+`min_verified_batch_expert_per_grasp`.  The plan derives correctly for every size
+from 1 to 10 (a test partitions all of them), so the two claims are kept apart: the
+plan is a parameter, the grasp is a measurement.  Opening the range up means
+measuring what the pads have to close to, not relaxing the check.
+
 **Phase 4 -- the N-box relay.**  `TwoBoxBatchExpert` becomes `RelayBatchExpert`
 over the lane, with the line-shove push and the carry's timeout scaled by the
 slide distance.  *Gate:* N=2 unchanged at 3/3; N=3 measured, and the parked line's

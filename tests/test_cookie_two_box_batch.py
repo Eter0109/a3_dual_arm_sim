@@ -184,8 +184,13 @@ def test_fast_exchange_geometry_has_clearance_and_reachable_b_slots():
         filler.reset()
         work = mujoco.MjData(env.model)
         work.qpos[:] = env.data.qpos
+        # The batch that fills the *far* column: the place pose is per batch now, so
+        # asking for it by column means asking for the group whose column that is.
+        far_column_batch = next(
+            group for group in filler.plan.groups if group.column == 1
+        )
         for clearance in (0.0, 0.085):
-            pos, rot = filler._place_pose(clearance, column_index=1)
+            pos, rot = filler._place_pose(clearance, far_column_batch)
             quat = np.empty(4)
             mujoco.mju_mat2Quat(quat, rot.ravel())
             work.qpos[filler._l_qpos] = filler._solve_l(pos, quat, filler.q_transit)

@@ -8,6 +8,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
+from .batch_plan import BatchPlan
 from .config import SimConfig
 from .contracts import ARM_JOINTS, ActionMode
 from .env import A3DualArmEnv
@@ -141,6 +142,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
         self.TARGET_SLOT_TOLERANCE = np.asarray(
             scene_config.target_slot_tolerance_m, dtype=np.float64
+        )
+        #: How this box's slots are grouped into grasps; see :mod:`a3_dual_arm_sim.batch_plan`.
+        #:
+        #: The environment owns it because it owns the slot lattice, and both batch
+        #: experts read it from here rather than each deriving their own -- a
+        #: disagreement between the plan a batch is grasped by and the plan its
+        #: slots are placed into is exactly the kind of mistake this makes
+        #: impossible.  The column count is read off the lattice rather than
+        #: configured, so it cannot drift from the slots it describes.
+        self.batch_plan = BatchPlan.for_capacity(
+            capacity=len(self.TARGET_SLOTS_LOCAL),
+            per_grasp=self.config.batch_expert_per_grasp,
+            columns=len({slot[0] for slot in self.TARGET_SLOTS_LOCAL}),
         )
         self.SOURCE_WALL_TOP_Z = (
             scene_config.source_wall_base_z_m + scene_config.source_bin_wall_height_m

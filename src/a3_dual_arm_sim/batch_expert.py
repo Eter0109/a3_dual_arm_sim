@@ -10,6 +10,7 @@ import mujoco
 import numpy as np
 
 from .arm_servo import CommandedPose
+from .batch_plan import BatchPlan
 from .batch_profile import PROFILES, BatchProfile
 from .contracts import LEFT_JOINTS
 from .expert import A3CookieTransferExpert, CookiePhase
@@ -17,6 +18,13 @@ from .expert import A3CookieTransferExpert, CookiePhase
 
 class A3CookieBatchExpert(A3CookieTransferExpert):
     MAX_INSERTION_FORCE_N = 8.0
+
+    #: How many Cookies one grasp takes.  A class attribute so that a controller
+    #: driven without ``reset`` still answers -- which is how the unit tests exercise
+    #: one method at a time, via ``object.__new__`` -- and ``reset`` replaces it with
+    #: the scene's ``batch_expert_per_grasp``.  Five is the shipped value, so such a
+    #: test measures the shipped configuration rather than a placeholder.
+    per_grasp: int = 5
 
     #: Norm of the left arm's joint velocity below which a move counts as
     #: arrived.  A phase that ends while the arm is still swinging starts the
@@ -47,6 +55,14 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     def reset(self, context=None):
         super().reset(context)
         self.profile: BatchProfile = PROFILES[self.env.config.batch_expert_profile]
+        # How many Cookies a grasp takes, and which slots each grasp fills.  Both
+        # come from the scene: the size from the config, the plan from the env's own
+        # slot lattice (see `A3CookieTransferEnv.batch_plan`).
+        self.per_grasp: int = self.env.config.batch_expert_per_grasp
+        self.plan: BatchPlan = self.env.batch_plan
+        #: Index of the last batch, which is the one the scene's success test
+        #: watches, so it is the one that has to hold for the full success window.
+        self._final_batch = len(self.plan.groups) - 1
         self.batch_index = 0
         self.batch_indices = []
         self.batch_reports = []
@@ -84,12 +100,20 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._validate_target_workspace()
 
     def _validate_target_workspace(self):
-        """Reject unreachable table layouts before starting a physical grasp."""
+        """Reject unreachable table layouts before starting a physical grasp.
+
+        One pose per *batch*, not per column: a batch is placed into its own run of
+        slots, so a plan with two batches in one column has two poses to check and
+        they are not the same pose.  For the shipped one-batch-per-column plan this
+        is the two columns it has always been, at both clearances -- which is why
+        the anchor holds here as well as in the plan itself.
+        """
+
         work = mujoco.MjData(self.model)
         work.qpos[:] = self.data.qpos
-        for column in range(2):
+        for group in self.plan.groups:
             for clearance in (0.0, self.profile.transport_clearance_m):
-                position, rotation = self._place_pose(clearance, column)
+                position, rotation = self._place_pose(clearance, group)
                 target_q, actual_q, error = np.empty(4), np.empty(4), np.empty(3)
                 mujoco.mju_mat2Quat(target_q, rotation.ravel())
                 try:
@@ -100,8 +124,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     # Report it as such rather than letting the raw solver message
                     # escape: this check exists to say "unreachable".
                     raise RuntimeError(
-                        f"target column {column + 1} unreachable with vertical grasp: "
-                        f"{exc}; reposition the tabletop target box"
+                        f"target column {group.column + 1} "
+                        f"(batch {group.index + 1} of {len(self.plan.groups)}) "
+                        f"unreachable with vertical grasp: {exc}; "
+                        f"reposition the tabletop target box"
                     ) from exc
                 work.qpos[self._l_qpos] = q
                 mujoco.mj_kinematics(self.model, work)
@@ -125,7 +151,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     or np.linalg.norm(error) > self.profile.reach_angle_rad
                 ):
                     raise RuntimeError(
-                        f"target column {column + 1} unreachable with vertical grasp: "
+                        f"target column {group.column + 1} "
+                        f"(batch {group.index + 1} of {len(self.plan.groups)}) "
+                        f"unreachable with vertical grasp: "
                         f"position error {distance * 1000:.2f} mm, "
                         f"angle error {np.rad2deg(np.linalg.norm(error)):.2f} deg; "
                         "reposition the tabletop target box"
@@ -134,8 +162,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     @property
     def status(self):
         return (
-            f"phase={self.phase.name} batch={min(self.batch_index + 1, 2)}/2 "
-            f"cookies={self.batch_indices} confirmed={len(self.completed_cookie_indices)}/10"
+            f"phase={self.phase.name} "
+            f"batch={min(self.batch_index + 1, len(self.plan.groups))}/{len(self.plan.groups)} "
+            f"cookies={self.batch_indices} "
+            f"confirmed={len(self.completed_cookie_indices)}/{self.plan.capacity}"
         )
 
     def _advance(self, phase):
@@ -327,15 +357,16 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     def _candidate_batches(self):
         """Prefer exposed ends; do not force an insertion through fallen Cookies."""
         source = np.asarray(self.env.SOURCE_POSITIONS)
+        size = self._next_batch_size()
         for x in sorted(set(source[:, 0])):
             indices = np.flatnonzero(np.isclose(source[:, 0], x))
             remaining = sorted(
                 (i for i in indices.tolist() if i not in self.completed_cookie_indices),
                 key=lambda i: source[i, 1],
             )
-            if len(remaining) < 5:
+            if len(remaining) < size:
                 continue
-            for batch in (remaining[:5], remaining[-5:]):
+            for batch in (remaining[:size], remaining[-size:]):
                 if all(
                     self.env.privileged_cookie_in_source(i)
                     and abs(self.data.xmat[self.env._cookie_bodies[i], 8])
@@ -344,20 +375,110 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 ):
                     yield batch
 
+    def _next_batch_size(self) -> int:
+        """How many Cookies the next grasp takes.
+
+        The plan's own size for this batch, not ``per_grasp``: a capacity that does
+        not divide by the column count gives a short batch (ten Cookies at three per
+        grasp is ``[3, 2, 3, 2]``), and grasping three for a two-slot batch would
+        leave one Cookie with nowhere to go.  Falls back to the class attribute
+        ``per_grasp`` when a controller is driven without ``reset``, which is how the
+        unit tests exercise one method at a time.
+        """
+
+        plan = getattr(self, "plan", None)
+        if plan is None:
+            return self.per_grasp
+        index = min(self.batch_index, len(plan.groups) - 1)
+        return plan.groups[index].size
+
+    #: Narrowest the jaws may close to while squeezing a batch, and the opening at or
+    #: below which the batch counts as held.  Both are fractions of the gripper's
+    #: stroke, and both were measured on the five-Cookie batch.
+    #:
+    #: A batch's width is proportional to how many Cookies are in it, so a fraction
+    #: fixed in the stroke is only right for the size it was measured at -- and below
+    #: five it is not merely imprecise, it is unusable.  Measured on a three-Cookie
+    #: fill: the shipped 0.28 floor is 23.8 mm of jaw gap, *wider* than the 17.7 mm
+    #: batch, so CLOSE opens the jaws from 26.6 mm to 30.2 mm and reads 0.00 N of pad
+    #: force for the whole phase.  Every fill at 1, 2 and 3 Cookies per grasp failed
+    #: that way, at its first batch, on every seed.
+    CLOSE_FLOOR_AT_SHIPPED_GRASP = 0.28
+    CLOSE_HELD_AT_SHIPPED_GRASP = 0.33
+    #: The grasp size those two were measured at.  At that size the scaling below is
+    #: exactly 1.0, so the shipped behaviour is reproduced bit for bit.
+    SHIPPED_GRASP_SIZE = 5
+
+    def _close_floor(self) -> float:
+        """The narrowest the jaws may close to while squeezing *this* batch."""
+
+        return self.CLOSE_FLOOR_AT_SHIPPED_GRASP * (
+            self._next_batch_size() / self.SHIPPED_GRASP_SIZE
+        )
+
+    def _close_held(self) -> float:
+        """The opening at or below which *this* batch counts as held."""
+
+        return self.CLOSE_HELD_AT_SHIPPED_GRASP * (
+            self._next_batch_size() / self.SHIPPED_GRASP_SIZE
+        )
+
+    def _is_later_batch(self) -> bool:
+        """Whether this is not the first grasp of the fill.
+
+        The batch expert's tuning is split between the first grasp and the rest, and
+        it used to say so as ``batch_index == 0`` in one place and ``batch_index ==
+        1`` in several others -- which for the shipped two-batch plan are the same
+        two statements, so naming it keeps the anchor exact while saying what the
+        split is actually about.
+
+        Why the first batch is different: it is taken from the *exposed* end of the
+        column, so its approach comes in from outside the row and its insertion has
+        the emptied space ahead of it.  Every later batch descends past Cookies the
+        earlier ones already took, which is what the same-column expert's neighbour
+        logic, rim-contact stop and tightened closing width all exist for.
+
+        It is deliberately not "has a following row", which every batch has.
+        Whether every later batch of a four-batch plan wants all of that treatment is
+        untested -- the anchor pins the two-batch case only -- so a smaller grasp
+        size measures it rather than assuming it.
+        """
+
+        return getattr(self, "batch_index", 0) > 0
+
     def _select_batch(self):
         source = np.asarray(self.env.SOURCE_POSITIONS)
         self.batch_indices = next(self._candidate_batches(), [])
-        if len(self.batch_indices) != 5:
-            raise RuntimeError("no exposed, upright five-Cookie batch available")
+        expected = self._next_batch_size()
+        if len(self.batch_indices) != expected:
+            raise RuntimeError(
+                f"no exposed, upright batch of {expected} Cookies available"
+            )
         self.current_cookie_index = self.batch_indices[0]
         self.target_slot_index = self.batch_index
         positions = self._positions()
         self._pick_center = positions.mean(axis=0)
-        pitch = float(np.median(np.diff(source[self.batch_indices, 1])))
+        # The batch's own measured spacing, which is what the expert has always used
+        # -- and it is *not* the layout's nominal pitch: the configs write their row
+        # positions to seven decimals, so the differences between the written values
+        # are not all equal (they alternate 0.0088334 and 0.0088333 here) and their
+        # median differs from `rows[1] - rows[0]` in the eighth significant figure.
+        # That is 5 nm, but it is a real difference rather than rounding, and keeping
+        # the old expression is what makes "no behaviour change" a measurement.
+        #
+        # A one-Cookie batch has no spacing to measure -- `np.median` of an empty
+        # difference is NaN -- so it falls back to the layout's pitch, which is the
+        # only spacing such a batch has.
+        if len(self.batch_indices) > 1:
+            pitch = float(np.median(np.diff(source[self.batch_indices, 1])))
+        else:
+            pitch = float(self.env.COOKIE_PITCH_Y)
         # Pad centres land in the two boundary gaps. Their flat bottoms first
         # meet the sloped bevel, then push neighbours apart during slow descent.
         pad_thickness = 0.00635
-        self._insert_opening = float(np.clip((5 * pitch - pad_thickness) / 0.085, 0, 1))
+        self._insert_opening = float(
+            np.clip((expected * pitch - pad_thickness) / 0.085, 0, 1)
+        )
         self._opening = self._insert_opening
         self._pick_eef = self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
         self._high_eef = self._pick_eef + [0, 0, self.profile.grasp_clearance_m]
@@ -372,16 +493,34 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             )
         self._advance(CookiePhase.APPROACH)
 
-    def _place_pose(self, clearance=0.0, column_index=None):
+    def _place_pose(self, clearance=0.0, group=None):
+        """The tool pose that places ``group``'s batch, ``clearance`` above the box.
+
+        Aimed at the mean of the slots *that batch* fills, rather than at the
+        column's centre: a plan with two batches in one column has two different
+        poses, and using the column's centre for both would drop the second batch in
+        the wrong place.  For the shipped one-batch-per-column plan the two are the
+        same point, because a batch that fills a whole column has that column's
+        centre as its own mean -- which is why this change is invisible to the
+        shipped scenes and shows up only in the plan's own tests.
+        """
+
+        group = self.plan.groups[self.batch_index] if group is None else group
         rotation = self.data.xmat[self._tb_id].reshape(3, 3)
         slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
-        column_x = np.unique(slots[:, 0])[
-            self.batch_index if column_index is None else column_index
-        ]
+        batch_slots = slots[np.asarray(group.slot_indices)]
         center = np.array(
             [
-                column_x,
-                slots[np.isclose(slots[:, 0], column_x), 1].mean(),
+                # Every slot of a column shares its x, so reading the first one is
+                # exact -- and it is the same number the old per-column formula took
+                # out of `np.unique`.  A *mean* of five identical values is not
+                # bit-identical to the value, and that one ulp propagates through the
+                # IK into every action of the episode, which would make the anchor a
+                # tolerance rather than an equality.
+                batch_slots[0, 0],
+                # The y does have to be averaged, and this is the same mean the old
+                # formula took: the same slots, in the same lattice order.
+                batch_slots[:, 1].mean(),
                 self.env._target_cookie_center_z + 0.002 + clearance,
             ]
         )
@@ -487,7 +626,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 else self.profile.close_contact_m_per_step
             )
             if not chain or min(forces) < 2.5:
-                self._opening = max(0.28, self._opening - close_rate)
+                self._opening = max(self._close_floor(), self._opening - close_rate)
             self._stable = self._stable + 1 if chain and min(forces) >= 2.0 else 0
             action, _ = self._servo(
                 self._pick_eef, self._canonical, self._opening, speed=0.0008
@@ -500,7 +639,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if self.phase is CookiePhase.LIFT:
             _, forces = self._contact_chain()
             if min(forces) < 2.0:
-                self._opening = max(0.28, self._opening - 0.001)
+                self._opening = max(self._close_floor(), self._opening - 0.001)
             lifted_so_far = float(
                 np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
             )
@@ -531,7 +670,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     self.batch_reports.append(
                         {
                             "cookies": list(self.batch_indices),
-                            "lifted": 5,
+                            "lifted": len(self.batch_indices),
                             "lift_heights_m": lifted.tolist(),
                             "released": False,
                         }
@@ -607,12 +746,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     f"all contained={all_inside}, pad still on the batch={not released}"
                 )
                 return self.env.last_applied_action.copy()
-            # The first batch only has to be released; the second is the one the
+            # The first batch only has to be released; the last is the one the
             # scene's success test watches, so it is the one that has to hold for
             # the full success window.
             required_stable = (
                 self.env.task_config.success_hold_steps
-                if self.batch_index == 1
+                if self.batch_index == self._final_batch
                 else self.profile.release_stable_first
             )
             if self._stable >= required_stable:
@@ -620,7 +759,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1
                 self._advance(
-                    CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
+                    CookiePhase.DONE
+                    if self.batch_index > self._final_batch
+                    else CookiePhase.SELECT_COOKIE
                 )
             return self.env.last_applied_action.copy()
         self._fail("unsupported batch phase")
