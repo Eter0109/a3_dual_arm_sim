@@ -481,6 +481,50 @@ def _add_beveled_cookie_mesh(
     )
 
 
+def _add_tabletop_box(
+    parent: ET.Element,
+    *,
+    name: str,
+    position: tuple[float, ...],
+    half_size: tuple[float, ...],
+    height: float,
+    rgba: str,
+    thickness: float,
+    friction: tuple[float, ...],
+    floor_z: float,
+) -> ET.Element:
+    """One free, collision-enabled tabletop box, open-topped and fillable.
+
+    A free joint rather than a mocap body, unlike the source bin above: this box has
+    to follow the gripper through physical contact, which is what the relay's push
+    and carry are measured against.  A mocap body is moved kinematically and cannot
+    be pushed at all.
+    """
+
+    body = ET.SubElement(parent, "body", name=name, pos=_vec(position))
+    ET.SubElement(body, "freejoint", name=f"{name}_free")
+    ET.SubElement(
+        body,
+        "inertial",
+        pos="0 0 0.01",
+        mass="0.10",
+        diaginertia="0.0002 0.0002 0.0003",
+    )
+    _add_open_bin(
+        body,
+        name=name,
+        center=(0.0, 0.0),
+        half_size=half_size,
+        height=height,
+        rgba=rgba,
+        thickness=thickness,
+        friction=friction,
+        floor_z=floor_z,
+        wall_z=height / 2,
+    )
+    return body
+
+
 def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) -> None:
     scene = config.cookie_transfer
     assets = root.find("asset")
@@ -554,55 +598,27 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wall_z=scene.source_wall_base_z_m + scene.source_bin_wall_height_m / 2,
     )
 
-    # A free rigid box can only follow the gripper through physical contact.
-    target_bin = ET.SubElement(
-        world,
-        "body",
-        name="target_bin",
-        pos=_vec(scene.target_bin_world_position_m),
-    )
-    ET.SubElement(target_bin, "freejoint", name="target_bin_free")
-    ET.SubElement(
-        target_bin, "inertial", pos="0 0 0.01", mass="0.10", diaginertia="0.0002 0.0002 0.0003"
-    )
-    _add_open_bin(
-        target_bin,
-        name="target_bin",
-        center=(0.0, 0.0),
-        half_size=scene.target_bin_half_size_m,
-        height=scene.target_bin_wall_height_m,
-        rgba=BIN_RGBA,
-        thickness=scene.bin_wall_thickness_m,
-        friction=scene.bin_friction,
-        floor_z=scene.target_floor_z_m,
-        wall_z=scene.target_bin_wall_height_m / 2,
-    )
-    if scene.spare_target_bin_world_position_m is not None:
-        spare_bin = ET.SubElement(
+    # Free rigid boxes can only follow the gripper through physical contact, so each
+    # is a free body rather than a mocap one.  A lane is a queue of them and every
+    # one is built the same way -- only the pose differs -- so this is a loop over
+    # the config's list rather than a case for the working box and a case for the
+    # spare.  The first two bodies keep the names they have always had; see
+    # `config.target_bin_body_name`.
+    for name, position in zip(
+        scene.target_bin_body_names,
+        scene.target_bin_world_positions_m,
+        strict=True,
+    ):
+        _add_tabletop_box(
             world,
-            "body",
-            name="spare_target_bin",
-            pos=_vec(scene.spare_target_bin_world_position_m),
-        )
-        ET.SubElement(spare_bin, "freejoint", name="spare_target_bin_free")
-        ET.SubElement(
-            spare_bin,
-            "inertial",
-            pos="0 0 0.01",
-            mass="0.10",
-            diaginertia="0.0002 0.0002 0.0003",
-        )
-        _add_open_bin(
-            spare_bin,
-            name="spare_target_bin",
-            center=(0.0, 0.0),
+            name=name,
+            position=position,
             half_size=scene.target_bin_half_size_m,
             height=scene.target_bin_wall_height_m,
             rgba=BIN_RGBA,
             thickness=scene.bin_wall_thickness_m,
             friction=scene.bin_friction,
             floor_z=scene.target_floor_z_m,
-            wall_z=scene.target_bin_wall_height_m / 2,
         )
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})

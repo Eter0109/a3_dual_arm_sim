@@ -308,9 +308,30 @@ class SceneSpec:
     #: boxes in the lane.  ``None`` derives ``box_extent_y + min_box_clearance``.
     lane_pitch_m: float | None = None
     #: How far behind the station the queue's first box starts.  ``None`` derives
-    #: the lane pitch, which is the minimum that keeps them clear; the shipped
-    #: relay places its spare 160 mm back, which is a choice, not a requirement --
-    #: it gives the carry a longer slide.
+    #: :attr:`lane_pitch`, which is the spacing the line *compacts to* -- and which
+    #: is therefore not usable as a layout spacing.  Three quantities are easy to
+    #: confuse here and it is worth separating them:
+    #:
+    #: * :attr:`lane_pitch` is how far each fill *pushes* the line, and it is
+    #:   ``box_extent_y + min_box_clearance``.  The source bin's clearance is a
+    #:   function of this, not of the gap below: the boxes compact to it whatever
+    #:   they started at.
+    #: * this gap is the spacing the lane is *laid out* at.  It has to be strictly
+    #:   more than the pitch, because the pitch is exactly the clearance between
+    #:   *outer* extents: two boxes that far apart have no room to be drawn at all,
+    #:   so the derived default is refused at load (see
+    #:   ``CookieSceneConfig.worst_nominal_box_gap_m``).  Measured, a three-box lane
+    #:   at the 87 mm pitch has 13 mm between neighbours against the 25 mm it draws
+    #:   within.
+    #: * the ranges then need room *on top of* this gap, which is why the shipped
+    #:   relay's 160 mm is comfortable rather than arbitrary: the queue's own y range
+    #:   can close 55 mm between two neighbours, and 160 - 74 = 86 mm of outer gap
+    #:   absorbs that with 31 mm to spare.
+    #:
+    #: Deriving this from the ranges is Phase 5's job -- the ranges are not a spec
+    #: field yet, and inventing the formula before the ranges exist would be
+    #: guessing.  Until then a lane states its gap, and the two shipped two-box
+    #: scenes state theirs as 160 mm because that is what they were built with.
     queue_gap_m: float | None = None
 
     geometry: CookieGeometry = field(default_factory=CookieGeometry)
@@ -677,13 +698,21 @@ class SceneSpec:
         contact parameters, the wall heights -- is tuning that the spec records
         rather than derives, and it comes from ``CookieSceneConfig``'s defaults.
 
-        ``spare_target_bin_world_position_m`` is emitted only for two boxes: the
-        config schema carries one spare, and a longer lane needs a key that does
-        not exist yet.
+        The boxes are emitted in the schema's own split -- the first two by name,
+        the rest as a queue -- so a lane of three states one key here and a lane of
+        two states none, and both describe themselves the same way to the model.
+
+        ``source_bin_center_m`` is emitted with the lane's offset already applied,
+        because that is what the key *means*: it is the source bin's nominal
+        position, and for a lane long enough to reach it that position has moved.
+        The shipped two-box scenes derive an offset of zero, which is why their
+        configs state the value they always had.
         """
 
         self.validate()
+        source_center_x, source_center_y = self.source_center_m
         config: dict[str, Any] = {
+            "source_bin_center_m": [source_center_x, source_center_y + self.source_offset_m],
             "source_bin_half_size_m": list(self.source_bin_half_size_m),
             "target_bin_half_size_m": list(self.target_bin_half_size_m),
             "target_bin_world_position_m": [
@@ -699,6 +728,10 @@ class SceneSpec:
                 self.box_positions_m[1][0],
                 self.box_positions_m[1][1],
                 TABLE_Z_M,
+            ]
+        if self.boxes >= 3:
+            config["queue_target_bin_world_positions_m"] = [
+                [x, y, TABLE_Z_M] for x, y in self.box_positions_m[2:]
             ]
         return config
 

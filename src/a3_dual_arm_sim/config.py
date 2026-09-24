@@ -76,6 +76,16 @@ class CookieSceneConfig:
     # Match source columns 0/1 and the same row lattice, across the box gap.
     target_bin_world_position_m: tuple[float, ...] = (0.1246, -0.01156666666666667, 0.753)
     spare_target_bin_world_position_m: tuple[float, ...] | None = None
+    #: Positions of the tabletop boxes *beyond* the first two, in fill order, each
+    #: one lane pitch further towards -y.  Empty by default, so a single-box or
+    #: two-box scene states nothing here.
+    #:
+    #: The first two keep their own named keys rather than moving into a list: the
+    #: shipped configs name them, the relay's controllers refer to box A and box B,
+    #: and a two-box scene is the case every measurement was taken on.  A longer
+    #: lane is a queue of identical boxes behind them, and it says so here.  Read
+    #: the whole lane through :attr:`target_bin_world_positions_m`.
+    queue_target_bin_world_positions_m: tuple[tuple[float, ...], ...] = ()
     target_bin_attach_position_m: tuple[float, ...] = (-0.284576, -0.120338, 0.077169)
     target_bin_attach_quaternion: tuple[float, ...] = (
         0.368302,
@@ -104,6 +114,91 @@ class CookieSceneConfig:
         1.506819,
         1.0,
     )
+
+    @property
+    def target_bin_world_positions_m(self) -> tuple[tuple[float, ...], ...]:
+        """Every tabletop box's nominal world position, station first.
+
+        The one list to read a lane from.  It is assembled rather than stored,
+        because the first two boxes have their own keys for the reason given on
+        :attr:`queue_target_bin_world_positions_m` -- so a scene states its boxes in
+        whichever way matches how many it has, and everything downstream sees one
+        list either way.
+        """
+
+        positions = [self.target_bin_world_position_m]
+        if self.spare_target_bin_world_position_m is not None:
+            positions.append(self.spare_target_bin_world_position_m)
+        positions.extend(self.queue_target_bin_world_positions_m)
+        return tuple(positions)
+
+    @property
+    def target_bin_count(self) -> int:
+        """How many tabletop boxes this scene builds."""
+
+        return len(self.target_bin_world_positions_m)
+
+    @property
+    def target_bin_body_names(self) -> tuple[str, ...]:
+        """Their body names, in the same order.  See :func:`target_bin_body_name`."""
+
+        return tuple(target_bin_body_name(index) for index in range(self.target_bin_count))
+
+    @property
+    def worst_nominal_box_gap_m(self) -> float:
+        """The largest per-axis gap between any two tabletop boxes, as configured.
+
+        Negative means they overlap on both axes.  Measured between *outer* extents
+        -- the half size plus one wall thickness, the envelope
+        ``A3CookieTransferEnv._boxes_are_clear`` uses -- because that is what
+        ``min_box_clearance_m`` is documented against, and a check using the inner
+        half size would pass a layout the draw check then refuses.  Getting this
+        wrong is not hypothetical: the derived lane pitch is exactly
+        ``box_extent_y + min_box_clearance``, so it measures as legal on the half
+        sizes and illegal on the outer ones.
+
+        The nominal layout has no yaw: a config states positions, not orientations.
+        So this is the unrotated version of the draw check rather than a
+        reimplementation of it.
+
+        The source bin is not included.  Its position is derived from the lane's
+        length (``SceneSpec.source_offset_m``) rather than stated in the config, so
+        a config alone cannot say where it will be; the spec checks that pair.
+
+        A single box has no pair to check and reports infinity.
+        """
+
+        half_x, half_y = self.target_bin_half_size_m[:2]
+        outer_x = half_x + self.bin_wall_thickness_m
+        outer_y = half_y + self.bin_wall_thickness_m
+        positions = self.target_bin_world_positions_m
+        worst = math.inf
+        for index, centre in enumerate(positions):
+            for other in positions[index + 1 :]:
+                worst = min(
+                    worst,
+                    max(
+                        abs(centre[0] - other[0]) - 2.0 * outer_x,
+                        abs(centre[1] - other[1]) - 2.0 * outer_y,
+                    ),
+                )
+        return worst
+
+
+def target_bin_body_name(index: int) -> str:
+    """The body name of the ``index``-th tabletop box.
+
+    The first two keep the names they have always had, because the shipped configs,
+    the tests and the relay's own controllers all refer to box A and box B by them.
+    The queue beyond them is numbered, which is also what says how long a lane is:
+    there is no separate count to keep in step.
+    """
+
+    if index == 0:
+        return "target_bin"
+    if index == 1:
+        return "spare_target_bin"
+    return f"queue_target_bin_{index}"
 
 
 @dataclass(frozen=True)
@@ -238,10 +333,7 @@ class SceneRandomization:
     def enabled(self) -> bool:
         """Whether any range can actually move something."""
 
-        return any(
-            axis.movable
-            for name, axis in self.axes().items()
-        )
+        return any(axis.movable for name, axis in self.axes().items())
 
     def axes(self) -> dict[str, AxisRange]:
         """Every ranged quantity by name, for iteration and validation."""
@@ -338,6 +430,33 @@ class SimConfig:
         spare_position = self.cookie_transfer.spare_target_bin_world_position_m
         if spare_position is not None and len(spare_position) != 3:
             raise ValueError("spare_target_bin_world_position_m must contain three values")
+        for position in self.cookie_transfer.queue_target_bin_world_positions_m:
+            if len(position) != 3:
+                raise ValueError(
+                    "every queue_target_bin_world_positions_m entry must contain "
+                    f"three values, got {position!r}"
+                )
+        # The *nominal* layout has to be clear when the scene draws within a
+        # clearance, because it is the layout a fixed-layout run uses and the layout
+        # a lane's queue is placed at before anything moves it.  A config with no
+        # ranges is exempt: nothing is drawn and nothing is checked, so its boxes
+        # stay exactly where it put them -- which is how `cookie_two_box.yaml` sits
+        # with its two boxes 12 mm apart against a 15 mm clearance it never draws
+        # against.
+        #
+        # A tolerance, because a derived lane pitch is exactly
+        # `box_extent_y + min_box_clearance` and float arithmetic puts that a few
+        # ulps under.  A layout that equals the clearance is legal.
+        if self.randomization.enabled:
+            gap = self.cookie_transfer.worst_nominal_box_gap_m
+            if gap < self.randomization.min_box_clearance_m - 1e-9:
+                raise ValueError(
+                    f"the nominal box layout leaves only {gap * 1000:.1f} mm between "
+                    f"the closest pair of outer extents, against the "
+                    f"{self.randomization.min_box_clearance_m * 1000:.1f} mm "
+                    f"min_box_clearance_m this scene draws within; move the boxes "
+                    f"further apart in the config, or lower min_box_clearance_m"
+                )
         if len(self.cookie_transfer.deployment_home) != 16:
             raise ValueError("cookie_transfer.deployment_home must contain 16 values")
 
@@ -354,14 +473,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
     cookie_raw = raw.pop("cookie_transfer", {})
     randomization_raw = dict(raw.pop("randomization", {}) or {})
     randomization = SceneRandomization(
-        **{
-            name: _axis_range(randomization_raw, name)
-            for name in SceneRandomization().axes()
-        },
+        **{name: _axis_range(randomization_raw, name) for name in SceneRandomization().axes()},
         min_box_clearance_m=float(
-            randomization_raw.get(
-                "min_box_clearance_m", SceneRandomization().min_box_clearance_m
-            )
+            randomization_raw.get("min_box_clearance_m", SceneRandomization().min_box_clearance_m)
         ),
         max_clearance_attempts=int(
             randomization_raw.get(
@@ -386,9 +500,7 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         right_wrist_position_m=_float_tuple(
             camera_raw, "right_wrist_position_m", (0.0, -0.045, -0.085)
         ),
-        right_wrist_target_m=_float_tuple(
-            camera_raw, "right_wrist_target_m", (0.0, -0.160, 0.010)
-        ),
+        right_wrist_target_m=_float_tuple(camera_raw, "right_wrist_target_m", (0.0, -0.160, 0.010)),
         wrist_fovy_deg=float(camera_raw.get("wrist_fovy_deg", 70.0)),
     )
     defaults = CookieSceneConfig()
@@ -451,7 +563,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         box_tilt_deg=float(cookie_raw.get("box_tilt_deg", defaults.box_tilt_deg)),
         left_gripper_kp=float(cookie_raw.get("left_gripper_kp", defaults.left_gripper_kp)),
         right_gripper_kp=float(cookie_raw.get("right_gripper_kp", defaults.right_gripper_kp)),
-        right_grasp_pitch_deg=float(cookie_raw.get("right_grasp_pitch_deg", defaults.right_grasp_pitch_deg)),
+        right_grasp_pitch_deg=float(
+            cookie_raw.get("right_grasp_pitch_deg", defaults.right_grasp_pitch_deg)
+        ),
         target_bin_world_position_m=_float_tuple(
             cookie_raw,
             "target_bin_world_position_m",
@@ -479,6 +593,11 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         target_floor_z_m=float(cookie_raw.get("target_floor_z_m", defaults.target_floor_z_m)),
         target_slots_local_m=_nested_float_tuple(
             cookie_raw, "target_slots_local_m", defaults.target_slots_local_m
+        ),
+        queue_target_bin_world_positions_m=_nested_float_tuple(
+            cookie_raw,
+            "queue_target_bin_world_positions_m",
+            defaults.queue_target_bin_world_positions_m,
         ),
         target_slot_tolerance_m=_float_tuple(
             cookie_raw, "target_slot_tolerance_m", defaults.target_slot_tolerance_m
@@ -514,9 +633,7 @@ def _axis_range(values: dict[str, Any], key: str) -> AxisRange:
         return AxisRange(low=-abs(float(raw)), high=abs(float(raw)))
     pair = tuple(float(value) for value in raw)
     if len(pair) != 2:
-        raise ValueError(
-            f"randomization.{key} must be a number or [low, high], got {raw!r}"
-        )
+        raise ValueError(f"randomization.{key} must be a number or [low, high], got {raw!r}")
     return AxisRange(low=pair[0], high=pair[1])
 
 

@@ -166,8 +166,16 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self._scene_randomization_applied = False
         self._target_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "target_bin")
         self._source_bin_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "source_bin")
-        # -1 means "this scene has no spare box", which is how the single-box
-        # configs are built; `_apply_scene_randomization` skips it then.
+        #: Every tabletop box, station first.  This is what the randomization and
+        #: the clearance check iterate; ``_target_bin_body`` stays the station,
+        #: because that is the one the environment's own success test grades.
+        self._target_bin_bodies = tuple(
+            self._id(mujoco.mjtObj.mjOBJ_BODY, name) for name in scene_config.target_bin_body_names
+        )
+        # -1 means "this scene has no second box", which is how the single-box
+        # configs are built.  Kept as its own attribute because the relay reads it
+        # to find box B, and because ``spare_target_bin`` is the name a config
+        # states it by.
         self._spare_bin_body = self._id_or_none(
             mujoco.mjtObj.mjOBJ_BODY, "spare_target_bin"
         )
@@ -213,6 +221,17 @@ class A3CookieTransferEnv(A3DualArmEnv):
     @property
     def cookie_positions(self) -> np.ndarray:
         return np.asarray([self.data.xpos[body_id].copy() for body_id in self._cookie_bodies])
+
+    @property
+    def target_bin_bodies(self) -> tuple[int, ...]:
+        """Body ids of every tabletop box, station first.
+
+        The station is ``target_bin_bodies[0]``, which is also
+        ``_target_bin_body`` -- the box the environment's own success criterion
+        grades.  A scene with one box has a one-element tuple.
+        """
+
+        return self._target_bin_bodies
 
     @property
     def success_hold_count(self) -> int:
@@ -341,36 +360,45 @@ class A3CookieTransferEnv(A3DualArmEnv):
             return np.zeros(2)
 
         rng = self.np_random
-        spare_nominal = self.config.cookie_transfer.spare_target_bin_world_position_m
-        has_spare = self._spare_bin_body >= 0 and spare_nominal is not None
+        cookie_scene = self.config.cookie_transfer
+        nominal = [
+            np.asarray(position[:2], dtype=np.float64)
+            for position in cookie_scene.target_bin_world_positions_m
+        ]
+        # One range triple per box.  The station draws from the `target_bin_*`
+        # ranges and every box behind it from the `spare_bin_*` ones, because those
+        # are roles rather than indices: whatever ends up in the queue has to arrive
+        # at the station inside the fill's window, which is exactly what bounds the
+        # spare's ranges (its x to +/-4 mm, because the carry corrects y and not x).
+        # A third box is in that position too, so it gets that bound as well.
+        range_triples = [(scene.target_bin_x_m, scene.target_bin_y_m, scene.target_bin_yaw_rad)] + [
+            (scene.spare_bin_x_m, scene.spare_bin_y_m, scene.spare_bin_yaw_rad)
+        ] * (len(nominal) - 1)
+
         for attempt in range(1, scene.max_clearance_attempts + 1):
             source_offset = np.array(
                 [scene.source_bin_x_m.draw(rng), scene.source_bin_y_m.draw(rng)]
             )
             source_yaw = scene.source_bin_yaw_rad.draw(rng)
-            target = np.asarray(
-                self.config.cookie_transfer.target_bin_world_position_m[:2],
-                dtype=np.float64,
-            ) + np.array([scene.target_bin_x_m.draw(rng), scene.target_bin_y_m.draw(rng)])
-            target_yaw = scene.target_bin_yaw_rad.draw(rng)
-            spare = None
-            spare_yaw = 0.0
-            if has_spare:
-                spare = np.asarray(spare_nominal[:2], dtype=np.float64) + [
-                    scene.spare_bin_x_m.draw(rng),
-                    scene.spare_bin_y_m.draw(rng),
-                ]
-                spare_yaw = scene.spare_bin_yaw_rad.draw(rng)
-            if self._boxes_are_clear(
-                source_offset, source_yaw, target, target_yaw, spare, spare_yaw
-            ):
+            drawn = [
+                (
+                    centre + np.array([x_range.draw(rng), y_range.draw(rng)]),
+                    yaw_range.draw(rng),
+                )
+                for centre, (x_range, y_range, yaw_range) in zip(
+                    nominal, range_triples, strict=True
+                )
+            ]
+            if self._boxes_are_clear(source_offset, source_yaw, drawn):
                 break
         else:
             raise RuntimeError(
                 f"no layout with {scene.min_box_clearance_m * 1000:.1f} mm of box "
-                f"clearance in {scene.max_clearance_attempts} draws; the "
-                f"randomization ranges ask for a layout that cannot exist. Narrow "
-                f"the box ranges or lower min_box_clearance_m."
+                f"clearance in {scene.max_clearance_attempts} draws for "
+                f"{len(nominal)} tabletop boxes; the randomization ranges ask for a "
+                f"layout that cannot exist. Narrow the box ranges, lower "
+                f"min_box_clearance_m, or lay the boxes further apart -- a lane's "
+                f"queue gap has to leave room for the queue's own y range."
             )
 
         # 1. Source bin.  Cookies are placed relative to the live body, so this
@@ -387,10 +415,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.data.mocap_quat[mocap_id] = _yaw_quaternion(source_yaw)
         self._scene_yaw = float(source_yaw)
 
-        # 2. Working box, and 3. the spare when the scene has one.
-        self._place_free_box(self._target_bin_body, target, target_yaw)
-        if spare is not None:
-            self._place_free_box(self._spare_bin_body, spare, spare_yaw)
+        # 2. Every tabletop box.  Written from the same draw the clearance check
+        #    approved, so what the check passed is what is placed.
+        for body, (centre, yaw) in zip(self._target_bin_bodies, drawn, strict=True):
+            self._place_free_box(body, centre, yaw)
 
         # 4. Arm start pose.  This is the variation that matters most for a policy:
         #    with it at zero every episode begins from a byte-identical pose, so a
@@ -430,10 +458,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self,
         source_offset: np.ndarray,
         source_yaw: float,
-        target: np.ndarray,
-        target_yaw: float,
-        spare: np.ndarray | None,
-        spare_yaw: float,
+        boxes: list[tuple[np.ndarray, float]],
     ) -> bool:
         """Whether the drawn layout leaves every pair of boxes far enough apart.
 
@@ -442,19 +467,23 @@ class A3CookieTransferEnv(A3DualArmEnv):
         boxes are apart if they are apart on either axis, which is the largest
         per-axis gap rather than the smallest -- boxes side by side in y are not
         overlapping merely because they share an x range.
+
+        ``boxes`` is every tabletop box as ``(centre, yaw)``, station first, and the
+        source bin is checked against all of them.  That is a quadratic loop over a
+        handful of boxes, which is the honest shape of the constraint: it is a
+        property of the *set*, and a lane of three has three pairs to keep apart
+        rather than one.
         """
 
         clearance = self.config.randomization.min_box_clearance_m
         source_half = self._source_bin_half_xy
         target_half = self._target_bin_half_xy
-        boxes = [
+        candidates: list[tuple[np.ndarray, np.ndarray, float]] = [
             (self.SOURCE_NOMINAL_CENTER + source_offset, source_half, source_yaw),
-            (target, target_half, target_yaw),
+            *((centre, target_half, yaw) for centre, yaw in boxes),
         ]
-        if spare is not None:
-            boxes.append((spare, target_half, spare_yaw))
-        for index, (centre, half, yaw) in enumerate(boxes):
-            for other_centre, other_half, other_yaw in boxes[index + 1 :]:
+        for index, (centre, half, yaw) in enumerate(candidates):
+            for other_centre, other_half, other_yaw in candidates[index + 1 :]:
                 extent = _rotated_half_extent(half, yaw)
                 other_extent = _rotated_half_extent(other_half, other_yaw)
                 gap = np.maximum(

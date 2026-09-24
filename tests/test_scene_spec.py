@@ -34,14 +34,16 @@ ROOT = Path(__file__).resolve().parents[1]
 #: rather than derives, so that a new geometry key cannot quietly escape the anchor
 #: by being added to a config and to nothing else.
 DERIVED_KEYS = {
+    "source_bin_center_m",
     "source_bin_half_size_m",
     "target_bin_half_size_m",
     "target_bin_world_position_m",
     "target_slots_local_m",
     "cookie_source_positions_m",
 }
-#: ... plus the one a lane has and a single box does not.
-LANE_KEY = "spare_target_bin_world_position_m"
+#: ... plus the ones a lane has and a single box does not: one named spare for the
+#: second box, and a queue list for every box after it.
+LANE_KEYS = ("spare_target_bin_world_position_m", "queue_target_bin_world_positions_m")
 
 #: Tuning keys the shipped configs carry.  Listed rather than ignored so that
 #: adding a key to a config is a deliberate act: this test fails until the list is
@@ -84,12 +86,28 @@ def _numbers(value: object) -> list[float]:
     return [float(value)]  # type: ignore[arg-type]
 
 
+def _lane_keys(spec: SceneSpec) -> set[str]:
+    """The lane keys a spec of this many boxes has to emit.
+
+    One named spare for the second box, and a queue list for every box after it --
+    which is the schema's own split, so a two-box lane emits one and a three-box
+    lane emits both.
+    """
+
+    keys = set()
+    if spec.boxes >= 2:
+        keys.add(LANE_KEYS[0])
+    if spec.boxes >= 3:
+        keys.add(LANE_KEYS[1])
+    return keys
+
+
 def _assert_reproduces(spec: SceneSpec, config_name: str) -> None:
     shipped = yaml.safe_load(
         (ROOT / "configs" / f"{config_name}.yaml").read_text(encoding="utf-8")
     )["cookie_transfer"]
     derived = spec.derive_config()
-    expected = DERIVED_KEYS | ({LANE_KEY} if spec.boxes >= 2 else set())
+    expected = DERIVED_KEYS | _lane_keys(spec)
     assert set(derived) == expected, (
         "the derivation's key set changed; if a key is genuinely derived, add it "
         "to DERIVED_KEYS, and if it is not, take it out of derive_config"

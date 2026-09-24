@@ -326,14 +326,24 @@ falls from 40 to 34 and `boxes` from 4 to 3.  `per_grasp` is not free.
 ### 4. The lane, from the box count
 
 ```
-lane_pitch   = box_extent_y + min_box_clearance
+lane_pitch   = box_extent_y + min_box_clearance      # what the line COMPACTS to
+queue_gap    > lane_pitch                            # what it is LAID OUT at
 station      = the nominal station, clamped into the fillable band
-queue_i      = station_y - lane_pitch * i        for i in 1..N-1
+queue_i      = station_y - queue_gap * i             for i in 1..N-1
 source_offset = max(0, source_front_clearance_need(N))
 ```
 
+`queue_gap > lane_pitch` is not a preference, it is the reason the derived default
+is refused at load: the pitch is exactly the clearance between *outer* extents, so a
+lane laid out at it has nothing left for the draws.  The gap also needs room for the
+queue's own y range on top of that -- measured, the relay's 160 mm gives 86 mm of
+outer gap, which absorbs the 55 mm the queue's ranges can close with 31 mm to spare.
+
 `source_offset` is the formula from the measurement above; the spec also derives
 the source bin's *yaw* range from zero, because a yawed bin changes the pick pose.
+Note that it depends on `lane_pitch` and not on `queue_gap`: the parked line is
+where the *fills* put the boxes, and the initial spacing is washed out by the first
+shove.
 
 ### 5. The randomization ranges, from everything above
 
@@ -383,9 +393,11 @@ otherwise -- and the reason is recorded in the config, not in a comment.
 src/a3_dual_arm_sim/scene_spec.py     DONE  pure derivation, no MuJoCo import
 src/a3_dual_arm_sim/batch_plan.py     DONE  the batch plan and slot grouping
 tests/test_scene_spec.py              DONE  the two anchors, and every bound
+scripts/generate_scene_config.py      DONE  spec -> config, for a new layout
+tests/test_scene_lanes.py             DONE  N boxes: config, model, reset, clearance
 src/a3_dual_arm_sim/scene_spec_validate.py  NEW  the Monte-Carlo gate
-src/a3_dual_arm_sim/model.py               N target boxes instead of target+spare
-src/a3_dual_arm_sim/cookie_transfer.py     N boxes in randomization and reset
+src/a3_dual_arm_sim/model.py              DONE  N target boxes instead of target+spare
+src/a3_dual_arm_sim/cookie_transfer.py    DONE  N boxes in randomization and reset
 src/a3_dual_arm_sim/batch_expert.py        batch plan instead of the literal 5
 src/a3_dual_arm_sim/same_column_batch_expert.py   same
 src/a3_dual_arm_sim/relay_batch_expert.py  NEW  TwoBoxBatchExpert generalised to N
@@ -446,6 +458,47 @@ The bounds it derives at the shipped station, for reference:
 **Phase 2 -- N boxes in the model and the env.**  *Gate:* the existing two-box
 tests pass unchanged, the relay is still 3/3, and a 3-box scene builds, resets and
 passes the Monte-Carlo gate (no fill attempted yet).
+
+*Done.*  `queue_target_bin_world_positions_m` carries the boxes past the second,
+`model._add_cookie_scene` builds them in a loop, and `_apply_scene_randomization`
+draws every box from the ranges its *role* implies -- the station from
+`target_bin_*`, everything behind it from `spare_bin_*`, because whatever ends up
+in the queue has to arrive at the station inside the fill's window.  The clearance
+check is the same pairwise test as before, now over a set.
+
+The "relay is still 3/3" gate was met **by construction rather than by a re-run**,
+which is worth recording as a method: for a two-box config the draw *order* is
+unchanged -- the source bin's three, then each box's x, y and yaw in turn -- so the
+RNG stream is identical and every episode is byte-identical.  Checked by hashing the
+drawn layouts over six seeds in a worktree at the previous commit against the
+working tree: same digest, `b67959a1...`.  That is a two-minute check against an
+80-minute relay run, and it is a stronger statement than 3/3 -- it says no seed
+changed, not just the three that were run.
+
+**The derived queue gap turned out to be wrong, and the plan had it backwards.**
+The plan said a lane at the derived pitch "exhausts its redraws".  It does not: the
+redraw loop finds a layout, so the scene *looks* like it works.  What is actually
+wrong is that the derived pitch is not a legal *layout* spacing at all --
+`lane_pitch = box_extent_y + min_box_clearance`, so two neighbours laid out at it
+have zero gap between their outer extents, and the committed three-box lane measures
+13 mm against the 25 mm the scene draws within.  The scene would then only ever draw
+layouts where the queue *spread*, which is a loss of variation rather than a loss of
+episodes: measured over 40 seeds at the pitch, the queue's offsets are non-increasing
+on 40 of 40, against 18 of 40 at the relay's gap.
+
+So `queue_gap_m` has to exceed `lane_pitch`, and a config that violates it is now
+refused at **load** with the number in the message.  The distinction that was
+missing is between three quantities: the pitch is what the line compacts to *after*
+a shove, the gap is what the lane is *laid out* at, and the ranges need room on top
+of the gap.  Two of the three are now derived or checked; deriving the gap from the
+ranges is still Phase 5's job.
+
+One more thing this phase settled: `worst_nominal_box_gap_m` had to be measured
+between **outer** extents (half size plus wall thickness), matching
+`_boxes_are_clear`, because a check using the inner half size passes exactly the
+layout the draw check refuses.  And the check only applies when the scene actually
+draws -- `configs/cookie_two_box.yaml` has its two boxes 12 mm apart against a 15 mm
+clearance it never draws against, and nothing is wrong with it.
 
 **Phase 3 -- variable `per_grasp` in the fill.**  *Gate:* `per_grasp=5` is
 step-identical to today (the anchor again, this time in the simulator); 3 seeds
