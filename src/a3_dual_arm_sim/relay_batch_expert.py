@@ -38,6 +38,18 @@ class RightBoxPushController:
     YAW_COMPENSATION_M_PER_RAD = 0.08
     YAW_COMPENSATION_CLIP_M = 0.010
 
+    #: Jaw closure the push commands while it is in contact.  At 0.0 the jaws are
+    #: jammed shut on the box's rear wall: fast (measured 0.60 mm/step, 150 steps for
+    #: the 90 mm push) but the box walks sideways 16 to 23 mm and its yaw reaches 2.8
+    #: to 9 deg, because a pad that only touches a 6 mm wall has almost nothing to
+    #: resist a moment with.  Widening the closure makes the pads pass the wall and
+    #: bear on the box's floor plate instead, which is a friction drive: the box then
+    #: walks only 3.9 mm with 1.2 deg of yaw, but at 0.17 mm/step -- 3.5x slower, so
+    #: the 90 mm push needs about 530 steps against the fast fill's 528.  Neither end
+    #: is free, so this is a knob rather than a constant to be sure of; see
+    #: `docs/configurable-scenes.md`.
+    PUSH_OPENING = 0.0
+
     def __init__(self, env: A3CookieTransferEnv, box_id: int, destination_y: float):
         self.env = env
         self.data = env.data
@@ -118,7 +130,19 @@ class RightBoxPushController:
         phase_timeout = {
             "APPROACH": 220,
             "DESCEND": 220,
-            "PUSH": 420,
+            # Derived from the travel and the commanded speed rather than fixed at
+            # 420 steps, which is only right for the shipped speed: a push whose pads
+            # bear on the box's floor plate advances at 0.17 mm/step and needs about
+            # 530, so a flat budget rejects it as a timeout rather than as a failure.
+            # Same reasoning as `BoxSupportController._travel_budget`.
+            "PUSH": max(
+                240,
+                round(
+                    (self.destination_y - (self.initial_position[1] - 0.034) + 0.020)
+                    / self.PUSH_SPEED_M_PER_STEP
+                )
+                + 120,
+            ),
             "RETRACT": 180,
             "HOME": 220,
         }[self.phase]
@@ -130,13 +154,13 @@ class RightBoxPushController:
             return self.env.last_applied_action.copy()
         try:
             if self.phase == "APPROACH":
-                action, reached = self._pose_command(self.start_y, 0.840, 0.0)
+                action, reached = self._pose_command(self.start_y, 0.840, self.PUSH_OPENING)
                 self.stable = self.stable + 1 if reached else 0
                 if self.stable >= 5:
                     self._advance("DESCEND")
                 return action
             if self.phase == "DESCEND":
-                action, reached = self._pose_command(self.start_y, 0.755, 0.0)
+                action, reached = self._pose_command(self.start_y, 0.755, self.PUSH_OPENING)
                 self.stable = self.stable + 1 if reached else 0
                 if self.stable >= 5:
                     self._push_goal_y = float(self.data.site_xpos[self.helper.site, 1])
@@ -169,10 +193,10 @@ class RightBoxPushController:
                 ):
                     self.failed = "right pad contacted but did not move the box"
                     return self.env.last_applied_action.copy()
-                return self._pose_command(self._push_goal_y, 0.755, 0.0)[0]
+                return self._pose_command(self._push_goal_y, 0.755, self.PUSH_OPENING)[0]
             if self.phase == "RETRACT":
                 assert self._retract_y is not None
-                action, reached = self._pose_command(self._retract_y, 0.755, 0.0)
+                action, reached = self._pose_command(self._retract_y, 0.755, self.PUSH_OPENING)
                 # The retreat only needs to break contact; it need not settle
                 # to the exact millimetre before the arm returns home.
                 reached = reached or (
