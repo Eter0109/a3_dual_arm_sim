@@ -31,16 +31,26 @@ history.
 because the two obvious guesses were both wrong.  It is not the fill's landing
 pose and it is not the carry: the relay's *push* is what fails, and it fails
 under actuator damping whatever the profile -- ``BASELINE`` + damping fails the
-same way ``FAST`` + damping does, at "right box IK unreachable".  The mechanism is
-the push's yaw compensation, which makes the arm travel a diagonal while holding
-its orientation, and a damped arm resists the box harder so the box yaws further:
-traced over one push, the compensation's target x stays at 75.2 mm with
-``BASELINE`` and drifts 75.1 -> 65.1 mm with ``FAST`` + damping, taking the
-position error from under 2.4 mm to the 12 mm acceptance.
+same way ``FAST`` + damping does, at "right box IK unreachable".
 
-So the profile is not the thing to change: the push needs a gentler compensation
-(or the box needs straightening before it is pushed) before this scene can run
-fast at all.
+The measured mechanism is not the yaw compensation's *gain*.  Pushing the box
+slides it sideways -- about 10 mm with the shipped dynamics and 20 to 25 mm with
+a damped, rigid arm, and the same 20 mm arrives with the compensation turned off
+entirely, so it is the push's physics rather than its steering that moves the
+box.  The compensation is clipped to +/-10 mm of *where the push started*, so
+that drift saturates it: measured directly, it sits on the bound from a yaw of
+0.94 degrees, where the yaw term contributes 1.3 mm of the 10 -- it is following
+the box's translation, not its rotation.  Which is why gains from 0.02 to 0.08
+produce bit-identical IK residuals on the failing push, and why the clip's width
+is the only lever that does anything.
+
+Widening it to 20 mm is enough to get the push *and* the carry through, and that
+is where it stops being a one-line change: ``BASELINE`` + damping with the wider
+clip then fails the push on its own 25 mm sideways guard (the box reaches 25.3 mm),
+and ``FAST`` + damping runs to the last fill and dies in ``LIFT`` with both pads
+holding 3 N.  So the push needs a contact strategy that keeps the box straight
+rather than a bound that follows it, and the carry's placement needs re-measuring
+against the fill's 2 mm pre-check before this scene can run fast at all.
 """
 
 from __future__ import annotations

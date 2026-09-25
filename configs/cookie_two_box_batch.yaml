@@ -11,22 +11,29 @@ control_hz: 20
 #   fast     + 1.0   fill ok in 528 steps, push FAILS the same way
 #
 # So it is the *damping* that breaks the push, not the fill's landing pose: the same
-# failure appears under both profiles once damping is on.  The mechanism is the push's
-# yaw compensation -- `x = clip(box.x - 0.08 * yaw, ...)` -- which makes the arm travel
-# a diagonal while holding its orientation, and a damped arm resists the box harder so
-# the box yaws further.  Traced over the whole push:
+# failure appears under both profiles once damping is on.  Sweeping the push's yaw
+# compensation says the *gain* is not the variable: at the shipped +/-10 mm clip,
+# gains of 0.08 / 0.06 / 0.04 / 0.02 all refuse on the same solve with the same
+# 12.02 mm residual, bit for bit, and narrowing the clip to 5 mm is worse (12.05 mm).
+# What binds is the clip's *width*, and what saturates it is the box's own sideways
+# travel:
 #
-#   baseline + 0.0   target x stays at 75.2 mm, position error < 2.4 mm throughout
-#   fast     + 1.0   target x drifts 75.1 -> 65.1 mm, position error reaches 12.02 mm
+#   baseline + 0.0   the box ends 9.93 mm off the station's x
+#   fast     + 1.0   it drifts 20 mm, and 19.8 mm with the compensation off entirely
 #
-# and the refusal lands at the 12 mm acceptance: solve 150 asks for y = +91.4 mm with
-# the target x already 10 mm off, and misses by 12.02 mm.  Joints 1 and 5 sit on their
-# limits for *every* solve in both cases, so the saturation is a property of the push's
-# pose family rather than the discriminator.
+# so the push moves the box laterally whether or not anything steers it, and the
+# clip -- which is anchored to where the push started -- cannot follow.  Measured
+# directly, the compensation sits on its bound from a box yaw of 0.94 deg, where the
+# yaw term contributes 1.3 mm of the 10: it is tracking translation, not rotation.
 #
-# What that means for making this scene fast: the fix belongs in the push controller
-# (a gentler yaw compensation, or straightening the box before pushing), not in the
-# carry, and not in the fill.  See `docs/configurable-scenes.md`.
+# Widening the clip to 20 mm does get the push and the carry through under
+# `fast + 1.0` (box yaw 4.0 deg against 12.1 at the shipped width) and the relay then
+# runs to step 2023, where a second, previously masked failure appears -- the last
+# fill's batch 2 `LIFT` times out with both pads holding 3 N.  `baseline + damping`
+# with the same wider clip instead fails the push on its own 25 mm sideways guard
+# (25.32 mm).  So the fix is a push that keeps the box straight rather than a bound
+# that follows it, plus a look at the carry's placement against the fill's 2 mm
+# pre-check: not a constant.  See `docs/configurable-scenes.md`.
 arm_actuator_damping: 0.0
 # The relay's push and carry controllers were measured against the slower
 # baseline fill, so this scene runs the expert in that profile.

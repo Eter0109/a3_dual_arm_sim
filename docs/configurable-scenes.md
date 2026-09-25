@@ -730,18 +730,58 @@ both cases and one is not:
 * **the position error is what differs**: under `baseline + 0.0` it stays under 2.4 mm
   for the whole push, and under `fast + 1.0` it climbs to the 12 mm acceptance and
   refuses at solve 150, asking for y = +91.4 mm;
-* and the cause of that climb is the push's **yaw compensation**,
-  `x = clip(box.x - 0.08 * yaw, initial_x +/- 0.010)`.  It makes the arm travel a
-  diagonal while holding its orientation, and a damped arm resists the box harder, so
-  the box yaws further and the compensation asks for more: the target x stays at
-  75.2 mm under `baseline + 0.0` and drifts **75.1 -> 65.1 mm** under `fast + 1.0`.
+* and **the compensation is what moves in that case**: its target x stays at 75.2 mm
+  under `baseline + 0.0` and drifts **75.1 -> 65.1 mm** under `fast + 1.0`, i.e. it ends
+  10 mm off -- which is exactly its clip, so the trace says it is saturated but not
+  *why*.
 
-So the fix belongs in the push controller -- a gentler compensation, or straightening
-the box before pushing it -- and the carry does not need re-tuning at all.  That is a
-change to a controller whose 90 mm push is part of the relay's measured yield, so it
-needs its own measurement rather than a guess; the shipped config keeps `baseline` and
-its comment now records the matrix above instead of the pre-`b583b48` guess about the
-carry.
+So the fix belongs in the push controller and the carry does not need re-tuning.  What
+"the fix" is took a second round of measurement, and the obvious answer -- a gentler
+gain, since a damped arm might make the box yaw further and so ask for more -- was wrong.
+
+**The gain is not the variable; the clip's width is.**  Under `fast + 1.0`, gains of
+0.08 / 0.06 / 0.04 / 0.02 at the shipped +/-10 mm clip all refuse on the same solve with
+the same 12.02 mm residual, bit for bit, and narrowing the clip to 5 mm is only slightly
+worse (12.05 mm).  A compensation whose *gain* does nothing across a 4x range is not
+behaving like a gain at all, so the clip's usage was measured directly rather than
+inferred:
+
+```
+  gain 0.08 clip 0.010   on the bound for 78 of 149 push steps, from a box yaw of 0.94 deg
+  gain 0.02 clip 0.010   on the bound for 81 of 149 push steps, from a box yaw of 3.13 deg
+  gain 0.00 clip 0.010   on the bound for 76 of 149 push steps, from a box yaw of 4.51 deg
+  gain 0.08 clip 0.020   on the bound for 45 of 149 push steps, from a box yaw of 1.05 deg
+```
+
+At 0.94 deg of yaw the yaw term contributes 1.3 mm of the 10 mm bound, so what puts the
+compensation on its limit is **the box's own sideways travel**, not its rotation.  And
+that travel is a property of the push rather than of the steering:
+
+* the box ends the push **9.93 mm** off the station's x under `baseline + 0.0`;
+* it drifts **20 mm** under `fast + 1.0` -- and **19.8 mm** with the compensation turned
+  off entirely, so nothing that steers the pads is what moves it.
+
+The compensation is anchored to where the push started, so a box that slides 20 mm
+saturates a 10 mm bound however the gain is set, and then cannot answer the yaw at all.
+Widening the clip to 20 mm gets the push *and* the carry through under `fast + 1.0` -- the
+box yaws 4.0 deg instead of 12.1 -- and the relay runs to step 2023.
+
+**And then a second, previously masked failure appears**, which is why Phase 6 is not a
+one-line change:
+
+* `fast + 1.0` with the wider clip dies in the *last fill*, `batch 2 LIFT timed out after
+  421 steps; pad forces = [2.98, 2.99] N` -- both pads holding 3 N and the tool 12 mm
+  below its lift target, which is a jammed batch, not a ringing arrival;
+* `baseline + 1.0` with the same wider clip fails the push on the controller's own
+  25 mm sideways guard, at 25.32 mm.
+
+So the push needs a contact strategy that keeps the box straight rather than a bound that
+follows it, and the carry's placement accuracy needs re-measuring against the fill's 2 mm
+reachability pre-check, before this scene can run the fast profile.  Both are
+controller-level changes whose 90 mm push is part of the relay's measured yield, so both
+need their own measurement rather than a guess.  The shipped config keeps `baseline`; its
+comment, and `batch_profile`'s, now record the matrix and the mechanism above instead of
+the guess about the carry.
 
 **Phase 7 -- the matrix, then the docs.**  Run the table below, write the results
 into the README's speed section and a new "configurable scenes" section, and

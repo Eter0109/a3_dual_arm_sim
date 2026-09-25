@@ -326,7 +326,7 @@ def test_two_box_scene_reports_why_an_episode_was_rejected():
             metrics = policy.metrics
             for key in scene.metric_keys:
                 assert key in metrics, f"the policy does not provide {key}"
-            assert metrics["stage"] == "FILL_A", "a fresh relay starts by filling A"
+            assert metrics["stage"] == "FILL", "a fresh relay starts by filling the station box"
             assert metrics["failure_reason"] is None
             assert metrics["box_a_cookie_count"] == 0
             assert metrics["box_b_cookie_count"] == 0

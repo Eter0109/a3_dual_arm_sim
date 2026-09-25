@@ -29,6 +29,15 @@ class RightBoxPushController:
     PUSH_SPEED_M_PER_STEP = 0.0008
     FORCE_LIMIT_N = 80.0
 
+    # How the pads answer a yawed box: for a yaw of ``yaw`` the commanded
+    # contact x moves back by ``YAW_COMPENSATION_M_PER_RAD * yaw``, clipped to
+    # ``YAW_COMPENSATION_CLIP_M`` either side of where the push started.  Both
+    # are named because the pair is what the push's accuracy lives and dies by --
+    # see the class docstring of :mod:`a3_dual_arm_sim.batch_profile` for the
+    # measurement that says so.
+    YAW_COMPENSATION_M_PER_RAD = 0.08
+    YAW_COMPENSATION_CLIP_M = 0.010
+
     def __init__(self, env: A3CookieTransferEnv, box_id: int, destination_y: float):
         self.env = env
         self.data = env.data
@@ -141,9 +150,9 @@ class RightBoxPushController:
                 # Compensate yaw while continuing the physical push.
                 self.x = float(
                     np.clip(
-                        self.box_position[0] - 0.08 * self.box_yaw_rad,
-                        self.initial_position[0] - 0.010,
-                        self.initial_position[0] + 0.010,
+                        self.box_position[0] - self.YAW_COMPENSATION_M_PER_RAD * self.box_yaw_rad,
+                        self.initial_position[0] - self.YAW_COMPENSATION_CLIP_M,
+                        self.initial_position[0] + self.YAW_COMPENSATION_CLIP_M,
                     )
                 )
                 # Advance the commanded contact point slowly. A blocked pad

@@ -67,7 +67,7 @@ def main() -> int:
             status = (
                 expert.stage,
                 expert.fill.phase if expert.fill else None,
-                expert.pusher.phase if expert.stage in ("PUSH_A", "CARRY_B") else None,
+                expert.pusher.phase if expert.stage in ("PUSH", "CARRY") else None,
             )
             if status != last_status or (args.debug and steps % 100 == 0):
                 print(f"step={steps} {expert.status}", flush=True)
