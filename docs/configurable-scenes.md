@@ -783,6 +783,84 @@ need their own measurement rather than a guess.  The shipped config keeps `basel
 comment, and `batch_profile`'s, now record the matrix and the mechanism above instead of
 the guess about the carry.
 
+**An alternative was proposed and measured: pinch the filled box and carry it out.**
+That would bypass the push, which is the one operation the fast profile breaks, and so
+it is worth knowing exactly why it does not work -- the reason is a layout constraint,
+not a controller weakness.
+
+The operation is not hopeless in general.  `RightBoxCarryController` already pinches a
+box's rear wall and slides it, and under `fast + 1.0` it moves the *queue* box 160 mm
+with **0.10 mm of lateral drift, 0.67 deg of yaw and a 1.53 mm arrival error** -- better
+than the same operation under the shipped `baseline + 0.0`, which drags the box 19.4 mm
+sideways during RELEASE.  Actuator damping is the *better* regime for a pinch, because a
+rigid arm holds the pinch instead of letting the box twist in it.
+
+What fails is the specific trajectory: the station box is at y = +0.030 and its
+destination is +0.120, and a pinch has to keep the pads on the wall for that whole 90 mm,
+ending at y = +86 mm.  Sweeping the grasp's position and attitude -- pinch x from 30 to
+75 mm, height from 750 to 775 mm, and rotation about the pinch axis from 0 to 45 deg,
+which the pads' symmetry makes free -- the IK misses by 9 to 12 mm of position and 16 to
+18 deg of attitude in **every** combination, with wrist joints 2 and 6 pinned.  The push
+reaches +0.120 only because the box *slides out ahead of it*: the pads stop at about
++75 mm.  Contact beats clamping in +y, and that is why the relay is built the way it is.
+
+The reach that a grasp-based exchange *would* have is worth recording, since it is the
+design number for that alternative:
+
+```
+  worst position error (mm) / joints that saturate, pinch at x 75 mm, z 765 mm
+  start       +120      +30     -130     -290     -450     -610
+    +30  INFEASIBLE 12     -   edge 1.9 edge 1.9 edge 3.1 INFEASIBLE 25
+   -130  INFEASIBLE 12  edge 1.9    -     ok 1.5   ok 3.1  INFEASIBLE 25
+   -290  INFEASIBLE 12  edge 1.9  ok 1.5     -     ok 3.1  INFEASIBLE 25
+   -450  INFEASIBLE 12  edge 3.1  ok 3.1  ok 3.1      -   INFEASIBLE 25
+```
+
+so a lane of pinch-exchanges is feasible from y = +0.030 down to y = -0.450 and no
+further, with the station sitting exactly on the +y edge.  Two consequences for any scene
+that wants one: the lane has to flow in **-y**, and a third box-and-on needs a motion that
+lifts a finished box *over* the queue rather than past it.
+
+**The push's jaw closure trades straightness against speed, and neither end is a fix.**
+This is the one lever that moved the walk materially, and it does so by changing the
+contact pair rather than by steering better:
+
+```
+  opening   walk      yaw     contact normal   contact height   speed
+  0.00      -22.9 mm   +2.8deg      2.8deg         13.0 mm      0.60 mm/step
+  0.15      -14.8 mm   +8.4deg      8.5deg         13.3 mm      0.63 mm/step
+  0.20      -12.9 mm   +2.9deg      3.5deg          7.8 mm      0.19 mm/step
+  0.30       -3.9 mm   +1.2deg      1.5deg          8.3 mm      0.17 mm/step
+```
+
+Below about 0.20 the pads bear on the box's wall, which is 6 mm thick, so the push is
+nearly a point load with no moment arm and a damped arm's version of the same push lets
+the box rotate 2.8 to 9 deg and walk 15 to 23 mm.  At 0.20 and wider the pads pass the
+wall's outer face and come down on the box's floor plate -- the contact height falls from
+13 mm to 8 mm, which is the evidence for the change of pair -- and the drive becomes
+friction against the table, which holds the box straight.  The cost is 3.5x the speed.
+Measured with the closure at 0.30 and the budget derived to suit, four seeds under
+`fast + 1.0` all die the same way with the box at 91 to 97 of its 120 mm: the pads slip.
+And a closure wide enough to reach the floor plate means the inner pad has travelled
+*inside* the box, which is the volume the Cookies occupy -- so even if the friction figure
+could be raised, that strategy has to be checked against a full box before it is trusted.
+
+**What the fixes that did work get.**  With the compensation's clip at 0.020 and the
+carry's pinch at 0.085, four seeds under `fast + 1.0` and a randomized scene:
+
+| seed | outcome |
+| --- | --- |
+| 0 | step 1256, the second fill's pre-check: 1.47 mm / 2.28 deg |
+| 1 | step 1170, "empty box rotated during carry" |
+| 2 | **step 2075, the final check -- both boxes 10/10, source 60/60**, rejected only because the carried box sat 8.3 mm from the station against an 8.0 mm bound |
+| 3 | step 726, the push's own 25 mm sideways guard |
+
+So the whole pipeline does run under the fast profile -- seed 2 is 0.3 mm of arrival from
+success at 2075 steps against the shipped relay's 4823, which is 2.3x -- and every one of
+the four failures traces back to the push's lateral walk.  That is the thing to fix, and
+the closure table above says the fix is neither a constant to retune nor a wider clip but
+a contact that both holds straight *and* keeps its grip.
+
 **Phase 7 -- the matrix, then the docs.**  Run the table below, write the results
 into the README's speed section and a new "configurable scenes" section, and
 update `_BATCH_CONTRACT` to a derived string.
