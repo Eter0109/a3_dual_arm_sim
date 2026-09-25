@@ -19,15 +19,28 @@ multiplier:
     far the plan may lead it; the transits are joint-space trajectories rather
     than Cartesian servos.  Slower, but its fill leaves the Cookies in the poses
     the relay's push and carry controllers were measured against.  Measured: the
-    relay completes with this profile and, with ``FAST``, does not -- the fill's
-    landing pose shifts enough that the pinched box twists past the carry's yaw
-    guard.
+    relay completes with this profile and, with ``FAST``, does not.
 
 A scene picks one with ``SimConfig.batch_expert_profile``.  Keeping the baseline
 reachable is the point: the relay's failure under ``FAST`` is a calibration gap
 in the relay, not a defect in the fast profile, and this way fixing that gap
 starts by flipping one line instead of by recovering an implementation from
 history.
+
+**What that gap turned out to be** (Phase 6 of ``docs/configurable-scenes.md``),
+because the two obvious guesses were both wrong.  It is not the fill's landing
+pose and it is not the carry: the relay's *push* is what fails, and it fails
+under actuator damping whatever the profile -- ``BASELINE`` + damping fails the
+same way ``FAST`` + damping does, at "right box IK unreachable".  The mechanism is
+the push's yaw compensation, which makes the arm travel a diagonal while holding
+its orientation, and a damped arm resists the box harder so the box yaws further:
+traced over one push, the compensation's target x stays at 75.2 mm with
+``BASELINE`` and drifts 75.1 -> 65.1 mm with ``FAST`` + damping, taking the
+position error from under 2.4 mm to the 12 mm acceptance.
+
+So the profile is not the thing to change: the push needs a gentler compensation
+(or the box needs straightening before it is pushed) before this scene can run
+fast at all.
 """
 
 from __future__ import annotations

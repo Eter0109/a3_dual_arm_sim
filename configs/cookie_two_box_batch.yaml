@@ -1,14 +1,32 @@
 # Independent two-box workflow: A is filled, pushed forward, then B slides into the same station.
 physics_hz: 1000
 control_hz: 20
-# The fast profile *does* run the relay end to end -- measured, 2053 steps against
-# this profile's 4827 -- but not yet reliably, and this config keeps the reliable
-# one.  What it needs first: under the fast fill the carry leaves the box about
-# 2 deg off and 2.3 mm out, which is inside the fill's own reachability
-# pre-check's window (2.0 mm and 0.035 rad) by less than half a millimetre, so a
-# seed can be refused at "FILL_B setup: target column 2 unreachable" before the
-# fill starts.  The gap is in the carry's calibration, not in the profile; see
-# `batch_profile` and the README's speed section.
+# The fast profile needs actuator damping (its arrival test never passes without it)
+# and the relay's *push* does not survive that damping, so this scene runs the expert
+# in the baseline profile.  Measured, one seed each on the fixed layout:
+#
+#   baseline + 0.0   fill ok, push ok, reaches the carry   <- shipped
+#   baseline + 1.0   fill ok, push FAILS at "IK unreachable: error=0.0348"
+#   fast     + 0.0   fill FAILS in batch 2 MOVE_TO_SLOT (the arrival test rings)
+#   fast     + 1.0   fill ok in 528 steps, push FAILS the same way
+#
+# So it is the *damping* that breaks the push, not the fill's landing pose: the same
+# failure appears under both profiles once damping is on.  The mechanism is the push's
+# yaw compensation -- `x = clip(box.x - 0.08 * yaw, ...)` -- which makes the arm travel
+# a diagonal while holding its orientation, and a damped arm resists the box harder so
+# the box yaws further.  Traced over the whole push:
+#
+#   baseline + 0.0   target x stays at 75.2 mm, position error < 2.4 mm throughout
+#   fast     + 1.0   target x drifts 75.1 -> 65.1 mm, position error reaches 12.02 mm
+#
+# and the refusal lands at the 12 mm acceptance: solve 150 asks for y = +91.4 mm with
+# the target x already 10 mm off, and misses by 12.02 mm.  Joints 1 and 5 sit on their
+# limits for *every* solve in both cases, so the saturation is a property of the push's
+# pose family rather than the discriminator.
+#
+# What that means for making this scene fast: the fix belongs in the push controller
+# (a gentler yaw compensation, or straightening the box before pushing), not in the
+# carry, and not in the fill.  See `docs/configurable-scenes.md`.
 arm_actuator_damping: 0.0
 # The relay's push and carry controllers were measured against the slower
 # baseline fill, so this scene runs the expert in that profile.

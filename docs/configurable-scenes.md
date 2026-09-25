@@ -705,6 +705,44 @@ for every shipped scene.
 `arm_actuator_damping = 1.0`, then flip the relay to `fast`.  *Gate:* relay 3/3 at
 about 2053 steps; single-box numbers unchanged.
 
+**Diagnosed, not done -- and the diagnosis moves the target.**  The plan said to
+re-tune the *carry*.  Measured on the fixed layout, one seed each, the relay's failure
+is in the **push**, and it is caused by the *damping* rather than by the profile:
+
+```
+  baseline + damping 0.0    fill ok, push ok, reaches the carry        <- shipped
+  baseline + damping 1.0    fill ok, push FAILS: "IK unreachable: error=0.0348"
+  fast     + damping 0.0    fill FAILS in batch 2 MOVE_TO_SLOT (the arrival test rings)
+  fast     + damping 1.0    fill ok in 528 steps, push FAILS the same way
+```
+
+`fast + 0.0` failing is the documented coupling -- `FAST`'s arrival test needs damping
+or the arm rings indefinitely -- so the fill half of the plan's premise was right.  The
+other half was not: damping breaks the push under *either* profile, so the profile is
+not the variable.
+
+Tracing every IK solve of the push says what the difference is.  Two things are true of
+both cases and one is not:
+
+* **joints 1 and 5 sit on their limits for every solve**, from the approach onward, in
+  both cases -- so the saturation is a property of the push's pose family and not the
+  discriminator it first looked like;
+* **the position error is what differs**: under `baseline + 0.0` it stays under 2.4 mm
+  for the whole push, and under `fast + 1.0` it climbs to the 12 mm acceptance and
+  refuses at solve 150, asking for y = +91.4 mm;
+* and the cause of that climb is the push's **yaw compensation**,
+  `x = clip(box.x - 0.08 * yaw, initial_x +/- 0.010)`.  It makes the arm travel a
+  diagonal while holding its orientation, and a damped arm resists the box harder, so
+  the box yaws further and the compensation asks for more: the target x stays at
+  75.2 mm under `baseline + 0.0` and drifts **75.1 -> 65.1 mm** under `fast + 1.0`.
+
+So the fix belongs in the push controller -- a gentler compensation, or straightening
+the box before pushing it -- and the carry does not need re-tuning at all.  That is a
+change to a controller whose 90 mm push is part of the relay's measured yield, so it
+needs its own measurement rather than a guess; the shipped config keeps `baseline` and
+its comment now records the matrix above instead of the pre-`b583b48` guess about the
+carry.
+
 **Phase 7 -- the matrix, then the docs.**  Run the table below, write the results
 into the README's speed section and a new "configurable scenes" section, and
 update `_BATCH_CONTRACT` to a derived string.
