@@ -275,6 +275,34 @@ class MeasuredEnvelopes:
     #: outermost slot may sit 30 mm beyond the shipped 28 mm, which is what bounds
     #: a target box's column count.
     station_slot_x_reach_m: float = 0.030
+    #: How far a *batch's* centre may sit below the box's own centre, in rows, keyed
+    #: by the column's x.  This is the fill's placement pose rather than the box's
+    #: size: the pre-check refuses a pose its IK misses by more than 2.0 mm, and the
+    #: miss grows with how far the batch sits towards the box's -y side.
+    #:
+    #: Measured over 15 layouts -- capacities 10 to 18 and grasp sizes 1 to 5 -- and
+    #: the two axes give the *same* sequence, which is the evidence that the miss is a
+    #: function of the batch's mean slot row and its column and of nothing else, the
+    #: grasp size included:
+    #:
+    #:   batch centre depth   2.0     1.5     1.0     0.5     0.0   (rows)
+    #:   -x column           1.19    0.01    0.60    0.03    0.03   (mm)
+    #:   +x column           2.54    2.08    1.63    1.18    0.72   (mm)
+    #:
+    #: so the +x column is the binding one and it crosses the 2.0 mm window between
+    #: one row and one and a half.  Tabulated in *rows* rather than metres because
+    #: that is the grid the sweep moved on, so the entries are exact: the deepest
+    #: measured passing point is one row on the +x side (measured 1.63 mm) and the
+    #: first failing one is a row and a half (2.08 mm).  A capacity of 14 puts its
+    #: deepest batch one row down and is admitted; 15 puts it one and a half down and
+    #: is refused, which is where the boundary really is.
+    #:
+    #: The -x side was measured to two rows down and still passed (1.19 mm), so two is
+    #: what it is allowed -- the asymmetry is real, not a rounding of the same number.
+    placement_depth_rows_by_slot_x: tuple[tuple[float, float], ...] = (
+        (-0.028, 2.0),
+        (0.028, 1.0),
+    )
 
     def _at_or_above(self, table: tuple[tuple[float, float], ...], x: float, what: str) -> float:
         """Look up a cap at the first tabulated x at or above ``x``.
@@ -302,6 +330,21 @@ class MeasuredEnvelopes:
 
     def station_min_y(self, station_x_m: float) -> float:
         return self._at_or_above(self.station_min_y_by_x_m, station_x_m, "the fill's station band")
+
+    def placement_depth_cap(self, slot_x_m: float) -> float:
+        """How many rows below the box's centre a batch may sit, at this x.
+
+        A cap that falls with x, so it rounds outwards: a column further out in +x
+        than the sweep took gets the tightest measured value rather than an
+        extrapolation to a depth nothing was measured at.  The -x side is the more
+        forgiving one, and the sweep's own two entries say so.
+        """
+
+        table = self.placement_depth_rows_by_slot_x
+        for entry_x, value in table:
+            if slot_x_m <= entry_x + 1e-12:
+                return value
+        return table[-1][1]
 
     def source_batch_centre_y_cap(self, column_x_m: float) -> float:
         return self._at_or_above(
@@ -928,6 +971,31 @@ class SceneSpec:
                 f"the fill reaches {allowed_slot_x * 1000:.1f} mm at station x = "
                 f"{self.station_x_m:.3f}; use fewer target_columns"
             )
+
+        # How deep a *batch* is placed, which the box's own height does not bound: a
+        # taller box is fine as long as no batch's centre sits too far towards its -y
+        # side, and a plan with more, shorter batches can fail where a taller box with
+        # fewer passes.  Both axes were measured to be the same function of the
+        # batch's mean slot row (see `placement_depth_rows_by_slot_x`), so this is
+        # checked per batch rather than per box.
+        slots = self.target_slots_local_m
+        centre_row = (self.target_rows - 1) / 2.0
+        for group in self.plan.groups:
+            rows = [index // self.target_columns for index in group.slot_indices]
+            depth_rows = centre_row - sum(rows) / len(rows)
+            cap_rows = envelopes.placement_depth_cap(slots[group.slot_indices[0]][0])
+            if depth_rows > cap_rows + 1e-9:
+                depth_m = depth_rows * self.geometry.target_slot_pitch_y_m
+                problems.append(
+                    f"batch {group.index + 1} of {len(self.plan.groups)} centres "
+                    f"{depth_m * 1000:.1f} mm below the box at column "
+                    f"{group.column + 1}, past the "
+                    f"{cap_rows * self.geometry.target_slot_pitch_y_m * 1000:.1f} mm "
+                    f"the fill places there; a box of capacity {self.box_capacity} over "
+                    f"{self.target_columns} columns at {self.per_grasp} per grasp is "
+                    f"too deep -- fewer rows, fewer columns or a larger per_grasp all "
+                    f"raise the batch centres"
+                )
 
         # The station's own band, and the pads' envelope beyond it.
         try:

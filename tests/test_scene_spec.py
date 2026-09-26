@@ -216,22 +216,38 @@ def test_a_fifth_box_is_refused_for_supply_and_the_message_says_so():
 
 
 def test_a_smaller_grasp_costs_usable_source_rows():
-    """Grasping one at a time loses three rows of source, and that is not a bug.
+    """Grasping fewer at a time loses source rows, and that is not a bug.
 
     The reach map bounds a batch's *centre*, and a batch's centre is where its pose
-    is aimed.  A one-Cookie batch's centre is the Cookie itself, which sits closer
-    to the band's edge than a five-Cookie batch's centre does, so the last three
-    rows of a twenty-row column fall outside it.  So ``per_grasp`` is not free: at
-    the shipped source layout, dropping to one costs a whole box.
+    is aimed.  A three-Cookie batch's centre sits closer to the band's edge than a
+    five-Cookie batch's does, so the last two rows of a twenty-row column fall
+    outside it.  So ``per_grasp`` is not free: at the shipped source layout, dropping
+    from five to three costs a whole box (four down to three).
+
+    And below three it stops being a cost and becomes a refusal, for a different
+    measured reason: the batches that fill the *back* of a column are placed from
+    poses the fill's own pre-check refuses.  See
+    :attr:`MeasuredEnvelopes.placement_depth_rows_by_slot_x` -- at one per grasp the
+    sixth batch's centre sits 12.7 mm below the box against the 6.3 mm the fill
+    places there, and at two per grasp the fourth sits 9.5 mm down.
     """
 
-    spec = replace(two_box_spec(), per_grasp=1)
-    assert spec.usable_source_rows(0.1498) == 17
-    assert spec.source_supply == 34
+    spec = replace(two_box_spec(), per_grasp=3)
+    assert spec.usable_source_rows(0.1498) == 18
+    assert spec.source_supply == 36
     assert spec.max_boxes == 3
     spec.validate()
     with pytest.raises(ValueError, match="largest box count here is 3"):
         replace(spec, boxes=4).validate()
+
+    for per_grasp, batch, depth in ((1, 6, "12.7"), (2, 4, "9.5")):
+        tighter = replace(two_box_spec(), per_grasp=per_grasp)
+        with pytest.raises(ValueError) as excinfo:
+            tighter.validate()
+        message = str(excinfo.value)
+        assert f"batch {batch} of" in message
+        assert f"centres {depth} mm below the box" in message
+        assert "the fill places there" in message
 
 
 def test_per_grasp_is_bounded_by_the_column_it_is_placed_into():

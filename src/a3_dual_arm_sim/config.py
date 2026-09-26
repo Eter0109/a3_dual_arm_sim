@@ -495,8 +495,28 @@ class SimConfig:
             raise ValueError("camera positions must contain three values")
         if len(self.cookie_transfer.cookie_source_positions_m) < 10:
             raise ValueError("cookie_transfer must contain at least 10 source positions")
-        if len(self.cookie_transfer.target_slots_local_m) != 10:
-            raise ValueError("cookie_transfer must contain exactly 10 target slots")
+        # A *lattice*, not an arbitrary list, because the batch plan indexes it as
+        # ``row * columns + column`` and places each grasp down a single column.  This
+        # used to demand exactly ten slots, which was the shipped box's size rather
+        # than a property of anything -- and it was the one thing that stopped
+        # `box_capacity` from being configurable end to end: a derived box of capacity
+        # 18 has 18 slots and was refused with "must contain exactly 10 target slots",
+        # after the spec had already accepted the layout.  Measured by the Phase 7
+        # matrix (`scripts/check_scene_matrix.py`, the `capacity_18` cell).
+        slots = self.cookie_transfer.target_slots_local_m
+        if not slots:
+            raise ValueError("cookie_transfer must contain at least one target slot")
+        columns = len({slot[0] for slot in slots})
+        pattern = sorted({slot[0] for slot in slots})
+        if len(slots) % columns or any(
+            slot[0] != pattern[index % columns] for index, slot in enumerate(slots)
+        ):
+            raise ValueError(
+                f"target_slots_local_m must be a rectangular lattice, row-major with "
+                f"ascending x: a grasp is placed down one column and slot i is read as "
+                f"row i // {columns} of column i % {columns}, but these {len(slots)} "
+                f"slots do not repeat their {columns} x values in that order"
+            )
         spare_position = self.cookie_transfer.spare_target_bin_world_position_m
         if spare_position is not None and len(spare_position) != 3:
             raise ValueError("spare_target_bin_world_position_m must contain three values")
