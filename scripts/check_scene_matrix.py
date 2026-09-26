@@ -219,7 +219,16 @@ def run_one(variant: dict, seed: int, max_steps: int) -> dict:
             "failed": expert.failed,
             "counts": expert.all_counts() if hasattr(expert, "all_counts") else None,
             "placed": placed,
-            "expected": len(boxes) * len(env.config.cookie_transfer.target_slots_local_m),
+            # The *capacity*, not the slot count: a lattice is `ceil(capacity /
+            # columns)` rows tall, so a capacity that is not a multiple of the column
+            # count leaves its last slots empty by design (`BatchPlan` documents it).
+            # The config stores only the slots -- capacity is a spec-level quantity --
+            # so it comes from the spec.  Counting slots made a capacity-9 cell report
+            # "15/20" when 18 is the most it could ever place.
+            "expected": min(
+                spec_for(variant).box_capacity, len(env.config.cookie_transfer.target_slots_local_m)
+            )
+            * len(boxes),
             "source": source,
             "boxes": len(boxes),
         }
