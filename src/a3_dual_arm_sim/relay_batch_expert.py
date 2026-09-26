@@ -50,6 +50,42 @@ class RightBoxPushController:
     #: `docs/configurable-scenes.md`.
     PUSH_OPENING = 0.0
 
+    #: How far the box may be walked sideways before the push is called a failure,
+    #: signed: negative is away from the arm, positive is towards it.  The two sides
+    #: are **not** symmetric, and a single 25 mm bound was wrong in both directions --
+    #: it failed pushes that walked the box the harmless way while tolerating three
+    #: times as much in the direction that actually hurts.
+    #:
+    #: Measured against the fill's own pre-check (`p8_offset_tolerance.py`), because the
+    #: next stage is what the bound has to serve: a box shifted in x shifts every
+    #: placement pose with it, so the offset eats the fill's x reach.
+    #:
+    #:   -x   free out to 45 mm: the fill's worst residual is 0.03 mm there, *better*
+    #:        than at 0, because moving the box away from the arm puts its slots
+    #:        further inside the workspace
+    #:   +x   about 7 mm: 8 mm measures 2.10 mm of residual against the 2.0 mm window
+    #:
+    #: and the push walks the box in -x, which is why the shipped 12 mm and the damped
+    #: 23 mm are both harmless to the fill.
+    SIDEWAYS_LIMIT_AWAY_M = 0.045
+    SIDEWAYS_LIMIT_TOWARDS_M = 0.007
+
+    #: The box's yaw the push may leave behind, which is the quantity that actually
+    #: decides whether the next fill can place: a slot 28 mm out from the box's centre
+    #: moves ``28 * sin(yaw)`` in y, so the fill's 2.0 mm window is crossed at about
+    #: 4 degrees.  Measured the same way (`p8_yaw_tolerance.py`): 4.0 deg gives
+    #: 1.19 mm / 1.66 deg and passes, 5.0 deg gives 1.44 mm / 2.05 deg and is over.
+    #:
+    #: This is the guard that protects the next stage, and the sideways bound above is
+    #: the one that catches a runaway.  Without it the push could leave a box the fill
+    #: cannot use and report success, which is exactly what a 6.2 deg yaw did.
+    #:
+    #: It bounds the yaw the push *added*, not the box's absolute yaw, for the same
+    #: reason the carry's rotation guard does: the scene draws the station box's yaw
+    #: (up to 4.5 deg here), and an absolute bound would read "started at 4.5 deg" as
+    #: "the push turned it 4.5 deg".
+    PUSHED_YAW_LIMIT_RAD = math.radians(4.0)
+
     def __init__(self, env: A3CookieTransferEnv, box_id: int, destination_y: float):
         self.env = env
         self.data = env.data
@@ -75,6 +111,9 @@ class RightBoxPushController:
         self._push_goal_y = self.start_y
         self._retract_y = None
         self._target_q = None
+        #: The box's yaw when the push started.  The yaw guard below bounds what the
+        #: push *added*, not the box's absolute yaw, because the scene draws it.
+        self.initial_yaw = self.box_yaw_rad
 
     @property
     def box_position(self) -> np.ndarray:
@@ -120,8 +159,26 @@ class RightBoxPushController:
         if self._force_over_count >= 3:
             self.failed = f"right fingers overloaded while pushing: {forces.tolist()} N"
             return self.env.last_applied_action.copy()
-        if abs(self.box_position[0] - self.initial_position[0]) > 0.025:
-            self.failed = "box drifted sideways during right-arm push"
+        # The box's own yaw, which the next fill's pre-check reads.  Checked before the
+        # sideways bound because it is the one with a measured window behind it: the
+        # fill places into the box's frame, so a yawed box moves its own slots.
+        turned = self.box_yaw_rad - self.initial_yaw
+        if abs(turned) > self.PUSHED_YAW_LIMIT_RAD:
+            self.failed = (
+                f"box yawed {math.degrees(turned):.2f} deg during right-arm push "
+                f"(from {math.degrees(self.initial_yaw):.2f}), past the "
+                f"{math.degrees(self.PUSHED_YAW_LIMIT_RAD):.1f} deg the next fill can "
+                f"place into"
+            )
+            return self.env.last_applied_action.copy()
+        drift = float(self.box_position[0] - self.initial_position[0])
+        limit = self.SIDEWAYS_LIMIT_TOWARDS_M if drift > 0.0 else self.SIDEWAYS_LIMIT_AWAY_M
+        if abs(drift) > limit:
+            self.failed = (
+                f"box drifted {drift * 1e3:+.2f} mm sideways during right-arm push, "
+                f"past the {limit * 1e3:.1f} mm the next fill can absorb in that "
+                f"direction"
+            )
             return self.env.last_applied_action.copy()
         up = self.data.xmat[self.box_id].reshape(3, 3)[2, 2]
         if abs(float(up)) < math.cos(math.radians(12)):
