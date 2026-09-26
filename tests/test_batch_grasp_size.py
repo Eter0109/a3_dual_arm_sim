@@ -21,6 +21,7 @@ import pytest
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
 from a3_dual_arm_sim.same_column_batch_expert import A3SameColumnBatchExpert
+from a3_dual_arm_sim.scene_spec import two_box_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 SINGLE_CONFIG = ROOT / "configs" / "cookie_same_column.yaml"
@@ -171,6 +172,45 @@ def test_the_verified_floor_is_what_the_shipped_scenes_use():
     for path in (SINGLE_CONFIG, RELAY_CONFIG):
         config = load_config(path)
         assert config.batch_expert_per_grasp >= config.min_verified_batch_expert_per_grasp
+
+
+def test_a_remainder_batch_is_refused_because_it_is_below_the_floor():
+    """The floor applies to the plan's groups, not only to the parameter.
+
+    A column whose row count is not a multiple of the grasp size ends in a shorter
+    batch, and that remainder is below the grasp size by construction -- so with a
+    measured floor of five it is always below the floor, whatever the parameter says.
+    The check used to look only at the parameter, which let a box of capacity 14
+    through with the plan ``[5, 2, 5, 2]``.
+
+    Measured rather than inferred, by the Phase 7 matrix: that box was run and died at
+    "batch 2 CLOSE timed out after 421 steps; pad forces=[0.0, 0.0] N", the same
+    no-contact failure the floor's message describes for small grasps.
+    """
+
+    base = load_config(RELAY_CONFIG)
+    for capacity, plan in ((11, "[5, 1, 5, 1]"), (14, "[5, 2, 5, 2]")):
+        slots = replace(two_box_spec(), box_capacity=capacity).target_slots_local_m
+        with pytest.raises(ValueError) as excinfo:
+            replace(
+                base,
+                cookie_transfer=replace(
+                    base.cookie_transfer,
+                    target_slots_local_m=slots,
+                ),
+            )
+        message = str(excinfo.value)
+        assert f"is {plan}" in message
+        assert "below the 5 that have a measured grasp" in message
+        # The message has to say what would work, or it is only a refusal.
+        assert "a multiple of the grasp size" in message
+        assert "10 slots for this column count" in message
+    # A box whose rows *are* a multiple of the grasp size passes this check.
+    slots = replace(two_box_spec(), box_capacity=10).target_slots_local_m
+    replace(
+        base,
+        cookie_transfer=replace(base.cookie_transfer, target_slots_local_m=slots),
+    )
 
 
 def test_a_batch_of_one_is_a_plan_the_config_derives():

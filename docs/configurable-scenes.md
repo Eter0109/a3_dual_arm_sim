@@ -877,13 +877,36 @@ simulator enforces:
 
 | axis | the plan said | what the framework enforces |
 | --- | --- | --- |
-| `box_capacity` | 20 | **14**.  The jaw travel refuses 20 outright; the fill's *placement depth* refuses anything past 14 |
-| `per_grasp` | 1 as the low boundary | **1 and 2 are refused**.  A smaller grasp means more, shorter batches per column, and the ones filling the back of a column sit too deep |
+| `box_capacity` | 20 | **9 or 10**.  Below that a column has fewer rows than a grasp needs; 11 to 14 derive a shorter remainder batch, which is below the measured grasp floor; 15 and up put a batch too deep for the fill to place; and 20 is past the push pads' reach as well |
+| `per_grasp` | 1 as the low boundary | **5 only**.  1 and 2 are refused by the placement depth, 3 and 4 by the remainder batch |
 | `source_cookies` | `N*C` exactly | not expressible.  The axis needs a *layout* knob (usable columns), not a count |
 | `randomize` | off is the pre-feature behaviour | true, and it is also **seed-independent**: a fixed cell repeats the same episode, so three seeds measure one run |
 | `boxes` | 1, 2, 4 | unchanged -- 1 and 2 complete, 4 is the source-supply bound |
 
-The placement-depth bound is the substantial find, and it is a real limit rather than a
+**The remainder batch is the bound that binds first**, and it took a run to find because
+the derivation was not checking it.  A column whose row count is not a multiple of the
+grasp size ends in a shorter batch, and that batch is below the grasp size by
+construction -- so with a measured floor of five it is always below the floor.  The
+config checked the *parameter* against the floor and never the *plan*:
+
+```
+  capacity  rows  plan          the size-2 batch
+      10     5   [5, 5]        --
+      11     6   [5, 1, 5, 1]  closes the jaws on nothing
+      12     6   [5, 1, 5, 1]  the same
+      13     7   [5, 2, 5, 2]  the same
+      14     7   [5, 2, 5, 2]  the same
+```
+
+Measured, not inferred: a box of capacity 14 was run and died at `batch 2 CLOSE timed
+out after 421 steps; pad forces=[0.0, 0.0] N, opening=0.112` with 5 of 28 placed -- the
+same no-contact failure the floor's own message describes for small grasps.  The check
+is now on every group the plan derives, and it names the plan:
+
+> the batch plan for 14 slots over 2 columns at 5 per grasp is [5, 2, 5, 2], and a
+> batch of 2 Cookies is below the 5 that have a measured grasp
+
+The placement depth is the other substantial find, and it is a real limit rather than a
 defect: sweeping 15 layouts -- capacities 10 to 18 and grasp sizes 1 to 5 -- the
 pre-check's miss is a function of the batch's mean slot row and its column and of
 nothing else, because both axes produce the *same* sequence:

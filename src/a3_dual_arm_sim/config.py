@@ -7,6 +7,7 @@ from typing import Any
 
 import yaml
 
+from .batch_plan import BatchPlan
 from .paths import default_config_path
 
 # Upright pieces: 50 mm wide, 19/3 mm thick, 25 mm high. A 0.4 mm
@@ -479,6 +480,36 @@ class SimConfig:
                     f"target column holds {rows} rows ({len(slots)} slots over "
                     f"{columns} columns), so a batch could not be placed in one "
                     f"column; use at most {rows}"
+                )
+            # Every batch the *plan* derives has to be graspable, not only the
+            # nominal one the check above covers.  A column whose row count is not a
+            # multiple of the grasp size ends in a shorter batch, and that remainder
+            # is smaller than the grasp size by construction -- so with a measured
+            # floor of 5 it is always below it, and the fill closes its jaws on
+            # nothing.  Measured by the Phase 7 matrix: a box of capacity 14 derives
+            # [5, 2, 5, 2] and its size-2 batch fails at "batch 2 CLOSE timed out
+            # after 421 steps; pad forces=[0.0, 0.0] N", which is the same no-contact
+            # failure the message above describes.  So this is the same gap as that
+            # one, one level down: the floor applies to the plan's groups, not to the
+            # parameter.
+            plan = BatchPlan.for_capacity(len(slots), self.batch_expert_per_grasp, columns)
+            short = [
+                group.size
+                for group in plan.groups
+                if group.size < self.min_verified_batch_expert_per_grasp
+            ]
+            if short:
+                raise ValueError(
+                    f"the batch plan for {len(slots)} slots over {columns} columns at "
+                    f"{self.batch_expert_per_grasp} per grasp is "
+                    f"{[group.size for group in plan.groups]}, and a batch of "
+                    f"{min(short)} Cookies is below the "
+                    f"{self.min_verified_batch_expert_per_grasp} that have a measured "
+                    f"grasp: a column of {rows} rows does not divide into batches of "
+                    f"{self.batch_expert_per_grasp}, and the shorter one closes the "
+                    f"jaws on nothing.  Choose a box whose rows are a multiple of the "
+                    f"grasp size -- {columns * self.batch_expert_per_grasp} slots for "
+                    f"this column count"
                 )
         if len(self.home.left) != 7 or len(self.home.right) != 7:
             raise ValueError("each arm home pose must contain seven joints")
