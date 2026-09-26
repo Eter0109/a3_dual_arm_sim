@@ -52,26 +52,39 @@ SINGLE_BASE = PROJECT / "configs" / "cookie_same_column.yaml"
 #: One entry per matrix cell.  A boundary is a representative run with a single
 #: parameter moved, which is why this is a dozen cells rather than a cross product.
 #:
-#: Two cells differ from the plan's table, both because the derivation disagreed with
-#: it and the derivation is what the simulator enforces:
+#: One entry per matrix cell.  A boundary is a representative run with a single
+#: parameter moved, which is why this is a dozen cells rather than a cross product.
 #:
-#: * the capacity boundary is **18**, not 20.  `SceneSpec.validate` refuses 20 with its
-#:   own numbers -- "a box of capacity 20 puts the push pads at 101.8 mm, past the 99.0
-#:   mm they reach at station x = 0.075" -- so 18 is the largest capacity this station
-#:   actually admits;
-#: * `per_grasp=10` needs ten rows, which is what a capacity of twenty would derive, so
-#:   it cannot be reached at this station at all.  The cell stays as the boundary that
-#:   *should* fail, and the matrix records the refusal rather than hiding it.
+#: Five cells are *expected* to be refused, and the matrix records the refusal rather
+#: than hiding it -- each one is a boundary the plan's table named but the derivation
+#: disagreed with, and the derivation is what the simulator enforces:
+#:
+#: * the capacity boundary is **14**, not 20.  Two bounds meet before 20 does: the
+#:   jaw travel refuses 20 outright ("a box of capacity 20 puts the push pads at
+#:   101.8 mm, past the 99.0 mm they reach at station x = 0.075"), and the fill's
+#:   placement depth refuses anything past 14, because a box of 15 slots puts a batch
+#:   9.5 mm below its centre against the 6.3 mm the fill places there;
+#: * `per_grasp=10` needs ten rows, which the jaw travel cannot reach at this station
+#:   at all, so it is refused before the depth bound is even consulted;
+#: * `per_grasp_1` and `per_grasp_2` are refused for the depth reason: a smaller grasp
+#:   means more, shorter batches per column, and the ones filling the back of a column
+#:   sit deeper than the fill can place;
+#: * `source_exact` cannot be expressed at all.  The source layout supplies 40
+#:   graspable Cookies and `source_cookies=20` asks for a layout that supplies 20, so
+#:   two boxes needing 20 of them are refused -- the axis needs a *layout* knob (usable
+#:   columns) rather than a count to have a boundary here.
 VARIANTS: list[dict] = [
     {"name": "base", "single": False, "spec": {}},
     {"name": "randomized", "single": False, "spec": {}, "randomize": True},
     {"name": "single_randomized", "single": True, "spec": {}, "randomize": True},
     {"name": "per_grasp_1", "single": False, "spec": {"per_grasp": 1}},
     {"name": "per_grasp_2", "single": False, "spec": {"per_grasp": 2}},
+    {"name": "per_grasp_3", "single": False, "spec": {"per_grasp": 3}},
     {"name": "per_grasp_10", "single": False, "spec": {"per_grasp": 10, "box_capacity": 20}},
     {"name": "boxes_1", "single": False, "spec": {"boxes": 1}},
     {"name": "boxes_3", "single": False, "spec": {"boxes": 3}},
     {"name": "boxes_4", "single": False, "spec": {"boxes": 4}},
+    {"name": "capacity_14", "single": False, "spec": {"box_capacity": 14}},
     {"name": "capacity_18", "single": False, "spec": {"box_capacity": 18}},
     {"name": "source_exact", "single": False, "spec": {"source_cookies": 20}},
     {"name": "queue_gap_wide", "single": False, "spec": {"queue_gap_m": 0.260}},

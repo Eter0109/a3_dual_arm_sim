@@ -865,6 +865,70 @@ a contact that both holds straight *and* keeps its grip.
 into the README's speed section and a new "configurable scenes" section, and
 update `_BATCH_CONTRACT` to a derived string.
 
+**Run, and it corrected its own table.**  `scripts/check_scene_matrix.py` runs each
+cell by *deriving* its config through `render_config` -- the same code the pinned-config
+test uses, so a cell cannot disagree with a shipped file -- with rendering off.  That
+matters more than it sounds: a rendered step measures 1844 ms against 107 ms without
+(measured, 100 steps each), a 17x difference, and none of these questions are about
+pixels.  Twelve cells at three seeds over twelve shards is a couple of hours.
+
+Five of the plan's boundaries turned out to be wrong, and the derivation is what the
+simulator enforces:
+
+| axis | the plan said | what the framework enforces |
+| --- | --- | --- |
+| `box_capacity` | 20 | **14**.  The jaw travel refuses 20 outright; the fill's *placement depth* refuses anything past 14 |
+| `per_grasp` | 1 as the low boundary | **1 and 2 are refused**.  A smaller grasp means more, shorter batches per column, and the ones filling the back of a column sit too deep |
+| `source_cookies` | `N*C` exactly | not expressible.  The axis needs a *layout* knob (usable columns), not a count |
+| `randomize` | off is the pre-feature behaviour | true, and it is also **seed-independent**: a fixed cell repeats the same episode, so three seeds measure one run |
+| `boxes` | 1, 2, 4 | unchanged -- 1 and 2 complete, 4 is the source-supply bound |
+
+The placement-depth bound is the substantial find, and it is a real limit rather than a
+defect: sweeping 15 layouts -- capacities 10 to 18 and grasp sizes 1 to 5 -- the
+pre-check's miss is a function of the batch's mean slot row and its column and of
+nothing else, because both axes produce the *same* sequence:
+
+```
+  batch centre depth   2.0     1.5     1.0     0.5     0.0   (rows)
+  -x column           1.19    0.01    0.60    0.03    0.03   (mm)
+  +x column           2.54    2.08    1.63    1.18    0.72   (mm)
+```
+
+The pre-check's window is 2.0 mm, so the +x column crosses it between one row and one
+and a half, and the -x side was measured to two rows and still passed.  It is now
+tabulated in `MeasuredEnvelopes.placement_depth_rows_by_slot_x` and checked in
+`validate()`, so a box that is too deep is refused by the derivation with the number
+instead of by the expert at run time.
+
+Two framework gaps fell out of the same run.  `SimConfig` demanded *exactly ten* target
+slots -- the shipped box's size rather than a property of anything -- which was the one
+thing stopping `box_capacity` from being configurable end to end: the spec derived and
+accepted an 18-slot box and the config then refused it.  It is now the invariant the
+batch plan actually needs (a rectangular lattice, row-major with ascending x, because a
+grasp goes down one column and slot `i` is read as row `i // columns`).
+
+**And the matrix found four failures the repository did not know about**, all on
+layouts it ships or derives, all reproducible:
+
+| cell | failure | where |
+| --- | --- | --- |
+| `base` | `Cookie slipped out of batch during transport`, 15/20 placed | step 4402, the second fill |
+| `boxes_3` | the same | step 3295 |
+| `boxes_4` | `cookie expert IK failed: the closest pose is 4.02 mm from the target (tolerance 4.00 mm)`, 10/40 | step 3283 |
+| `queue_gap_wide` | `empty box rotated during carry` | step 2693, the carry |
+
+The first is the *shipped two-box relay* failing on the nominal layout, and it is worth
+being precise about what that does and does not say: the relay's recorded yield (3 of 3,
+4772 to 4993 steps) was measured with the scene's own randomisation **on**, and this cell
+runs the fixed layout.  So the nominal layout is a case the relay has never been measured
+on, and it fails in the fill's transport rather than in the push -- which is consistent
+with the carry leaving the second box a few degrees off, which the fill then transports
+onto.  `boxes_4` missing by 0.02 mm of a 4.00 mm tolerance is the same story one step
+further out.
+
+None of these are fixed here: they are the matrix doing its job, which was to find the
+configurations where success collapses rather than merely dips.
+
 ## The test matrix
 
 Exhaustive is out: `per_grasp` x `boxes` x `randomize` x `capacity` x
