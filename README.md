@@ -222,8 +222,8 @@ python examples/run_cookie_same_column.py --help
 
 ### 两套档位：为什么快的那套不能全局启用
 
-上表的加速**只对单盒场景启用**。双盒接力按同样方式提速后实测 0/4，失败点各不相同，
-所以两套调参都被保留下来，作为数据放在
+上表的加速**只对单盒场景启用**。双盒接力按同样方式提速后一个也没通过，所以两套
+调参都被保留下来，作为数据放在
 [`src/a3_dual_arm_sim/batch_profile.py`](src/a3_dual_arm_sim/batch_profile.py) 里：
 
 | | `FAST` | `BASELINE` |
@@ -232,16 +232,27 @@ python examples/run_cookie_same_column.py --help
 | 行程 | 笛卡尔伺服 | 关节轨迹（首个动作留在镜像 IK 分支上） |
 | 需要手臂阻尼 | 是（否则到位判据永不满足） | 否 |
 | 单盒 | 5/5，均值 469 步 | 1657–1876 步 |
-| 双盒接力 | **0/4** | 3/3，均值 4827 步 |
+| 双盒接力 | **未通过**（Phase 6 定位：失败在 push，见下） | 3/3，均值 4827 步 |
 
-`FAST` 之下接力失败的原因是标定缺口，不是快档本身的缺陷：加速后填充阶段的落点
-姿态变了，搬运控制器的夹持就在新姿态下把箱体扭过它的 10° 判据（实测无阻尼手臂下
-峰值 2.03°，加速后 10.34°）。因此**修好接力应该从翻开一行开始**——把
-`configs/cookie_two_box_batch.yaml` 的 `batch_expert_profile` 改成 `"fast"`，再重新
-标定搬运——而不是从历史里恢复一份实现。
+`FAST` 之下接力失败的原因**不是**快档本身的缺陷，而且后续实测把原因定位得比这张表
+更准（见 `docs/configurable-scenes.md` 的 Phase 6）：失败在 **push**，触发它的是
+**手臂阻尼**而不是档位——`baseline + 阻尼` 与 `fast + 阻尼` 以同样方式失败，而不加阻尼的
+`fast` 失败在填充的到位判据（这正是阻尼存在的原因）。机制是 push 的偏航补偿
+`x = clip(box.x - 0.08 * yaw, initial_x ± 0.010)`：它被**箱子自身的侧移**顶到界上
+（首次贴界时偏航只有 0.94°，偏航项才贡献 1.3 mm），所以增益在 0.02–0.08 之间
+**完全不起作用**（残差逐位相同），限幅宽度才是唯一的杠杆。
+
+放宽限幅到 20 mm 后，push 与 carry 都能通过，接力跑到最后一次填充才暴露第二个此前
+被掩盖的失败（`LIFT` 卡死，两指垫各 3 N）。四个 seed 中有一个跑到**最终校验**：
+两箱各 10/10、源 60/60，只因搬运箱离站台 **8.3 mm**（阈值 8.0）被拒 —— 也就是
+**2057 步对出厂的 4823 步，约 2.3×**。所以接力是能上快档的，卡住它的是 push 的侧移，
+而那不是常数问题：push 的指垫开合量在"直"与"快"之间有实测的取舍（0.30 时侧移
+3.9 mm 但慢 3.5 倍，且指垫会滑进箱内、伸到饼干所在的空间）。
 
 `arm_actuator_damping` 同样是按场景的开关，两个双盒配置设为 `0.0`：接力按无阻尼
-手臂标定，阻尼会让手指更贴命令，箱体因此在夹持里转得更多。
+手臂标定。顺带一提，**抓取搬运反而偏好阻尼**：同一操作搬队列箱在 `fast + 1.0` 下
+侧移 0.10 mm、落位误差 1.53 mm、偏航 0.67°，而出厂 `baseline + 0.0` 在 RELEASE 时
+把箱子拖走 19.4 mm —— 因为刚性的手臂是**握得住**的，而不是让箱体在夹持里转。
 
 双盒 relay 的推盒／搬盒控制器按慢速动力学标定，本次**只改了两处**，速率未动：
 夹持丢失判据从"任一指垫力 < 0.08 N"改为"**两指垫都** < 0.08 N"（实测外指在
@@ -775,6 +786,130 @@ Two consequences follow, and both are visible in the measured numbers. Randomisi
 episode harder, so the yield is lower: the two-box scene completes about 2 of 3 seeds. And the
 `randomize_boxes=False` default on `main` means a `main` benchmark run and a run here are not
 measuring the same thing even when they use the same scene name.
+
+## Configurable scenes
+
+A scene's geometry is **derived** from a handful of key parameters rather than hand-written, so a new
+layout is a spec plus one command instead of a copied config whose numbers nobody can re-derive.
+`SceneSpec` in [`src/a3_dual_arm_sim/scene_spec.py`](src/a3_dual_arm_sim/scene_spec.py) owns that
+derivation, and it deliberately imports no MuJoCo — a test pins that, because a derivation that
+needs a simulator cannot be reasoned about on its own.
+
+```python
+from dataclasses import replace
+from a3_dual_arm_sim.scene_spec import two_box_spec
+
+spec = replace(two_box_spec(), boxes=3, box_capacity=10, per_grasp=5)
+print(spec.describe())
+```
+
+```bash
+# Write a config from a spec; the tuning is inherited, the geometry is derived.
+python scripts/generate_scene_config.py --base configs/cookie_two_box_batch.yaml \
+    --boxes 3 --queue-gap 0.160 --output configs/generated/cookie_three_box.yaml
+
+# Print the derivation, the ranges and the corner checks for every shipped scene.
+python scripts/check_scene_randomization.py
+```
+
+What is derived: the target lattice (rows from the capacity, columns from the jaw's reach), the box's
+outer size, every slot's position, the batch plan, the source bin's offset when a lane needs the room,
+the lane pitch and queue gap, and the randomization ranges with the corners they have to survive.
+What is *not* derived, on purpose: gains, contact parameters and wall heights. Those were chosen and
+measured, and pretending otherwise would be the kind of invented formula this exists to avoid — they
+come from a base config.
+
+### The key parameters, and what actually bounds them
+
+Every bound below is a **measurement** and every refusal names its number. The envelopes live in
+`MeasuredEnvelopes` as tables rather than fits, because the sweeps ran on a grid and interpolating
+would claim a precision the measurement does not have.
+
+| parameter | what bounds it | the number at the shipped station |
+| --- | --- | --- |
+| `boxes` | the source's graspable supply, then the arm's −y reach | 4 |
+| `box_capacity` | **9 or 10** at this station — see below | 10 |
+| `per_grasp` | the column's rows, the jaw travel, and the remainder rule | 5 only |
+| `source_cookies` | the layout's usable columns, not a count | 80 |
+| `station_x_m` / `station_y_m` | the fill's station band, and the push pads' envelope | (0.075, 0.030) |
+| `queue_gap_m` | the boxes' mutual clearance, and a lane pitch that is not a legal spacing | 0.160 |
+
+The capacity and grasp-size bounds are **tightly coupled**, and that is a finding rather than a
+design: at this station the only legal combination is the shipped 10/5. Three different measured
+limits close in from either side —
+
+* below capacity 9 a column has fewer rows than a grasp needs;
+* 11 to 14 derive a **remainder batch** (`[5, 1, 5, 1]`, `[5, 2, 5, 2]`) which is below the grasp
+  floor of 5 by construction, so the jaws close on nothing. Measured: a capacity-14 box dies at
+  `batch 2 CLOSE timed out; pad forces=[0.0, 0.0] N`;
+* 15 and up put a batch's centre deeper than the fill can place it (see the depth table below);
+* 20 is past the push pads' reach as well.
+
+A scene that wants a different combination needs a **station further out**, where the pads reach
+further and the batch centres sit shallower — not a change to the framework.
+
+### Two measured limits worth knowing
+
+**Placement depth.** The fill's pre-check refuses a pose its IK misses by more than 2.0 mm, and that
+miss is a function of the batch's mean slot row and its column and of *nothing else* — sweeping 15
+layouts (capacities 10 to 18, grasp sizes 1 to 5) gives the same sequence on both axes, which is the
+evidence:
+
+```
+  batch centre depth   2.0     1.5     1.0     0.5     0.0   (rows below the box's centre)
+  -x column           1.19    0.01    0.60    0.03    0.03   (mm of position error)
+  +x column           2.54    2.08    1.63    1.18    0.72   (mm)
+```
+
+So the +x column is the binding one and it crosses the window between one row and one and a half.
+Tabulated in **rows** rather than metres because that is the grid the sweep moved on, which makes the
+entries exact and puts the boundary between two measured points instead of on a rounding.
+
+**The push's yaw compensation is not a proportional law.** The push commands
+`x = clip(box.x - 0.08 * yaw, initial_x ± 0.010)`, and under the relay's own dynamics that clip
+saturates early: the compensation sits on its bound from a box yaw of **0.94°**, where the yaw term
+contributes 1.3 mm of the 10. What pins it is the box's own sideways travel — 9.93 mm under the
+shipped dynamics, 20 mm under a damped arm, and 19.8 mm with the compensation switched off entirely.
+Which is why gains from 0.02 to 0.08 produce bit-identical IK residuals on a failing push, and why
+the clip's width is the only lever that does anything. See `docs/configurable-scenes.md` for the
+full trace.
+
+### The matrix
+
+[`scripts/check_scene_matrix.py`](scripts/check_scene_matrix.py) covers every mechanism and every
+boundary at three seeds each, deriving each cell's config through the same `render_config` the
+pinned-config test uses so a cell cannot disagree with a shipped file. Rendering is off: a rendered
+step measures **1844 ms against 107 ms** unrendered, a 17× difference, and none of these questions
+are about pixels.
+
+```bash
+# One cell, three seeds.
+python scripts/check_scene_matrix.py --only boxes_3
+
+# The whole table across twelve shards, writing each shard's results as JSON.
+for i in $(seq 0 11); do
+  python scripts/check_scene_matrix.py --shard $i/12 --json /tmp/matrix/shard$i.json &
+done; wait
+```
+
+What it found, on layouts the repository ships or derives — none of them fixed, because finding them
+was the job:
+
+| cell | failure | where it stopped |
+| --- | --- | --- |
+| `base` (the shipped two-box scene, **nominal** layout) | `Cookie slipped out of batch during transport` | step 4402, 15 of 20 placed |
+| `boxes_3` | the same | step 3295, 10 of 30 |
+| `boxes_4` | IK missed by 4.02 mm against a 4.00 mm bound | step 3283, 10 of 40 |
+| `queue_gap_wide` | `empty box rotated during carry` | step 2693, 10 of 20 |
+
+The first is worth being precise about: the relay's recorded 3-of-3 yield was measured with the
+scene's own randomisation **on**, so the fixed layout is a case it had never been measured on. It
+fails in the fill's *transport* rather than in the push, and a capacity-9 box — which derives the same
+ten-slot lattice — fails at the same step with the same message, so it is deterministic rather than a
+seed effect.
+
+One design lesson the run taught: a cell with `randomize: False` is **seed-independent**, so three
+seeds measure one episode. The seeds only buy anything on the randomised cells.
 
 ## Cookie-transfer VLA pipeline
 
