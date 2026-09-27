@@ -783,6 +783,56 @@ need their own measurement rather than a guess.  The shipped config keeps `basel
 comment, and `batch_profile`'s, now record the matrix and the mechanism above instead of
 the guess about the carry.
 
+**Measured afterwards: the walk is not the cost, and the guards were guarding the wrong
+thing.**  Three falsifications and one fix.
+
+The three that are *not* the mechanism, each measured by changing only that variable:
+
+* **not the compensation's gain** -- at the shipped 10 mm clip, gains from 0.08 down to
+  0.02 give bit-identical IK residuals on the failing push, because the clip is saturated
+  from a box yaw of 0.94 deg and the gain has nothing to say;
+* **not pad-wall friction** -- scaling the pads' friction coefficient from 3.0 down to
+  0.2 leaves the walk unchanged to within 0.1 mm, and below 1.0 the runs are bit-identical,
+  so the lateral force is not the tangential drag that a 3.0 coefficient would amplify;
+* **not the pad's tilt** -- commanding an extra 2 deg of tool tilt moves the box's final
+  yaw by 0.5 deg, and the tilt the arm actually achieves is the *same* 4.7 deg under both
+  profiles while the yaw differs by 78x.
+
+What is left is the compensation's **clip width**, and what it is really controlling is the
+box's **yaw**, not its walk.  Measuring what the next stage can absorb, by moving the box
+and asking the fill's own pre-check to place:
+
+```
+  box yaw    0.0    3.0    4.0    5.0    6.0    8.0   10.0   12.0   (deg)
+  worst pos  0.72   0.95   1.19   1.44   1.69   2.17   2.62   3.03   (mm)
+  verdict     ok     ok     ok   OVER   OVER   OVER   OVER   OVER
+```
+
+so the window is about **4 deg** -- a slot 28 mm out from the box's centre moves
+`28 * sin(yaw)` in y, against the fill's 2.0 mm bound.  And the sideways offset is
+**asymmetric**:
+
+```
+  dx       -45    -25    -10      0     +5     +7     +8     +9   (mm)
+  worst    0.03   0.03   0.03   0.72   1.58   1.92   2.10   2.27   (mm)
+  verdict    ok     ok     ok     ok     ok     ok   OVER   OVER
+```
+
+Moving the box **away** from the arm is free out to 45 mm -- the fill's residual is
+*better* there than at zero, because the box's slots move further inside the workspace --
+while moving it **towards** the arm is limited to 7 mm.  The push walks the box in -x, so
+the shipped 12 mm walk and the damped 23 mm walk are both harmless to the fill, and the
+old symmetric 25 mm guard was wrong in both directions at once: it failed pushes that
+walked the box the harmless way while tolerating three times as much in the direction that
+hurts.
+
+Both guards are now the measured ones -- signed 45 / 7 mm, and a 4 deg yaw bound that
+bounds the yaw the push *added* rather than the box's absolute yaw, for the same reason the
+carry's rotation guard does (the scene draws the station box's yaw).  The change is free
+under the shipped dynamics: the 1500-step action digest is still `c5d52832...`, and a
+5000-step run -- which covers the push -- is bit-identical between the old clip and the new
+one.
+
 **An alternative was proposed and measured: pinch the filled box and carry it out.**
 That would bypass the push, which is the one operation the fast profile breaks, and so
 it is worth knowing exactly why it does not work -- the reason is a layout constraint,
