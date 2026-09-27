@@ -282,13 +282,22 @@ class RightBoxCarryController:
     """Pinch an empty box's rear wall and slide it into the filling station."""
 
     MOVE_SPEED_M_PER_STEP = 0.0008
-    #: Finger opening of the pinch that carries the box, on the same 0..1 scale
-    #: as a joint target (0 is closed).  Tighter than it looks: the rear wall is a
-    #: few millimetres thick, so what holds the box against twisting is the pinch
-    #: force, not the geometry.  This value goes with the undamped servo the relay
-    #: is calibrated for (see ``arm_actuator_damping``): an arm that holds its
-    #: command more rigidly (actuator damping, which the fast fill needs) lets the
-    #: same box twist past the 10 deg guard, and needs a tighter 0.085.
+    #: Finger opening of the pinch that carries the box, as the normalised 0..1 joint
+    #: target the action carries -- **0 is fully open and 1 is closed**, which is the
+    #: opposite of what an earlier version of this comment said, and the reason is
+    #: `A3DualArmEnv._apply_controls`: it maps the action to `(1 - opening) * 0.0425`,
+    #: so the two finger slides travel *further* as the number falls.
+    #:
+    #: The number that matters is the face gap it produces, measured by driving the
+    #: finger actuators and reading the pad geoms (`p9_gap_map2.py`):
+    #:
+    #:   face gap (mm) = 0.01 + 85 * opening
+    #:
+    #: so the shipped 0.10 gives 8.5 mm and 0.085 gives 7.2 mm, while 0 is 85 mm of
+    #: daylight and 1 is the pads touching.  The wall being gripped is **12 mm thick**
+    #: (its config field is a half-thickness of 6 mm, doubled by `_add_open_bin`), so
+    #: both of those values command the pads *through* the wall: at 0.085 each pad is
+    #: pressed 1.4 mm past the face it should stop on.
     GRASP_OPENING = 0.10
     FORCE_LIMIT_N = 80.0
 
