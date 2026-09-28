@@ -75,8 +75,20 @@ SINGLE_BASE = PROJECT / "configs" / "cookie_same_column.yaml"
 #:   two boxes needing 20 of them are refused -- the axis needs a *layout* knob (usable
 #:   columns) rather than a count to have a boundary here.
 VARIANTS: list[dict] = [
-    {"name": "base", "single": False, "spec": {}},
-    {"name": "randomized", "single": False, "spec": {}, "randomize": True},
+    # The two cells that *are* the shipped scene load the shipped file rather than
+    # deriving it, and that is not a shortcut -- it is the only way to test what
+    # ships.  `configs/cookie_two_box_batch.yaml` is hand-written (unlike
+    # `configs/generated/cookie_three_box.yaml`, which a test pins against its spec),
+    # and re-deriving it produces the same geometry to within 3.3e-09 m but not
+    # bit-for-bit: the derivation carries full-precision floats where the file has
+    # eight decimals.  Measured, that difference alone flips the episode -- the
+    # shipped file completes in 4779 steps with 20 Cookies placed, and the derived
+    # one dies at 4449 with "Cookie slipped out of batch during transport" and 15.
+    # So a `base` cell that derived its config would be reporting on a scene nobody
+    # ships, which is exactly what it did before this flag existed.
+    {"name": "base", "single": False, "spec": {}, "shipped": True},
+    {"name": "randomized", "single": False, "spec": {}, "randomize": True,
+     "shipped": True},
     {"name": "single_randomized", "single": True, "spec": {}, "randomize": True},
     {"name": "per_grasp_1", "single": False, "spec": {"per_grasp": 1}},
     {"name": "per_grasp_2", "single": False, "spec": {"per_grasp": 2}},
@@ -104,12 +116,18 @@ def spec_for(variant: dict) -> SceneSpec:
 
 
 def config_for(variant: dict):
-    """Derive this cell's config through the generator, so it cannot drift from a file.
+    """This cell's config: the shipped file for a shipped cell, else a derivation.
 
     ``render_config`` is the code the test that pins a committed config against its
-    spec runs, which is the point: a cell built any other way could disagree with what
-    the repository actually ships.
+    spec runs, which is the point for a cell that *is* a new layout: a cell built any
+    other way could disagree with what the repository actually ships.  It is the wrong
+    tool for a cell that is the shipped scene, because the shipped two-box file is
+    hand-written and the derivation does not reproduce it bit-for-bit -- see
+    ``VARIANTS`` for the measurement.
     """
+
+    if variant.get("shipped"):
+        return load_config(TWO_BOX_BASE)
 
     base = SINGLE_BASE if variant["single"] else TWO_BOX_BASE
     text = render_config(base, spec_for(variant))
