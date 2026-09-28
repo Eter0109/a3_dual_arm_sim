@@ -525,17 +525,83 @@ class RightBoxCarryController:
         ) / 2.0
         return abs(float((centres[1] - centres[0]) @ axis)) - 2.0 * half
 
+    def relative_yaw_rad(self) -> float:
+        """How far the box is yawed relative to the direction the pads close on."""
+
+        box_axis = self.data.xmat[self.box_id].reshape(3, 3)[:, 1]
+        grip_axis = self.data.site_xmat[self.helper.site].reshape(3, 3)[:, 0]
+        return math.acos(min(1.0, abs(float(box_axis @ grip_axis))))
+
+    def wall_extent_along_grip_m(self) -> float:
+        """The wall's thickness as seen along the direction the pads close on.
+
+        The pads close along the site's x axis and the box can be yawed relative to the
+        tool -- the carry's own guard allows 10 deg -- so the slab they straddle is
+        thicker along that axis than the wall is: a 12 mm wall at 10 deg of relative yaw
+        presents 12.19 mm.  Comparing the pad gap against the unrotated thickness reads
+        that as the grip having opened, and it did exactly that in a relay run: the
+        guard fired at a pad gap of 12.19 mm against a 12.00 mm wall while the inner pad
+        was reading 7.34 N, which is a box being held.
+        """
+
+        box_axis = self.data.xmat[self.box_id].reshape(3, 3)[:, 1]
+        grip_axis = self.data.site_xmat[self.helper.site].reshape(3, 3)[:, 0]
+        cosine = abs(float(box_axis @ grip_axis))
+        # A relative yaw past 60 deg is not a grip at all, so the clamp only keeps the
+        # division finite; it is not a tolerance.
+        return self.wall_thickness_m / max(cosine, 0.5)
+
+    def grip_margins_m(self) -> tuple[float, float]:
+        """How far each pad's face is inside the wall face it should be behind.
+
+        Positive means inside.  Returned separately rather than as a boolean so a
+        failure can say *which* pad came off, which is the difference between a box
+        that slipped along the wall's normal and one that was never gripped.
+        """
+
+        axis = self.data.site_xmat[self.helper.site].reshape(3, 3)[:, 0]
+        centres = np.array([self.data.geom_xpos[g] for g in self.helper.fingers])
+        thickness = sum(
+            float(self.env.model.geom_size[g][1]) for g in self.helper.fingers
+        ) / 2.0
+        pad_centre = float(centres.mean(axis=0) @ axis)
+        pad_half = abs(float((centres[1] - centres[0]) @ axis)) / 2.0
+        inner_face = pad_centre - pad_half + thickness
+        outer_face = pad_centre + pad_half - thickness
+
+        box_axis = self.data.xmat[self.box_id].reshape(3, 3)[:, 1]
+        half_y = float(self.env.config.cookie_transfer.target_bin_half_size_m[1])
+        wall_centre = float((self.data.xpos[self.box_id] - box_axis * half_y) @ axis)
+        wall_half = self.wall_extent_along_grip_m() / 2.0
+        return (
+            inner_face - (wall_centre - wall_half),
+            (wall_centre + wall_half) - outer_face,
+        )
+
     def pinching_wall(self) -> bool:
         """Whether the jaws are inside the wall's thickness.
 
-        A geometric test for "contact established", in place of reading the pads'
+        A geometric test for "the grip is holding", in place of reading the pads'
         forces.  The two pads cannot be closer together than the wall is thick unless
         they are pressing into it, so this is a fact about the grip rather than about
         the servo's force constant -- and unlike the force test it does not depend on
         the load being shared evenly, which measured it is not.
+
+        **It is deliberately not the stricter "both pads are inside the wall" test**,
+        which is the more physical question and the wrong one.  Measured over 8 seeds
+        (`q13`), that version fails every run after 46-160 mm of travel while the pads
+        read a 9.2-9.3 mm gap against a 12 mm wall and the box arrives within 1.3 deg
+        of its start: a box being slid lags the pads along the wall's normal by about
+        the bite depth, so one pad is always just clear of its wall face and the
+        stricter test reads a working grip as a lost one.  The gap is the quantity that
+        stays meaningful while the box is moving.
+
+        The wall's thickness is projected onto the axis the pads close along, because
+        the box can be yawed relative to the tool -- the carry's own guard allows 10 deg
+        -- and a 12 mm wall at 10 deg presents 12.19 mm along that axis.
         """
 
-        return self.pad_gap_m() < self.wall_thickness_m - 2.0 * self.GRASP_MIN_BITE_M
+        return self.pad_gap_m() < self.wall_extent_along_grip_m() - 2.0 * self.GRASP_MIN_BITE_M
 
     def grip_lost(self) -> bool:
         """Whether the jaws have come off the wall they were pinching.
@@ -671,11 +737,17 @@ class RightBoxCarryController:
                 if self.grip_lost():
                     self.stable += 1
                     if self.stable > 8:
+                        inner_margin, outer_margin = self.grip_margins_m()
                         self.failed = (
                             f"empty box grip lost during carry: pad gap "
                             f"{self.pad_gap_m() * 1e3:.2f} mm against a "
-                            f"{self.wall_thickness_m * 1e3:.2f} mm wall, "
-                            f"forces {[round(float(v), 3) for v in forces]} N"
+                            f"{self.wall_extent_along_grip_m() * 1e3:.2f} mm wall "
+                            f"(thickness {self.wall_thickness_m * 1e3:.2f} mm at "
+                            f"{math.degrees(self.relative_yaw_rad()):.1f} deg of relative "
+                            f"yaw); inner pad {inner_margin * 1e3:+.2f} mm and outer pad "
+                            f"{outer_margin * 1e3:+.2f} mm inside their wall faces "
+                            f"(positive is inside); forces "
+                            f"{[round(float(v), 3) for v in forces]} N"
                         )
                         return self.env.last_applied_action.copy()
                 else:
