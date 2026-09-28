@@ -4,8 +4,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from a3_dual_arm_sim.config import load_config
-from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
+from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
 
 
 def test_cookie_scene_has_central_stand_bins_and_eighty_upright_cookies() -> None:
@@ -154,7 +153,7 @@ def test_success_requires_exact_settled_upright_two_by_five_fill() -> None:
     reason="Single-cookie sequential expert superseded by batch experts on dense 80-cookie layout"
 )
 def test_cookie_transfer_expert_runs_feedback_state_machine() -> None:
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, CookiePhase
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -185,7 +184,7 @@ def test_cookie_transfer_expert_runs_feedback_state_machine() -> None:
     reason="Single-cookie sequential expert superseded by batch experts on dense 80-cookie layout"
 )
 def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None:
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, CookiePhase
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -215,7 +214,7 @@ def test_cookie_transfer_expert_replans_after_failed_lift_verification() -> None
 
 
 def test_cookie_transfer_evaluation_labels_step_limit() -> None:
-    from a3_dual_arm_sim.evaluation import run_cookie_transfer_episode
+    from a3_dual_arm_sim.workflows.evaluation import run_cookie_transfer_episode
 
     result = run_cookie_transfer_episode(0, max_steps=1, randomize_cookies=False)
 
@@ -255,7 +254,7 @@ def test_idle_cartesian_hold_and_independent_target_bin() -> None:
 
 
 def test_vertical_home_and_physical_right_box_support() -> None:
-    from a3_dual_arm_sim.box_support import BoxSupportController
+    from a3_dual_arm_sim.controllers.box_support import BoxSupportController
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -281,7 +280,7 @@ def test_vertical_home_and_physical_right_box_support() -> None:
 
 
 def test_placement_timeout_holds_instead_of_sweeping_loaded_bin(monkeypatch) -> None:
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, CookiePhase
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -319,7 +318,7 @@ def test_viewer_starts_with_rotatable_front_camera() -> None:
 
 
 def test_expert_stops_if_a_previously_packed_cookie_moves(monkeypatch) -> None:
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert, CookiePhase
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, CookiePhase
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -349,7 +348,7 @@ def test_pinch_offset_tracks_the_cookie_half_size() -> None:
     jaws closing at the same absolute height regardless of what they are aiming
     at.
     """
-    from a3_dual_arm_sim.expert import _pinch_offset_from_cookie_centre
+    from a3_dual_arm_sim.controllers.expert import _pinch_offset_from_cookie_centre
 
     assert _pinch_offset_from_cookie_centre(0.025) == pytest.approx(0.023)
     assert _pinch_offset_from_cookie_centre(0.0125) == pytest.approx(0.0105)
@@ -369,7 +368,7 @@ def test_expert_plans_the_pinch_inside_the_cookie() -> None:
     ~10.5 mm *above* the top face -- aiming at empty space.  Resizing the Cookie
     again must not break this.
     """
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:
@@ -408,7 +407,7 @@ def test_drop_check_measures_against_the_real_rest_height() -> None:
     -- a marginal pinch, or one nudged by a neighbour -- would still read as
     "back on the bin floor" and be reported as dropped.
     """
-    from a3_dual_arm_sim.expert import A3CookieTransferExpert
+    from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert
 
     env = A3CookieTransferEnv(render_cameras=False)
     try:

@@ -1,4 +1,4 @@
-from a3_dual_arm_sim.benchmark import resolve_smolvla_checkpoint
+from a3_dual_arm_sim.workflows.benchmark import resolve_smolvla_checkpoint
 
 
 def test_latest_step_precedes_older_ema_and_stale_last(tmp_path):

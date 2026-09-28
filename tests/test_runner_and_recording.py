@@ -7,11 +7,11 @@ import numpy as np
 import pytest
 
 from a3_dual_arm_sim.cli import _validate_camera_recording, parser
-from a3_dual_arm_sim.env import A3DualArmEnv
-from a3_dual_arm_sim.policy import HoldPolicy, load_policy
-from a3_dual_arm_sim.recording import LeRobotV3Recorder, MemoryRecorder
-from a3_dual_arm_sim.runner import EpisodeRunner
-from a3_dual_arm_sim.teleop import KeyboardTeleopPolicy
+from a3_dual_arm_sim.controllers.teleop import KeyboardTeleopPolicy
+from a3_dual_arm_sim.data.recording import LeRobotV3Recorder, MemoryRecorder
+from a3_dual_arm_sim.policies.base import HoldPolicy, load_policy
+from a3_dual_arm_sim.sim.env import A3DualArmEnv
+from a3_dual_arm_sim.workflows.runner import EpisodeRunner
 
 
 def test_run_and_teleop_expose_explicit_policy_camera_switch() -> None:
@@ -32,7 +32,7 @@ def test_recording_rejects_disabled_policy_cameras(tmp_path: Path) -> None:
 
 
 def test_policy_loader_and_source_neutral_runner() -> None:
-    policy = load_policy("a3_dual_arm_sim.policy:make_hold_policy")
+    policy = load_policy("a3_dual_arm_sim.policies.base:make_hold_policy")
     recorder = MemoryRecorder()
     env = A3DualArmEnv(render_cameras=False)
     runner = EpisodeRunner(env, policy, task="test task", recorder=recorder)

@@ -8,12 +8,22 @@ import numpy as np
 from numpy.typing import NDArray
 
 LEFT_JOINTS = (
-    "L_SHOULDER_P", "L_SHOULDER_R", "L_SHOULDER_Y", "L_ELBOW_P",
-    "L_WRIST_R", "L_WRIST_P", "L_WRIST_Y",
+    "L_SHOULDER_P",
+    "L_SHOULDER_R",
+    "L_SHOULDER_Y",
+    "L_ELBOW_P",
+    "L_WRIST_R",
+    "L_WRIST_P",
+    "L_WRIST_Y",
 )
 RIGHT_JOINTS = (
-    "R_SHOULDER_P", "R_SHOULDER_R", "R_SHOULDER_Y", "R_ELBOW_P",
-    "R_WRIST_R", "R_WRIST_P", "R_WRIST_Y",
+    "R_SHOULDER_P",
+    "R_SHOULDER_R",
+    "R_SHOULDER_Y",
+    "R_ELBOW_P",
+    "R_WRIST_R",
+    "R_WRIST_P",
+    "R_WRIST_Y",
 )
 ARM_JOINTS = LEFT_JOINTS + RIGHT_JOINTS
 JOINT_ACTION_DIM = 16
@@ -54,7 +64,10 @@ def validate_action(action: Any, mode: ActionMode) -> NDArray[np.float64]:
 
 def validate_observation(observation: Mapping[str, Any]) -> None:
     shapes = {
-        STATE: (16,), VELOCITY: (16,), EEF_POSE: (14,), FORCE: (18,),
+        STATE: (16,),
+        VELOCITY: (16,),
+        EEF_POSE: (14,),
+        FORCE: (18,),
     }
     for key in (FRONT_IMAGE, LEFT_WRIST_IMAGE, RIGHT_WRIST_IMAGE):
         image = np.asarray(observation[key])

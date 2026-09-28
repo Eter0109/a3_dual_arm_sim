@@ -30,9 +30,9 @@ class CameraConfig:
     """Prototype camera geometry; replace it with calibrated poses later."""
 
     calibration_status: str = "prototype_estimate"
-    workspace_target_m: tuple[float, ...] = (0.15, 0.34, 0.80)
-    front_position_m: tuple[float, ...] = (1.30, -0.80, 1.55)
-    front_fovy_deg: float = 58.0
+    workspace_target_m: tuple[float, ...] = (0.15, 0.23, 0.77)
+    front_position_m: tuple[float, ...] = (0.50, -0.18, 1.25)
+    front_fovy_deg: float = 48.0
     left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
     left_wrist_target_m: tuple[float, ...] = (0.0, 0.150, 0.0)
     right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, 0.085)
@@ -180,13 +180,19 @@ def load_config(path: str | Path | None = None) -> SimConfig:
     )
     cameras = CameraConfig(
         calibration_status=str(camera_raw.get("calibration_status", "prototype_estimate")),
-        workspace_target_m=_float_tuple(camera_raw, "workspace_target_m", (0.15, 0.34, 0.80)),
-        front_position_m=_float_tuple(camera_raw, "front_position_m", (0.95, -0.55, 1.28)),
-        front_fovy_deg=float(camera_raw.get("front_fovy_deg", 52.0)),
+        workspace_target_m=_float_tuple(
+            camera_raw, "workspace_target_m", CameraConfig().workspace_target_m
+        ),
+        front_position_m=_float_tuple(
+            camera_raw, "front_position_m", CameraConfig().front_position_m
+        ),
+        front_fovy_deg=float(camera_raw.get("front_fovy_deg", CameraConfig().front_fovy_deg)),
         left_wrist_position_m=_float_tuple(
             camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
         ),
-        left_wrist_target_m=_float_tuple(camera_raw, "left_wrist_target_m", CameraConfig().left_wrist_target_m),
+        left_wrist_target_m=_float_tuple(
+            camera_raw, "left_wrist_target_m", CameraConfig().left_wrist_target_m
+        ),
         right_wrist_position_m=_float_tuple(
             camera_raw, "right_wrist_position_m", (0.0, -0.045, 0.085)
         ),
@@ -255,7 +261,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         box_tilt_deg=float(cookie_raw.get("box_tilt_deg", defaults.box_tilt_deg)),
         left_gripper_kp=float(cookie_raw.get("left_gripper_kp", defaults.left_gripper_kp)),
         right_gripper_kp=float(cookie_raw.get("right_gripper_kp", defaults.right_gripper_kp)),
-        right_grasp_pitch_deg=float(cookie_raw.get("right_grasp_pitch_deg", defaults.right_grasp_pitch_deg)),
+        right_grasp_pitch_deg=float(
+            cookie_raw.get("right_grasp_pitch_deg", defaults.right_grasp_pitch_deg)
+        ),
         target_bin_world_position_m=_float_tuple(
             cookie_raw,
             "target_bin_world_position_m",

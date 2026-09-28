@@ -1,23 +1,23 @@
 """A3 dual-arm MuJoCo simulation package."""
 
-from .batch_expert import A3CookieBatchExpert
-from .benchmark import (
+from a3_dual_arm_sim.controllers.batch_expert import A3CookieBatchExpert
+from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
+from a3_dual_arm_sim.controllers.same_column_batch_expert import A3SameColumnBatchExpert
+from a3_dual_arm_sim.sim.env import A3DualArmEnv
+from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
+from a3_dual_arm_sim.tasks.grasp import A3GraspEnv
+from a3_dual_arm_sim.workflows.benchmark import (
     BenchmarkPolicy,
     BenchmarkResult,
     CookieBatchBenchmark,
     EpisodeScore,
     run_cookie_batch_benchmark,
 )
-from .cookie_transfer import A3CookieTransferEnv
-from .env import A3DualArmEnv
-from .evaluation import (
+from a3_dual_arm_sim.workflows.evaluation import (
     CookieTransferEpisodeResult,
     evaluate_cookie_transfer,
     run_cookie_transfer_episode,
 )
-from .expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
-from .grasp import A3GraspEnv
-from .same_column_batch_expert import A3SameColumnBatchExpert
 
 __all__ = [
     "A3CookieBatchExpert",

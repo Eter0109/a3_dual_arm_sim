@@ -6,10 +6,10 @@ import mujoco
 import numpy as np
 import pytest
 
-from a3_dual_arm_sim.batch_expert import A3CookieBatchExpert
 from a3_dual_arm_sim.config import load_config
-from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
-from a3_dual_arm_sim.expert import CookiePhase
+from a3_dual_arm_sim.controllers.batch_expert import A3CookieBatchExpert
+from a3_dual_arm_sim.controllers.expert import CookiePhase
+from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "cookie_batch.yaml"
 
@@ -55,7 +55,7 @@ def test_insertion_force_limit_ignores_one_spike_but_stops_sustained_jam():
 def test_compound_collision_preserves_mass_and_inertia():
     from dataclasses import replace
 
-    from a3_dual_arm_sim.model import build_model
+    from a3_dual_arm_sim.sim.model import build_model
 
     config = load_config(CONFIG)
     compound = build_model(config, scene="cookie_transfer").model
@@ -227,7 +227,7 @@ def test_beveled_five_stack_resists_gripper_compression(physics_hz):
     from copy import deepcopy
     from xml.etree import ElementTree as ET
 
-    from a3_dual_arm_sim.model import build_model
+    from a3_dual_arm_sim.sim.model import build_model
 
     config = load_config(CONFIG)
     scene = config.cookie_transfer

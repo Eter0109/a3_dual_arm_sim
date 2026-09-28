@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from a3_dual_arm_sim.benchmark import (
+from a3_dual_arm_sim.data.recording import MemoryRecorder
+from a3_dual_arm_sim.policies.base import HoldPolicy
+from a3_dual_arm_sim.workflows.benchmark import (
     BenchmarkPolicy,
     BenchmarkResult,
     CookieBatchBenchmark,
@@ -10,8 +12,6 @@ from a3_dual_arm_sim.benchmark import (
     ExpertPolicyAdapter,
     make_policy_adapter,
 )
-from a3_dual_arm_sim.policy import HoldPolicy
-from a3_dual_arm_sim.recording import MemoryRecorder
 
 
 def test_benchmark_policy_protocol_conformance():

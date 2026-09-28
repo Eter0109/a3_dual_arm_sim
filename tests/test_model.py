@@ -9,13 +9,13 @@ import numpy as np
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import ARM_JOINTS
-from a3_dual_arm_sim.model import (
+from a3_dual_arm_sim.paths import asset_root
+from a3_dual_arm_sim.sim.model import (
     ROBOTIQ_2F85_JAW_TRAVEL_M,
     ROBOTIQ_2F85_MAX_OPENING_M,
     build_model,
     write_generated_xml,
 )
-from a3_dual_arm_sim.paths import asset_root
 
 
 def test_source_assets_exclude_invalid_terminal_meshes() -> None:

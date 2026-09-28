@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from a3_dual_arm_sim.expert import A3GraspExpert
-from a3_dual_arm_sim.grasp import A3GraspEnv
-from a3_dual_arm_sim.recording import MemoryRecorder
-from a3_dual_arm_sim.runner import EpisodeRunner
+from a3_dual_arm_sim.controllers.expert import A3GraspExpert
+from a3_dual_arm_sim.data.recording import MemoryRecorder
+from a3_dual_arm_sim.tasks.grasp import A3GraspEnv
+from a3_dual_arm_sim.workflows.runner import EpisodeRunner
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2])

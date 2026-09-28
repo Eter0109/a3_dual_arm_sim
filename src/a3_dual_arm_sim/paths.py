@@ -13,4 +13,3 @@ def default_config_path() -> Path:
 
 def asset_root() -> Path:
     return project_root() / "assets" / "a3"
-

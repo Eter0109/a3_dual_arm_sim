@@ -13,7 +13,7 @@ from a3_dual_arm_sim.contracts import (
     STATE,
     VELOCITY,
 )
-from a3_dual_arm_sim.env import A3DualArmEnv
+from a3_dual_arm_sim.sim.env import A3DualArmEnv
 
 
 def test_reset_returns_complete_fixed_observation_and_is_deterministic() -> None:

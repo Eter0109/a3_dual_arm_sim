@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from a3_dual_arm_sim.training import (
+from a3_dual_arm_sim.learning.training import (
     CAMERA_KEYS,
     audit_training_dataset,
     build_train_command,
@@ -93,6 +93,10 @@ def test_adapted_checkpoint_uses_three_cameras_and_16d_io(tmp_path: Path) -> Non
     assert config["input_features"]["observation.state"]["shape"] == [16]
     assert config["output_features"]["action"]["shape"] == [16]
     assert (adapted / "model.safetensors").is_symlink()
+    left = prepare_a3_smolvla_source(base, tmp_path / 'left', device='cpu', action_dim=8)
+    left_config = json.loads((left/'config.json').read_text())
+    assert left_config['input_features']['observation.state']['shape'] == [8]
+    assert left_config['output_features']['action']['shape'] == [8]
 
 
 def test_train_command_is_local_reproducible_smoke(tmp_path: Path) -> None:

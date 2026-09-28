@@ -1,2 +1,1 @@
 """Example replaceable policy plugins."""
-
