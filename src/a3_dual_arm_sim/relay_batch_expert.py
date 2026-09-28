@@ -281,25 +281,159 @@ class RightBoxPushController:
 class RightBoxCarryController:
     """Pinch an empty box's rear wall and slide it into the filling station."""
 
+    #: Height the box is carried at, above the height the grip was closed on.
+    #:
+    #: The hypothesis this exists to test: while the box slides on its own floor, the
+    #: table's friction is a second constraint on it, and a pinch that does not sit
+    #: straight on the wall converts its own torque into a *yaw through that friction*.
+    #: Lift it and the grip is the only thing holding the box, so the same torque has
+    #: only the box's inertia to argue with.  `box_lift_m` exists for the fill and
+    #: defaults to 30 mm there; the shipped relay sets it to zero.
+    #:
+    #: Zero is the shipped behaviour exactly -- with no lift there is no LOWER phase and
+    #: the action stream is unchanged -- so this is a knob that can be measured rather
+    #: than a change that has to be justified.
+    LIFT_M = 0.0
+    #: Slide speed, as the distance the pads' target y advances per step.
     MOVE_SPEED_M_PER_STEP = 0.0008
     #: Finger opening of the pinch that carries the box, as the normalised 0..1 joint
-    #: target the action carries -- **0 is fully open and 1 is closed**, which is the
-    #: opposite of what an earlier version of this comment said, and the reason is
-    #: `A3DualArmEnv._apply_controls`: it maps the action to `(1 - opening) * 0.0425`,
-    #: so the two finger slides travel *further* as the number falls.
+    #: target the action carries.  **0 closes the jaws and 1 opens them**, which is the
+    #: same direction as a joint target, and `A3DualArmEnv._apply_controls` is why: it
+    #: maps the action to `(1 - opening) * 0.0425`, so the two finger slides travel
+    #: *further* as the number falls.
     #:
-    #: The number that matters is the face gap it produces, measured by driving the
-    #: finger actuators and reading the pad geoms (`p9_gap_map2.py`):
+    #: A comment here once claimed the opposite and the claim was copied into a commit
+    #: before it was checked against the geometry, so it is worth stating what the
+    #: measurement is.  Driving the finger actuators with a box at the carry's own
+    #: anchor (`q6_open_map.py`, `q7_pinch_raw.py`) gives, with the wall 12 mm thick:
     #:
-    #:   face gap (mm) = 0.01 + 85 * opening
+    #:   opening   face gap   bite/side   pad forces
+    #:     0.000     6.88 mm    2.56 mm   [6.97, 7.05] N     <- as hard as the jaws go
+    #:     0.085     9.28 mm    1.36 mm   [2.36, 1.98] N
+    #:     0.100     9.83 mm    1.09 mm   [1.41, 1.49] N     <- the shipped value
+    #:     0.130    11.32 mm    0.34 mm   [0.40, 0.44] N     <- below CLOSE's 0.3 N test
+    #:     0.160    13.58 mm   no contact  [0.25, 0.05] N
     #:
-    #: so the shipped 0.10 gives 8.5 mm and 0.085 gives 7.2 mm, while 0 is 85 mm of
-    #: daylight and 1 is the pads touching.  The wall being gripped is **12 mm thick**
-    #: (its config field is a half-thickness of 6 mm, doubled by `_add_open_bin`), so
-    #: both of those values command the pads *through* the wall: at 0.085 each pad is
-    #: pressed 1.4 mm past the face it should stop on.
-    GRASP_OPENING = 0.10
+    #: The old formula `gap = 0.01 + 85 * opening` is right and still holds for the
+    #: commanded gap; what it does not describe is the *achieved* one, which for a tight
+    #: enough command is set by the wall rather than by the command.
+    #:
+    #: The shipped 0.10 asks for a 9.83 mm gap against a 12 mm wall: about a millimetre
+    #: of bite and 1.4 N.  **It cannot be derived from the wall**, which is worth stating
+    #: because that is what it looks like it should be, and two measurements say no:
+    #:
+    #:   - the servo is compliant, so the command does not set the bite.  Asking for a
+    #:     0.01 mm gap achieves 6.88 mm (2.56 mm of bite) and asking for 7.24 mm achieves
+    #:     9.28 mm (1.36 mm) -- only about a third of the command becomes bite, so a bite
+    #:     target cannot be commanded at all;
+    #:   - the grip strength is a *trade*, and the fill needs the other side of it.
+    #:     Measured in the pinned test's own scene (`q10_test_pose.py`), where the box's
+    #:     delivered pose is what the next fill's pre-check reads:
+    #:
+    #:       opening   delivered yaw   arrival error   fill pre-check
+    #:         0.000      4.56 deg        1.12 mm      REFUSED (2.06 deg)
+    #:         0.050      3.92 deg        1.54 mm      accepted
+    #:         0.060     13.22 deg       38.03 mm      slipped out of the grip
+    #:         0.070      1.64 deg        1.98 mm      accepted
+    #:         0.100      1.15 deg        3.14 mm      accepted
+    #:
+    #:     A hard pinch tracks the pads better -- the box arrives 1.12 mm from the
+    #:     station against 3.14 mm -- and it also *transmits* the pads' orientation
+    #:     error, which at the station is 4.279 deg, so the box leaves 4.56 deg yawed
+    #:     and the fill refuses it.  A light pinch lets the box slip relative to the
+    #:     pads, so it keeps its own orientation and the yaw stays at 1.15 deg.  The
+    #:     fill's pre-check needs both, and the shipped value sits on the yaw-favouring
+    #:     side, which is the side that matters.
+    #:
+    #: The 0.060 row is why this is not tuned finer: the response is not monotone, and
+    #: just below the shipped value the box slips out of the grip entirely.  The shipped
+    #: 0.10 is the furthest from that cliff.
+    GRASP_OPENING: float | None = 0.10
     FORCE_LIMIT_N = 80.0
+
+    #: The measured map from the normalised opening to the *commanded* face gap, in
+    #: metres: ``gap = 0.00001 + 0.085 * opening``.
+    OPENING_GAP_BASE_M = 0.00001
+    OPENING_GAP_RANGE_M = 0.085
+    #: Least bite that still means the pads are pressing into the wall rather than
+    #: resting on its face, used by the geometric contact tests below.
+    GRASP_MIN_BITE_M = 0.0003
+
+    #: The orientation the grip is commanded to hold, **derived rather than copied**.
+    #:
+    #: This used to be whatever the arm happened to be doing when the carry was
+    #: constructed.  Worth stating that the derived constant here is the *same*
+    #: orientation that copied value happens to hold at the deployment home -- the two
+    #: families differ by a 180 deg yaw about the vertical, which changes nothing about
+    #: the pose, so this half of the change is behaviour-neutral and the interesting
+    #: variable is the pitch below.  What it buys is that the grip no longer depends on
+    #: where the arm happened to be, so a scene that moves the home pose moves the grip
+    #: with it.
+    #:
+    #: A pinch makes the box a slave to the pads' *achieved* orientation, and the
+    #: achieved orientation of the copied pose is not the commanded one: at the station
+    #: it misses by 4.279 deg with ``R_WRIST_P`` and ``R_SHOULDER_R`` on their bounds.
+    #:
+    #: **That error is real but it is not what the delivered yaw consists of**, which
+    #: took a sweep to establish and is worth flagging before anyone optimises it again.
+    #: Decomposed at the station (`q9_error_components.py`), and compared against the
+    #: yaw the box is actually handed in a rollout (`q8_bench.py`):
+    #:
+    #:   pitch   err deg   yaw part   pitch part   delivered |yaw| mean
+    #:     0.0     4.279     -3.916      -1.700        6.03 deg over 4 seeds
+    #:     1.0     3.434     -3.147      -1.353        6.65 deg over 6 seeds
+    #:     2.0     2.586     -2.374      -1.009        6.59 deg over 4 seeds
+    #:     6.0     0.000      0.000       0.000        jams at 31-56 mm
+    #:
+    #: The orientation error can be driven to zero and the yaw the box leaves with does
+    #: not move, so the box is not tracking the pads' orientation; what it tracks is the
+    #: contact, and the pads' orientation is one input to that rather than the answer.
+    #:
+    #: Three axes were swept for a family whose warm pose *is* achievable, all at the
+    #: carry's own anchor and all converged (`q2_reachable_grip.py`, `q3_...`):
+    #:
+    #:   - **yaw** about the world's vertical axis: reachable from 9 deg on (0.779 deg
+    #:     residual), but it turns the pad faces out of the wall's plane and the
+    #:     readiness is a lie -- rolled out, the box is handed 9.28 deg and 11.60 deg at
+    #:     9 and 15 deg of yaw against 6.69 deg at zero, and two runs in three fail;
+    #:   - **roll** about the pads' own face normal: exhausted at 3.84 deg, and it is
+    #:     the one axis the grip is indifferent to, so there was nothing to win;
+    #:   - **pitch** about the world's x axis: the station comes back exactly, and it is
+    #:     the axis ``right_grasp_pitch_deg`` already exists for -- the fill derives its
+    #:     orientation the same way, a world-x rotation on the left.
+    #:
+    #: Along the carry's own path, worst residual over 17 points from the rear wall to
+    #: the station:
+    #:
+    #:   pitch   0.0    3.0    4.0    5.0    6.0    8.0   10.0   12.0   15.0
+    #:   angle   4.279  1.738  0.889  0.040  0.000  0.000  0.001  0.000  0.000  (deg)
+    #:   pinned  WRIST_P      WRIST_P       WRIST_P   --     --     --     --
+    #:
+    #: So 6 deg is where the wrist comes off its bound and the orientation becomes
+    #: exact, and everything above it holds with *slack*.  **It is still not usable**,
+    #: which is the whole reason this knob ships at zero: reachability is a joint-space
+    #: fact, and the grip is a contact fact.  Rolled out with the derived pinch
+    #: (`q8_bench.py`), the pitched grip jams the slide instead of the wrist:
+    #:
+    #:   pitch    seeds   finished   travel        delivered |yaw|
+    #:     0.0       4        4/4     159-196 mm    6.03 deg mean
+    #:     4.0       1        0/1      63 mm       jams, "rotated during carry"
+    #:     6.0       4        0/4      31-56 mm    10.25 deg mean
+    #:
+    #: The pitched pads bite the wall on one z-edge ahead of the other, and a hard
+    #: pinch turns that asymmetry into a couple the box cannot resist.  So the pitch
+    #: buys an exact orientation and loses the grip, exactly as yaw did.
+    GRASP_ROTATION = (
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+    )
+    #: Pitch applied to :attr:`GRASP_ROTATION`, about the world's x axis, left-handed
+    #: on the rotation as ``right_grasp_pitch_deg`` is on the fill's.  **Zero is the
+    #: measured default**, and the docstring above says why the reachable values are not
+    #: the right ones.  The band 1-3 deg is untested and is the one thing that might still
+    #: shave the 4.98 deg the pads hold at zero without jamming the slide.
+    GRASP_PITCH_RAD = 0.0
 
     #: How close to the station the box must be before the carry lets go.
     #: This is the landing's accuracy, and it has to be inside the window the
@@ -323,9 +457,7 @@ class RightBoxCarryController:
         self.helper = BoxSupportController(env)
         self.helper.bin_id = box_id
         self.home = env.last_applied_action[8:15].copy()
-        rotation = self.data.site_xmat[self.helper.site].reshape(3, 3).copy()
-        self.quat = np.empty(4)
-        mujoco.mju_mat2Quat(self.quat, rotation.ravel())
+        self.quat = self.grasp_quat()
         pad_center = self.data.geom_xpos[self.helper.fingers].mean(axis=0)
         pad_offset = pad_center - self.data.site_xpos[self.helper.site]
         self._pad_offset = pad_offset
@@ -348,6 +480,74 @@ class RightBoxCarryController:
         #: 10 deg, a box that started at 5.7 deg and turned 4.3 deg was reported
         #: as "empty box rotated during carry".
         self._initial_yaw = self.box_yaw_rad
+        #: The wall the pads must straddle, and the opening that straddles it.  Both
+        #: are scene properties, so they are read here rather than assumed: the config
+        #: states a wall *half*-thickness (`_add_open_bin` puts it on the size), which is
+        #: why the shipped 6 mm is a 12 mm wall.
+        self.wall_thickness_m = 2.0 * float(env.config.cookie_transfer.bin_wall_thickness_m)
+        # The command is the shipped one; see :attr:`GRASP_OPENING` for why it is not
+        # derived from the wall.  What *is* derived is the test for whether the grip took:
+        # the pads cannot be closer together than the wall is thick unless they are
+        # pressing into it, so :meth:`pinching_wall` reads the geometry rather than the
+        # servo's force constant.
+        self.opening = (
+            float(self.GRASP_OPENING) if self.GRASP_OPENING is not None else 0.0
+        )
+
+    def opening_for_gap(self, gap_m: float) -> float:
+        """The normalised opening whose *commanded* face gap is ``gap_m``.
+
+        Inverts the measured map, so a reader can see what a command asks for.  It is
+        deliberately not used to choose the grip: see :attr:`GRASP_OPENING` for why the
+        command is closed instead.
+        """
+
+        return (gap_m - self.OPENING_GAP_BASE_M) / self.OPENING_GAP_RANGE_M
+
+    def commanded_gap_m(self) -> float:
+        """The face gap the current opening *asks* for, from the measured map."""
+
+        return self.OPENING_GAP_BASE_M + self.OPENING_GAP_RANGE_M * self.opening
+
+    def pad_gap_m(self) -> float:
+        """The gap between the two pads' wall-facing faces, as measured.
+
+        Projecting the pads' centres on the axis they close along and subtracting
+        their own half-thicknesses, so this is geometry rather than the commanded
+        number -- which is the point: the commanded number is what the servo was told,
+        while this is where the jaws actually ended up.
+        """
+
+        axis = self.data.site_xmat[self.helper.site].reshape(3, 3)[:, 0]
+        centres = np.array([self.data.geom_xpos[g] for g in self.helper.fingers])
+        half = sum(
+            float(self.env.model.geom_size[g][1]) for g in self.helper.fingers
+        ) / 2.0
+        return abs(float((centres[1] - centres[0]) @ axis)) - 2.0 * half
+
+    def pinching_wall(self) -> bool:
+        """Whether the jaws are inside the wall's thickness.
+
+        A geometric test for "contact established", in place of reading the pads'
+        forces.  The two pads cannot be closer together than the wall is thick unless
+        they are pressing into it, so this is a fact about the grip rather than about
+        the servo's force constant -- and unlike the force test it does not depend on
+        the load being shared evenly, which measured it is not.
+        """
+
+        return self.pad_gap_m() < self.wall_thickness_m - 2.0 * self.GRASP_MIN_BITE_M
+
+    def grip_lost(self) -> bool:
+        """Whether the jaws have come off the wall they were pinching.
+
+        The complement of :meth:`pinching_wall`, and the replacement for the old
+        ``max(forces) < 0.08`` test, which sat right on one pad's own resting level:
+        the outer pad measures 0.04-0.2 N against the inner pad's 1.1-2.6 N, so an arm
+        that tracks its command more precisely -- actuator damping, which the fast
+        profile needs -- held that pad low without the box ever moving.
+        """
+
+        return not self.pinching_wall()
 
     @property
     def box_position(self) -> np.ndarray:
@@ -357,6 +557,31 @@ class RightBoxCarryController:
     def box_yaw_rad(self) -> float:
         rotation = self.data.xmat[self.box_id].reshape(3, 3)
         return math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+
+    @classmethod
+    def grasp_rotation(cls) -> np.ndarray:
+        """The commanded grip rotation: the derived constant, pitched.
+
+        A class method rather than arithmetic in ``__init__`` because the bench that
+        measures the carry has to build the pose the controller will build, and a
+        second copy of the arithmetic would be a second thing to keep in step.
+        """
+
+        base = np.array(cls.GRASP_ROTATION, dtype=float)
+        angle = float(cls.GRASP_PITCH_RAD)
+        if angle == 0.0:
+            return base
+        cosine, sine = math.cos(angle), math.sin(angle)
+        about_x = np.array(
+            [[1.0, 0.0, 0.0], [0.0, cosine, -sine], [0.0, sine, cosine]]
+        )
+        return about_x @ base
+
+    @classmethod
+    def grasp_quat(cls) -> np.ndarray:
+        quat = np.empty(4)
+        mujoco.mju_mat2Quat(quat, cls.grasp_rotation().ravel())
+        return quat
 
     def _advance(self, phase: str) -> None:
         self.phase = phase
@@ -401,6 +626,7 @@ class RightBoxCarryController:
             "DESCEND": 240,
             "CLOSE": 100,
             "MOVE": 450,
+            "LOWER": 240,
             "RELEASE": 100,
             "RETRACT": 200,
             "HOME": 240,
@@ -429,26 +655,28 @@ class RightBoxCarryController:
                 action, reached = self._pose_command(target, 1.0)
                 reached = reached and target[2] <= self.anchor[2] + 0.001
             elif self.phase == "CLOSE":
-                action, _ = self._pose_command(self.anchor, self.GRASP_OPENING)
-                reached = bool(np.all(forces > 0.3))
+                action, _ = self._pose_command(self.anchor, self.opening)
+                # Geometric rather than "both pads read force": see `pinching_wall`.
+                reached = self.pinching_wall()
             elif self.phase == "MOVE":
                 if self.box_position[1] >= self.destination_y - self.RELEASE_WITHIN_M:
-                    self._advance("RELEASE")
+                    self._advance("LOWER" if self.LIFT_M else "RELEASE")
                     return self.env.last_applied_action.copy()
-                # "Grip lost" means the box is no longer held, and the test for
-                # that is that *neither* pad reads a force.  Measured: the rear
-                # wall is thin and the jaws are wide relative to it, so the two
-                # pads do not share the load evenly -- the inner pad carries
-                # 1.1-2.6 N while the outer one hovers between 0.04 and 0.2 N.
-                # Reading a single pad therefore sits right on its own
-                # threshold, and an arm that tracks its command more precisely
-                # (actuator `kv` damping) holds that pad lower more often
-                # without the box ever moving relative to the jaws.  The sum is
-                # what says the box is still held.
-                if np.max(forces) < 0.08:
+                # "Grip lost" is now a geometric question -- have the jaws come off the
+                # wall -- rather than a force threshold.  The old test read a single
+                # pad's resting level (measured: the outer pad hovers between 0.04 and
+                # 0.2 N against the inner pad's 1.1-2.6 N) and so could not tell a box
+                # that had been let go from one an arm was simply holding more
+                # precisely.
+                if self.grip_lost():
                     self.stable += 1
                     if self.stable > 8:
-                        self.failed = f"empty box grip lost during carry: {forces.tolist()} N"
+                        self.failed = (
+                            f"empty box grip lost during carry: pad gap "
+                            f"{self.pad_gap_m() * 1e3:.2f} mm against a "
+                            f"{self.wall_thickness_m * 1e3:.2f} mm wall, "
+                            f"forces {[round(float(v), 3) for v in forces]} N"
+                        )
                         return self.env.last_applied_action.copy()
                 else:
                     self.stable = 0
@@ -469,8 +697,13 @@ class RightBoxCarryController:
                 # is what the next fill's reachability pre-check reads.
                 target = self.anchor.copy()
                 target[1] = self._move_goal_y
+                target[2] += self.LIFT_M
                 self._target_q = None
-                return self._pose_command(target, self.GRASP_OPENING)[0]
+                return self._pose_command(target, self.opening)[0]
+            elif self.phase == "LOWER":
+                # Put the box back down on the height the grip was closed on, so the
+                # release happens where the fill expects the box to be standing.
+                action, reached = self._pose_command(self.anchor, self.opening)
             elif self.phase == "RELEASE":
                 action = self._command(self.data.qpos[self.helper.qids], 1.0)
                 reached = bool(self.env.current_joint_action[15] > 0.95)
@@ -487,6 +720,7 @@ class RightBoxCarryController:
                     "APPROACH": "DESCEND",
                     "DESCEND": "CLOSE",
                     "CLOSE": "MOVE",
+                    "LOWER": "RELEASE",
                     "RELEASE": "RETRACT",
                     "RETRACT": "HOME",
                     "HOME": "DONE",
