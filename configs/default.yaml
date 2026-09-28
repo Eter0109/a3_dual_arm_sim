@@ -20,9 +20,9 @@ home:
 # Current example values. These are visual estimates, not calibrated measurements.
 cameras:
   calibration_status: prototype_estimate
-  workspace_target_m: [0.15, 0.34, 0.80]
-  front_position_m: [1.30, -0.80, 1.55]
-  front_fovy_deg: 58.0
+  workspace_target_m: [0.15, 0.23, 0.77]
+  front_position_m: [0.50, -0.18, 1.25]
+  front_fovy_deg: 48.0
   left_wrist_position_m: [0.0, 0.045, 0.085]
   left_wrist_target_m: [0.0, 0.150, 0.0]
   right_wrist_position_m: [0.0, -0.045, 0.085]
