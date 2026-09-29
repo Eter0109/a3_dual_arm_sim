@@ -13,11 +13,14 @@ from typing import Any
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import EpisodeContext
+from a3_dual_arm_sim.controllers.same_column_batch_expert import A3VariedColumnBatchExpert
 from a3_dual_arm_sim.paths import resource_root
+from a3_dual_arm_sim.sim.randomization import PROFILES, choose_column
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 from .benchmark_results import EpisodeScore
 from .policy_adapters import (
+    ExpertPolicyAdapter,
     make_policy_adapter,
 )
 
@@ -40,7 +43,19 @@ class EpisodeExecution:
         cookie_noise_m: float = 0.0003,
         cookie_yaw_noise_rad: float = 0.015,
         render: bool = False,
+        profile: str | None = None,
+        source_column: str | None = None,
     ):
+        if profile is not None:
+            selected_profile = PROFILES[profile]
+            source_bin_noise_m = selected_profile.source_bin_noise_m
+            target_bin_noise_m = selected_profile.target_bin_noise_m
+            target_bin_yaw_noise_rad = selected_profile.target_bin_yaw_noise_rad
+        if source_column is not None:
+            choose_column(source_column, 0)
+        self.profile = profile
+        self.source_column = source_column
+        self.last_attempt_metadata = {}
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
         self.max_steps = max_steps
         self.randomize_boxes = randomize_boxes
@@ -76,7 +91,27 @@ class EpisodeExecution:
         recorder: Any | None = None,
         diagnostic: Any | None = None,
     ) -> EpisodeScore:
-        runner_policy = make_policy_adapter(policy, env=env)
+        column = choose_column(self.source_column, seed) if self.source_column is not None else None
+        task = (
+            "transfer 10 cookies into target box"
+            if column is None
+            else f"Transfer 10 cookies from source column {column} into the target box in two batches of five."
+        )
+        self.last_attempt_metadata = {
+            "profile": self.profile or "basic",
+            "source_column": column,
+            "seed": seed,
+        }
+        if column is not None and column > 1 and policy == "same_column":
+
+            def expert_factory(environment):
+                expert = A3VariedColumnBatchExpert(environment)
+                expert.requested_source_column_index = column - 1
+                return expert
+
+            runner_policy = ExpertPolicyAdapter(expert_factory, name="selected_column")
+        else:
+            runner_policy = make_policy_adapter(policy)
         should_close_env = False
         if env is None:
             needs_cameras = (recorder is not None or diagnostic is not None) or (
@@ -93,29 +128,43 @@ class EpisodeExecution:
             "source_bin_noise_m": self.source_bin_noise_m,
             "target_bin_noise_m": self.target_bin_noise_m,
             "target_bin_yaw_noise_rad": self.target_bin_yaw_noise_rad,
+            "randomization_profile": self.profile or "basic",
+            "appearance_seed": seed,
         }
 
         observation, info = env.reset(seed=seed, options=reset_options)
+        self.last_attempt_metadata.update(getattr(env, "randomization_metadata", {}))
+        self.last_attempt_metadata["reset_options"] = reset_options
 
-        if hasattr(runner_policy, "bind_env") and getattr(runner_policy, "expert", None) is None:
-            runner_policy.bind_env(env)
+        try:
+            if hasattr(runner_policy, "bind_env"):
+                runner_policy.bind_env(env)
+            if hasattr(runner_policy, "reset"):
+                runner_policy.reset(
+                    EpisodeContext(seed=seed, task=task, action_mode=env.action_mode)
+                )
+            if column is not None and getattr(runner_policy, "expert", None) is not None:
+                import numpy as np
 
-        if hasattr(runner_policy, "reset"):
-            context = EpisodeContext(
-                seed=seed, task="transfer 10 cookies into target box", action_mode=env.action_mode
-            )
-            runner_policy.reset(context)
+                columns = sorted(set(np.asarray(env.SOURCE_POSITIONS)[:, 0]))
+                runner_policy.expert._column_order = [columns[column - 1]]
+        except BaseException:
+            if should_close_env:
+                env.close()
+            raise
 
         t_start = time.monotonic()
         if recorder is not None:
             recorder.start_episode(
                 EpisodeContext(
                     seed=seed,
-                    task="transfer 10 cookies into target box",
+                    task=task,
                     action_mode=runner_policy.action_mode,
                 ),
                 getattr(runner_policy, "name", type(runner_policy).__name__),
             )
+            if hasattr(recorder, "set_episode_metadata"):
+                recorder.set_episode_metadata(self.last_attempt_metadata)
         steps = 0
         terminated = False
         truncated = False
@@ -125,9 +174,7 @@ class EpisodeExecution:
                 steps += 1
                 if hasattr(runner_policy, "act"):
                     try:
-                        action = runner_policy.act(
-                            observation, "transfer 10 cookies into target box"
-                        )
+                        action = runner_policy.act(observation, task)
                     except TypeError:
                         action = runner_policy.act(observation)
                 elif callable(runner_policy):
@@ -219,4 +266,6 @@ class EpisodeExecution:
             source_bin_pos=source_pos,
             phase=phase,
             failure_reason=failure_reason,
+            randomization=self.last_attempt_metadata.copy(),
+            source_column=column,
         )

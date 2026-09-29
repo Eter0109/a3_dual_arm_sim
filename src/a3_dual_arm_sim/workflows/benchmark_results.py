@@ -32,6 +32,8 @@ class EpisodeScore:
     source_bin_pos: list[float] = field(default_factory=list)
     phase: str = ""
     failure_reason: str | None = None
+    randomization: dict[str, Any] = field(default_factory=dict)
+    source_column: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

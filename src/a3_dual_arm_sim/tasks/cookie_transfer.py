@@ -10,6 +10,7 @@ import numpy as np
 from a3_dual_arm_sim.config import SimConfig
 from a3_dual_arm_sim.contracts import ARM_JOINTS, ActionMode
 from a3_dual_arm_sim.sim.env import A3DualArmEnv
+from a3_dual_arm_sim.sim.randomization import AppearanceRandomizer
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         self._success_hold_count = 0
         self._source_initially_filled = False
+        self._appearance_randomizer = AppearanceRandomizer(self.model)
 
     @property
     def cookie_positions(self) -> np.ndarray:
@@ -296,6 +298,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
             source_center,
             self.SOURCE_INNER_HALF_SIZE,
         )
+        profile = options.get("randomization_profile", "basic")
+        appearance_seed = options.get("appearance_seed", seed if seed is not None else 0)
+        self.randomization_metadata = self._appearance_randomizer.apply(
+            self.model, self.data, profile, appearance_seed
+        )
+        self.randomization_metadata.update(
+            source_bin_position=self.data.xpos[self._source_bin_body].tolist(),
+            target_bin_position=self.data.xpos[self._target_bin_body].tolist(),
+            target_bin_quaternion=self.data.xquat[self._target_bin_body].tolist(),
+            cookie_positions=self.cookie_positions.tolist(),
+            cookie_quaternions=self.data.xquat[list(self._cookie_bodies)].tolist(),
+        )
+        mujoco.mj_forward(self.model, self.data)
         observation = self._observation()
         info.update(
             success=False,

@@ -147,6 +147,7 @@ class LeRobotV3Recorder:
 
     def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
         self._context = context
+        self._randomization_metadata = {}
         self._controller_type = controller_type
         self._frames = 0
 
@@ -167,6 +168,10 @@ class LeRobotV3Recorder:
         self.dataset.add_frame(frame)
         self._frames += 1
 
+    def set_episode_metadata(self, metadata: dict[str, Any]) -> None:
+        """Privileged provenance is sidecar metadata, never a policy feature."""
+        self._randomization_metadata = json.loads(json.dumps(metadata))
+
     def finish_episode(self, success: bool | None = None) -> None:
         if self._context is None:
             raise RuntimeError("no episode is active")
@@ -181,6 +186,8 @@ class LeRobotV3Recorder:
             "frames": self._frames,
             "success": success,
         }
+        if self._randomization_metadata:
+            metadata["randomization"] = self._randomization_metadata
         with self._metadata_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(metadata, ensure_ascii=False) + "\n")
         self._episode_index += 1

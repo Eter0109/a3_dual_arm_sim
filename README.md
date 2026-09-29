@@ -36,14 +36,40 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 - [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
 - [操作手册](docs/operations.md)：场景、专家、遥操作、相机、采集和回放。
+- [分级随机化与专家采集](docs/randomization.md)：三档强度、独立选列、四种颜色、采集元数据和成功率评估。
 - [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
 - [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
 - [发布检查与限制](docs/release_checklist.md)：验证记录与待解决的发布阻碍。
 
+## 分级随机化采集
+
+在仓库根目录、已安装训练与数据依赖的环境中执行：
+
+```bash
+MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
+  --profile advanced --source-column random \
+  --episodes 5 --max-attempts 15 \
+  --root datasets/cookie_advanced_random_trial \
+  --repo-id local/cookie-advanced-random-trial
+```
+
+`--profile basic|medium|advanced` 控制环境变化强度；
+`--source-column 1|2|3|4|random` 独立控制抓取列。基础档保持原有小范围布局变化，
+中级增加轻微相机和光照变化，高级进一步增大变化并从四种饼干颜色中每轮选择一种。
+三档共用专家主体，并针对不同列调整控制策略，仍采集单盒、两批各五块的整任务
+LeRobot v3 数据，不使用 Planner/Verifier，也不切分 skill。
+
+`--episodes` 是目标成功保存条数，`--max-attempts` 是包括失败在内的总尝试上限。
+随机列均衡的是尝试分配，不保证最终成功数据各列等量。每组设置使用独立数据目录；
+不要直接续采旧版缺少随机化元数据的数据集。详细参数、恢复采集和评估方式见
+[随机化说明](docs/randomization.md)。上述 EGL 写法适用于 Linux 无头服务器；
+Windows 使用 PowerShell 时省略 `MUJOCO_GL=egl` 前缀，并将多行命令合成一行。
+
 ## 资源与许可
 
 源码包和 wheel 附带仿真配置、URDF 与必要网格，不需要其他项目目录。
-数据、下载模型与输出分别放在 `datasets/`、`models/smolvla_base/`、`outputs/`，这些目录中的大型产物不提交 Git。
+数据、下载模型与输出分别放在 `datasets/`、`models/<模型名>/`、`outputs/`；
+评估截图和诊断产物放在 `artifacts/`，这些产物不提交 Git。
 机器人资源来源与第三方声明见 [PROVENANCE](assets/a3/PROVENANCE.md)。源码及 A3 原始资源的再分发授权尚需维护者确认；当前整理不代表已解决公开发布许可。

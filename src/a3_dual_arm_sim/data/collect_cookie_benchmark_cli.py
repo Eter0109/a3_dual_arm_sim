@@ -12,6 +12,7 @@ from pathlib import Path
 from a3_dual_arm_sim.data.audit import audit_training_dataset
 from a3_dual_arm_sim.data.recording import LeRobotV3Recorder
 from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.sim.randomization import PROFILES, choose_column, profile_parameters
 from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark
 
 TASK = "transfer 10 cookies into target box"
@@ -39,6 +40,8 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--max-attempts", type=int, default=None)
+    parser.add_argument("--profile", choices=tuple(PROFILES), default="basic")
+    parser.add_argument("--source-column", choices=("1", "2", "3", "4", "random"), default="1")
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -47,7 +50,9 @@ def main() -> int:
 
     root = _from_project(args.root)
     config_path = _from_project(args.config)
-    benchmark = CookieBatchBenchmark(config_path, max_steps=1000)
+    benchmark = CookieBatchBenchmark(
+        config_path, max_steps=1600, profile=args.profile, source_column=args.source_column
+    )
     summary_path = root / "collection_summary.json"
     summary = {
         "schema_version": 2,
@@ -58,6 +63,11 @@ def main() -> int:
         "stored_action_mode": "joint_position",
         "config": asdict(benchmark.config),
         "seed_start": args.seed_start,
+        "randomization_profile": args.profile,
+        "randomization_parameters": profile_parameters(args.profile),
+        "source_column": args.source_column,
+        "randomization_version": 1,
+        "max_steps": 1600,
     }
     if args.resume:
         if not summary_path.is_file():
@@ -65,7 +75,18 @@ def main() -> int:
         previous = json.loads(summary_path.read_text(encoding="utf-8"))
         if previous.get("seed_start", 0) != args.seed_start:
             raise RuntimeError("seed_start changed since the initial run")
-        for key in ("schema_version", "task", "policy", "stored_action_mode", "config"):
+        for key in (
+            "schema_version",
+            "task",
+            "policy",
+            "stored_action_mode",
+            "config",
+            "randomization_profile",
+            "randomization_parameters",
+            "source_column",
+            "randomization_version",
+            "max_steps",
+        ):
             if previous.get(key) != json.loads(json.dumps(summary[key])):
                 raise RuntimeError(f"collection setting {key!r} changed since the initial run")
 
@@ -118,6 +139,9 @@ def main() -> int:
                     "success": False,
                     "score": 0,
                     "failure_reason": str(err),
+                    "phase": "SETUP_OR_EXPERT_EXCEPTION",
+                    "source_column": choose_column(args.source_column, seed),
+                    "randomization": benchmark.last_attempt_metadata,
                 }
                 with attempts_path.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(attempt_err) + "\n")
