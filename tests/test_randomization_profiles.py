@@ -2,7 +2,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from a3_dual_arm_sim.sim.randomization import COOKIE_PALETTE, choose_column
+from a3_dual_arm_sim.sim.randomization import choose_column, load_randomization_config
 from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark
 
 
@@ -29,7 +29,7 @@ def test_profile_reset_determinism_restore_and_palette():
         for seed in range(16):
             env.reset(seed=seed, options={"randomization_profile": "advanced"})
             colors.add(env.randomization_metadata["cookie_color"])
-        assert colors == set(COOKIE_PALETTE)
+        assert colors == set(load_randomization_config()["colors"])
         env.reset(seed=12, options={"randomization_profile": "advanced"})
         first = env.randomization_metadata
         qpos = env.data.qpos.copy()
@@ -61,3 +61,58 @@ def test_layout_profile_and_column_are_orthogonal():
     assert CookieBatchBenchmark(profile="basic").source_bin_noise_m == 0.010
     assert CookieBatchBenchmark(profile="medium").source_bin_noise_m == 0.015
     assert CookieBatchBenchmark(profile="advanced").source_bin_noise_m == 0.020
+
+
+def test_custom_config_snapshot_and_environment(tmp_path):
+    import yaml
+
+    config = load_randomization_config()
+    config["profile"] = "advanced"
+    config["source_column"] = "4"
+    config["profiles"]["advanced"]["source_bin_noise_m"] = 0.007
+    config["colors"] = {"test_blue": [0.1, 0.2, 0.8, 1.0]}
+    path = tmp_path / "custom.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    benchmark = CookieBatchBenchmark(randomization_config=path)
+    assert benchmark.profile == "advanced"
+    assert benchmark.source_column == "4"
+    assert benchmark.source_bin_noise_m == 0.007
+    # Editing the file after initialization must not alter a running experiment.
+    config["colors"] = {"red": [1.0, 0.0, 0.0, 1.0]}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    env = benchmark.create_env(render_cameras=False)
+    try:
+        env.reset(
+            seed=12,
+            options={
+                "randomization_profile": benchmark.profile,
+                "randomization_settings": benchmark.randomization_settings,
+            },
+        )
+        assert env.randomization_metadata["cookie_color"] == "test_blue"
+        assert env.randomization_metadata["configuration"] == benchmark.randomization_settings
+        np.testing.assert_allclose(
+            env.model.geom_rgba[env._appearance_randomizer.cookie_geoms],
+            np.tile([0.1, 0.2, 0.8, 1], (len(env._appearance_randomizer.cookie_geoms), 1)),
+        )
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("mutation", ["negative", "nan", "unknown", "color", "profile", "column"])
+def test_invalid_config_is_rejected(mutation):
+    config = load_randomization_config()
+    if mutation == "negative":
+        config["profiles"]["advanced"]["source_bin_noise_m"] = -1
+    elif mutation == "nan":
+        config["profiles"]["advanced"]["light_fraction"] = float("nan")
+    elif mutation == "unknown":
+        config["profiles"]["advanced"]["typo"] = 1
+    elif mutation == "color":
+        config["colors"]["golden"] = [2, 0, 0, 1]
+    elif mutation == "profile":
+        config["profile"] = "missing"
+    else:
+        config["source_column"] = 5
+    with pytest.raises(ValueError):
+        load_randomization_config(config=config)

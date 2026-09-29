@@ -1,9 +1,14 @@
 """Episode-stable randomization, independent of expert/source-column selection."""
 
+import math
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import mujoco
 import numpy as np
+import yaml
+
+from a3_dual_arm_sim.paths import resource_root
 
 
 @dataclass(frozen=True)
@@ -14,26 +19,91 @@ class RandomizationProfile:
     camera_position_m: float = 0.0
     wrist_position_m: float = 0.0
     camera_rotation_deg: float = 0.0
+    wrist_rotation_deg: float = 0.0
+    cookie_noise_m: float = 0.0003
+    cookie_yaw_noise_rad: float = 0.015
     fovy_deg: float = 0.0
     light_fraction: float = 0.0
     palette: bool = False
 
 
-PROFILES = {
-    "basic": RandomizationProfile(0.010, 0.010, 0.030),
-    "medium": RandomizationProfile(0.015, 0.015, 0.050, 0.004, 0.002, 0, 1, 0.10),
-    "advanced": RandomizationProfile(0.020, 0.020, 0.080, 0.009, 0.003, 2, 2, 0.20, True),
-}
-COOKIE_PALETTE = {
-    "golden": (0.90, 0.62, 0.12, 1),
-    "cocoa": (0.38, 0.18, 0.08, 1),
-    "matcha": (0.40, 0.60, 0.20, 1),
-    "berry": (0.78, 0.30, 0.38, 1),
-}
+DEFAULT_RANDOMIZATION_CONFIG = resource_root() / "configs" / "randomization.yaml"
 
 
-def profile_parameters(name):
-    return asdict(PROFILES[name])
+def load_randomization_config(path=None, *, config=None):
+    """Validate and normalize a snapshot; never mutate module-wide profiles."""
+    if config is None:
+        with Path(path or DEFAULT_RANDOMIZATION_CONFIG).open(encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+    if not isinstance(config, dict) or set(config) != {
+        "version",
+        "profile",
+        "source_column",
+        "profiles",
+        "colors",
+    }:
+        raise ValueError(
+            "randomization config requires version, profile, source_column, profiles, colors"
+        )
+    if config["version"] != 1:
+        raise ValueError("unsupported randomization config version")
+    if not isinstance(config["profiles"], dict) or not config["profiles"]:
+        raise ValueError("profiles must be a nonempty mapping")
+    profiles = {}
+    for name, values in config["profiles"].items():
+        if not isinstance(name, str) or not isinstance(values, dict):
+            raise ValueError("each profile must be a named mapping")  # noqa: TRY004
+        try:
+            profile = RandomizationProfile(**values)
+        except TypeError as exc:
+            raise ValueError(f"invalid profile {name}: {exc}") from exc
+        values = asdict(profile)
+        for key, value in values.items():
+            if key == "palette":
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name}.palette must be true/false")
+            elif (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{name}.{key} must be finite and nonnegative")
+        if profile.light_fraction > 1 or profile.fovy_deg >= 45:
+            raise ValueError(f"{name}: light_fraction must be <=1 and fovy_deg <45")
+        profiles[name] = values
+    colors = config["colors"]
+    if not isinstance(colors, dict) or not colors:
+        raise ValueError("colors must be a nonempty RGBA mapping")
+    for name, rgba in colors.items():
+        if not isinstance(name, str) or not isinstance(rgba, (list, tuple)) or len(rgba) != 4:
+            raise ValueError("colors must contain named four-channel RGBA lists")
+        if any(
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            or not 0 <= v <= 1
+            for v in rgba
+        ):
+            raise ValueError(f"color {name} channels must be finite values in [0, 1]")
+        if rgba[3] != 1:
+            raise ValueError("cookie colors must be opaque (alpha=1)")
+    if config["profile"] not in profiles:
+        raise ValueError("selected profile is not defined in profiles")
+    column = str(config["source_column"])
+    if column not in ("1", "2", "3", "4", "random"):
+        raise ValueError("source_column must be 1, 2, 3, 4 or random")
+    return {
+        "version": 1,
+        "profile": config["profile"],
+        "source_column": column,
+        "profiles": profiles,
+        "colors": {k: list(v) for k, v in colors.items()},
+    }
+
+
+def profile_parameters(name, config=None):
+    return dict((config or load_randomization_config())["profiles"][name])
 
 
 def choose_column(choice, seed):
@@ -64,11 +134,13 @@ class AppearanceRandomizer:
             ).startswith("cookie_")
         ]
 
-    def apply(self, model, data, name, seed):
+    def apply(self, model, data, name, seed, config=None):
+        config = load_randomization_config(config=config)
         for key, value in self.base.items():
             getattr(model, key)[:] = value
         mujoco.mj_forward(model, data)
-        profile = PROFILES[name]
+        profile = RandomizationProfile(**config["profiles"][name])
+        palette = config["colors"]
         rng = np.random.default_rng(np.random.SeedSequence([int(seed), 7302]))
         cameras = {}
         for i in range(model.ncam):
@@ -76,7 +148,7 @@ class AppearanceRandomizer:
             wrist = "wrist" in (camera or "").lower()
             radius = profile.wrist_position_m if wrist else profile.camera_position_m
             offset = rng.uniform(-radius, radius, 3)
-            angle = profile.camera_rotation_deg * (0.5 if wrist else 1)
+            angle = profile.wrist_rotation_deg if wrist else profile.camera_rotation_deg
             rotvec = np.deg2rad(rng.uniform(-angle, angle, 3))
             theta = np.linalg.norm(rotvec)
             delta = np.array([1.0, 0.0, 0.0, 0.0])
@@ -105,10 +177,11 @@ class AppearanceRandomizer:
         model.light_diffuse[:] = np.clip(self.base["light_diffuse"] * scales, 0, 1)
         color = None
         if profile.palette:
-            color = list(COOKIE_PALETTE)[int(rng.integers(len(COOKIE_PALETTE)))]
-            model.geom_rgba[self.cookie_geoms] = COOKIE_PALETTE[color]
+            color = list(palette)[int(rng.integers(len(palette)))]
+            model.geom_rgba[self.cookie_geoms] = palette[color]
         return {
             "profile": name,
+            "configuration": config,
             "parameters": asdict(profile),
             "cookie_color": color,
             "cameras": cameras,

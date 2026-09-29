@@ -84,6 +84,7 @@ class CookieBatchBenchmark(EpisodeExecution):
                     "cookie_yaw_noise_rad": self.cookie_yaw_noise_rad,
                     "profile": self.profile,
                     "source_column": self.source_column,
+                    "randomization_settings": self.randomization_settings,
                 }
                 for ep_i in range(num_episodes)
             ]
@@ -118,7 +119,7 @@ class CookieBatchBenchmark(EpisodeExecution):
                 for ep_i in range(num_episodes):
                     seed = seed_start + ep_i
                     ep_result = self.run_episode(
-                        policy=runner_policy,
+                        policy=policy if policy == "same_column" else runner_policy,
                         seed=seed,
                         episode_idx=ep_i + 1,
                         env=env,
@@ -189,6 +190,7 @@ def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
         render=False,
         profile=args.get("profile"),
         source_column=args.get("source_column"),
+        randomization_settings=args.get("randomization_settings"),
     )
     return benchmark.run_episode(
         policy=args["policy"],

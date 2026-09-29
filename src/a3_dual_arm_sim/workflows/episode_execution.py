@@ -15,7 +15,11 @@ from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import EpisodeContext
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3VariedColumnBatchExpert
 from a3_dual_arm_sim.paths import resource_root
-from a3_dual_arm_sim.sim.randomization import PROFILES, choose_column
+from a3_dual_arm_sim.sim.randomization import (
+    RandomizationProfile,
+    choose_column,
+    load_randomization_config,
+)
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 from .benchmark_results import EpisodeScore
@@ -45,12 +49,24 @@ class EpisodeExecution:
         render: bool = False,
         profile: str | None = None,
         source_column: str | None = None,
+        randomization_config: Path | str | None = None,
+        randomization_settings: dict | None = None,
     ):
+        self.randomization_settings = load_randomization_config(
+            randomization_config, config=randomization_settings
+        )
+        if randomization_config is not None:
+            profile = self.randomization_settings["profile"]
+            source_column = self.randomization_settings["source_column"]
         if profile is not None:
-            selected_profile = PROFILES[profile]
+            selected_profile = RandomizationProfile(
+                **self.randomization_settings["profiles"][profile]
+            )
             source_bin_noise_m = selected_profile.source_bin_noise_m
             target_bin_noise_m = selected_profile.target_bin_noise_m
             target_bin_yaw_noise_rad = selected_profile.target_bin_yaw_noise_rad
+            cookie_noise_m = selected_profile.cookie_noise_m
+            cookie_yaw_noise_rad = selected_profile.cookie_yaw_noise_rad
         if source_column is not None:
             choose_column(source_column, 0)
         self.profile = profile
@@ -130,6 +146,7 @@ class EpisodeExecution:
             "target_bin_yaw_noise_rad": self.target_bin_yaw_noise_rad,
             "randomization_profile": self.profile or "basic",
             "appearance_seed": seed,
+            "randomization_settings": self.randomization_settings,
         }
 
         observation, info = env.reset(seed=seed, options=reset_options)

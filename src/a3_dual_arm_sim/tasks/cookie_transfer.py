@@ -301,7 +301,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
         profile = options.get("randomization_profile", "basic")
         appearance_seed = options.get("appearance_seed", seed if seed is not None else 0)
         self.randomization_metadata = self._appearance_randomizer.apply(
-            self.model, self.data, profile, appearance_seed
+            self.model,
+            self.data,
+            profile,
+            appearance_seed,
+            config=options.get("randomization_settings"),
         )
         self.randomization_metadata.update(
             source_bin_position=self.data.xpos[self._source_bin_body].tolist(),

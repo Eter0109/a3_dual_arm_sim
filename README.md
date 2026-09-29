@@ -49,14 +49,16 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ```bash
 MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
-  --profile advanced --source-column random \
+  --randomization-config configs/randomization.yaml \
   --episodes 5 --max-attempts 15 \
   --root datasets/cookie_advanced_random_trial \
   --repo-id local/cookie-advanced-random-trial
 ```
 
-`--profile basic|medium|advanced` 控制环境变化强度；
-`--source-column 1|2|3|4|random` 独立控制抓取列。基础档保持原有小范围布局变化，
+先在 `configs/randomization.yaml` 中设置 `profile: advanced` 和
+`source_column: random`。`profile` 选择 basic/medium/advanced，`source_column`
+独立选择 1/2/3/4/random；所有幅度与颜色也在该文件中调整。
+旧的 `--profile` 和 `--source-column` 命令参数已移除。基础档保持原有小范围布局变化，
 中级增加轻微相机和光照变化，高级进一步增大变化并从四种饼干颜色中每轮选择一种。
 三档共用专家主体，并针对不同列调整控制策略，仍采集单盒、两批各五块的整任务
 LeRobot v3 数据，不使用 Planner/Verifier，也不切分 skill。

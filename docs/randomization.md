@@ -22,16 +22,24 @@
 
 ## 采集 / Collection
 
-在仓库根目录执行；每组使用独立 root 和 repo-id：
+配置统一放在 `configs/randomization.yaml`，默认选择 basic、第一列。
+修改顶部 `profile: advanced`、`source_column: 1` 后，在仓库根目录执行；
+每组使用独立 root 和 repo-id：
 
 ```bash
 MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
-  --profile advanced --source-column 1 --episodes 100 --max-attempts 200 \
+  --randomization-config configs/randomization.yaml --episodes 100 --max-attempts 200 \
   --root datasets/cookie_advanced_col1 --repo-id local/cookie-advanced-col1
 ```
 
-- `--profile basic|medium|advanced`：控制强度。
-- `--source-column 1|2|3|4|random`：按源布局 X 从小到大编号，不按相机画面左右。
+- YAML `profile: basic|medium|advanced`：控制强度，可在 profiles 中新增命名档位。
+- YAML `source_column: 1|2|3|4|random`：按源布局 X 从小到大编号，不按相机画面左右。
+- `profiles` 中设置各项幅度，`colors` 中设置 RGBA 颜色；数值设为 0 可关闭该项，
+  `palette: false` 关闭颜色变化。位置单位米、盒子角度弧度、相机角度度数。
+- 旧 CLI 的 `--profile`、`--source-column` 已移除，只使用 YAML。
+- 可复制此 YAML，再通过 `--randomization-config` 指定实验配置。启动时读取一次；
+  运行中修改文件不影响当前任务，重启后生效。完整解析配置会随采集记录保存，
+  续采时配置不一致会拒绝，避免不同实验混入同一数据集。
 - `random`：每个对齐的连续四 seed 组随机排列四列，保证尝试数均衡，不保证
   成功保存数均衡。任务文本包含具体列号，固定列和随机列使用相同的指令模板。
 - `--resume`：仅允许配置、强度、列模式、seed 起点等一致时续采；旧版没有
@@ -58,7 +66,7 @@ Programmatic evaluation uses the same implementation:
 
 ```python
 from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark
-b = CookieBatchBenchmark(profile="advanced", source_column="random", max_steps=1600)
+b = CookieBatchBenchmark(randomization_config="configs/randomization.yaml", max_steps=1600)
 result = b.evaluate("same_column", num_episodes=20, seed_start=10000, workers=2)
 ```
 
