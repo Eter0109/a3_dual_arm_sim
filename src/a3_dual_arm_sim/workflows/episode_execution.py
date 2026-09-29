@@ -31,6 +31,7 @@ class EpisodeExecution:
         self,
         config_path: Path | str | None = None,
         *,
+        cameras: Any | None = None,
         max_steps: int = 1000,
         randomize_boxes: bool = True,
         target_bin_noise_m: float = 0.010,
@@ -53,6 +54,9 @@ class EpisodeExecution:
         self.render = render
 
         self.config = load_config(self.config_path)
+        if cameras is not None:
+            import dataclasses
+            self.config = dataclasses.replace(self.config, cameras=cameras)
 
     def create_env(self, *, render_cameras: bool = False) -> A3CookieTransferEnv:
         return A3CookieTransferEnv(

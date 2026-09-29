@@ -12,7 +12,7 @@ from a3_dual_arm_sim.controllers.teleop import KeyboardTeleopPolicy
 from a3_dual_arm_sim.controllers.teleop_panel import run_teleop_control_panel
 from a3_dual_arm_sim.data.collection import collect_grasp_dataset
 from a3_dual_arm_sim.data.recording import LeRobotV3Recorder
-from a3_dual_arm_sim.learning.training import train_smolvla
+from a3_dual_arm_sim.learning.training import train_act, train_smolvla
 from a3_dual_arm_sim.policies.base import HoldPolicy, load_policy
 from a3_dual_arm_sim.sim.env import A3DualArmEnv
 from a3_dual_arm_sim.sim.model import SceneName, build_model, write_generated_xml
@@ -302,6 +302,29 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         seed=args.seed,
         device=args.device,
         lr=getattr(args, "lr", 5e-5),
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _train_act(args: argparse.Namespace) -> int:
+    summary = train_act(
+        dataset_root=args.root,
+        repo_id=args.repo_id,
+        output_dir=args.output,
+        steps=args.steps,
+        batch_size=args.batch_size,
+        chunk_size=getattr(args, "chunk_size", 100),
+        n_action_steps=getattr(args, "n_action_steps", 100),
+        dim_model=getattr(args, "dim_model", 512),
+        lr=getattr(args, "lr", 1e-5),
+        seed=args.seed,
+        device=args.device,
+        num_workers=getattr(args, "num_workers", 0),
+        save_freq=getattr(args, "save_freq", 5000),
+        resume=getattr(args, "resume", False),
+        checkpoint_path=getattr(args, "checkpoint_path", None),
         dry_run=args.dry_run,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

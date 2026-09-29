@@ -19,7 +19,7 @@ from a3_dual_arm_sim.sim.model import (
 
 
 def test_source_assets_exclude_invalid_terminal_meshes() -> None:
-    meshes = {path.name for path in (asset_root() / "meshes").glob("*.STL")}
+    meshes = {path.name for path in (asset_root() / "meshes").iterdir() if path.name.endswith(".STL")}
     assert "L_LAST_S.STL" not in meshes
     assert "R_LAST_S.STL" not in meshes
     assert "base_link.STL" in meshes

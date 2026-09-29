@@ -12,6 +12,7 @@ from typing import Any
 
 from a3_dual_arm_sim.data.audit import CAMERA_KEYS as CAMERA_KEYS
 from a3_dual_arm_sim.data.audit import audit_training_dataset as audit_training_dataset
+from a3_dual_arm_sim.data.audit import dataset_camera_config as dataset_camera_config
 from a3_dual_arm_sim.paths import project_root
 
 
@@ -221,5 +222,138 @@ def train_smolvla(
     checkpoints = sorted((output_dir / "checkpoints").glob("*/pretrained_model/config.json"))
     if not checkpoints:
         raise RuntimeError("LeRobot exited without writing a final SmolVLA checkpoint")
+    result["checkpoint"] = str(checkpoints[-1].parent)
+    return result
+
+
+def build_train_act_command(
+    *,
+    dataset_root: Path,
+    repo_id: str,
+    output_dir: Path,
+    steps: int,
+    batch_size: int,
+    seed: int,
+    device: str = "cuda",
+    chunk_size: int = 100,
+    n_action_steps: int = 100,
+    dim_model: int = 512,
+    lr: float = 1e-5,
+    num_workers: int = 0,
+    save_freq: int = 5000,
+    log_freq: int = 10,
+    resume: bool = False,
+    checkpoint_path: Path | None = None,
+    config_path: Path | None = None,
+) -> list[str]:
+    if steps <= 0 or batch_size <= 0:
+        raise ValueError("steps and batch_size must be positive")
+    cmd = [
+        sys.executable,
+        "-m",
+        "lerobot.scripts.lerobot_train",
+        f"--output_dir={output_dir.expanduser().resolve()}",
+        "--job_name=a3_cookie_act",
+        f"--seed={seed}",
+        f"--num_workers={num_workers}",
+        f"--batch_size={batch_size}",
+        f"--steps={steps}",
+        "--eval_freq=0",
+        f"--log_freq={log_freq}",
+        "--save_checkpoint=true",
+        f"--save_freq={save_freq}",
+        "--wandb.enable=false",
+    ]
+    if resume:
+        cmd.append("--resume=true")
+        if config_path is not None:
+            cmd.append(f"--config_path={config_path.expanduser().resolve()}")
+        elif checkpoint_path is not None:
+            ckpt = checkpoint_path.expanduser().resolve()
+            train_cfg = ckpt / "pretrained_model" / "train_config.json"
+            if not train_cfg.is_file():
+                train_cfg = ckpt / "train_config.json"
+            if train_cfg.is_file():
+                cmd.append(f"--config_path={train_cfg}")
+            else:
+                cmd.append(f"--checkpoint_path={ckpt}")
+    else:
+        cmd.extend(
+            [
+                "--policy.type=act",
+                "--policy.push_to_hub=false",
+                f"--policy.chunk_size={chunk_size}",
+                f"--policy.n_action_steps={n_action_steps}",
+                f"--policy.dim_model={dim_model}",
+                f"--policy.optimizer_lr={lr}",
+                f"--policy.optimizer_lr_backbone={lr}",
+                f"--policy.device={device}",
+                f"--dataset.repo_id={repo_id}",
+                f"--dataset.root={dataset_root.expanduser().resolve()}",
+                "--dataset.video_backend=pyav",
+            ]
+        )
+    return cmd
+
+
+def train_act(
+    *,
+    dataset_root: Path,
+    repo_id: str,
+    output_dir: Path,
+    steps: int = 10000,
+    batch_size: int = 8,
+    seed: int = 1000,
+    device: str = "cuda",
+    chunk_size: int = 100,
+    n_action_steps: int = 100,
+    dim_model: int = 512,
+    lr: float = 1e-5,
+    save_freq: int = 5000,
+    num_workers: int = 0,
+    resume: bool = False,
+    checkpoint_path: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    audit = audit_training_dataset(dataset_root, repo_id=repo_id)
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    output_dir = output_dir.expanduser().resolve()
+    if output_dir.exists() and not resume:
+        raise FileExistsError(f"Training output already exists: {output_dir}")
+    command = build_train_act_command(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        output_dir=output_dir,
+        steps=steps,
+        batch_size=batch_size,
+        seed=seed,
+        device=device,
+        chunk_size=chunk_size,
+        n_action_steps=n_action_steps,
+        dim_model=dim_model,
+        lr=lr,
+        num_workers=num_workers,
+        save_freq=save_freq,
+        resume=resume,
+        checkpoint_path=checkpoint_path,
+    )
+    result = {**audit, "device": device, "output_dir": str(output_dir), "command": command}
+    if dry_run:
+        return result
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    subprocess.run(command, check=True, env=env)
+    checkpoints = sorted((output_dir / "checkpoints").glob("*/pretrained_model/config.json"))
+    if not checkpoints:
+        raise RuntimeError("LeRobot exited without writing a final ACT checkpoint")
     result["checkpoint"] = str(checkpoints[-1].parent)
     return result

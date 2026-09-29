@@ -20,6 +20,7 @@ from .workflows.cli_handlers import _replay as _replay
 from .workflows.cli_handlers import _run as _run
 from .workflows.cli_handlers import _smoke as _smoke
 from .workflows.cli_handlers import _teleop as _teleop
+from .workflows.cli_handlers import _train_act as _train_act
 from .workflows.cli_handlers import _train_smolvla as _train_smolvla
 from .workflows.cli_handlers import _validate_camera_recording as _validate_camera_recording
 
@@ -116,6 +117,26 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     train.add_argument("--dry-run", action="store_true")
     train.set_defaults(function=_train_smolvla)
+
+    train_act = commands.add_parser(
+        "train-act", help="Train ACT policy on a validated A3 dataset"
+    )
+    train_act.add_argument("--root", type=Path, required=True, help="LeRobot v3 dataset root")
+    train_act.add_argument("--repo-id", default="local/a3-front-close-left-100")
+    train_act.add_argument("--output", type=Path, required=True)
+    train_act.add_argument("--steps", type=int, default=10_000)
+    train_act.add_argument("--batch-size", type=int, default=8)
+    train_act.add_argument("--chunk-size", type=int, default=100)
+    train_act.add_argument("--n-action-steps", type=int, default=100)
+    train_act.add_argument("--lr", type=float, default=1e-5)
+    train_act.add_argument("--seed", type=int, default=1000)
+    train_act.add_argument("--num-workers", type=int, default=0 if sys.platform == "win32" else 2)
+    train_act.add_argument("--save-freq", type=int, default=5000)
+    train_act.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    train_act.add_argument("--resume", action="store_true")
+    train_act.add_argument("--checkpoint-path", type=Path, default=None)
+    train_act.add_argument("--dry-run", action="store_true")
+    train_act.set_defaults(function=_train_act)
     return root
 
 

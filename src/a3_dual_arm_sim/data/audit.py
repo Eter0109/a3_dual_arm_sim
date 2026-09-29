@@ -77,3 +77,38 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
         "state_dim": action_dim,
         "action_dim": action_dim,
     }
+
+
+def dataset_camera_config(dataset_root: Path) -> Any | None:
+    """Load camera geometry recorded in dataset metadata, if present."""
+    from a3_dual_arm_sim.config import CameraConfig
+
+    summary_path = dataset_root.expanduser().resolve() / "collection_summary.json"
+    if not summary_path.is_file():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        cameras_data = summary.get("config", {}).get("cameras")
+        if not cameras_data:
+            return None
+        return CameraConfig(
+            calibration_status=str(cameras_data.get("calibration_status", "prototype_estimate")),
+            workspace_target_m=tuple(cameras_data.get("workspace_target_m", CameraConfig.workspace_target_m)),
+            front_position_m=tuple(cameras_data.get("front_position_m", CameraConfig.front_position_m)),
+            front_fovy_deg=float(cameras_data.get("front_fovy_deg", CameraConfig.front_fovy_deg)),
+            left_wrist_position_m=tuple(
+                cameras_data.get("left_wrist_position_m", CameraConfig.left_wrist_position_m)
+            ),
+            left_wrist_target_m=tuple(
+                cameras_data.get("left_wrist_target_m", CameraConfig.left_wrist_target_m)
+            ),
+            right_wrist_position_m=tuple(
+                cameras_data.get("right_wrist_position_m", CameraConfig.right_wrist_position_m)
+            ),
+            right_wrist_target_m=tuple(
+                cameras_data.get("right_wrist_target_m", CameraConfig.right_wrist_target_m)
+            ),
+            wrist_fovy_deg=float(cameras_data.get("wrist_fovy_deg", CameraConfig.wrist_fovy_deg)),
+        )
+    except Exception:
+        return None

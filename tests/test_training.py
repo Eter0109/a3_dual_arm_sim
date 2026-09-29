@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,8 +9,11 @@ import pytest
 from a3_dual_arm_sim.learning.training import (
     CAMERA_KEYS,
     audit_training_dataset,
+    build_train_act_command,
     build_train_command,
+    dataset_camera_config,
     prepare_a3_smolvla_source,
+    train_act,
 )
 
 
@@ -92,7 +96,9 @@ def test_adapted_checkpoint_uses_three_cameras_and_16d_io(tmp_path: Path) -> Non
     assert set(config["input_features"]) == {*CAMERA_KEYS, "observation.state"}
     assert config["input_features"]["observation.state"]["shape"] == [16]
     assert config["output_features"]["action"]["shape"] == [16]
-    assert (adapted / "model.safetensors").is_symlink()
+    assert (adapted / "model.safetensors").exists()
+    if sys.platform != "win32":
+        assert (adapted / "model.safetensors").is_symlink()
     left = prepare_a3_smolvla_source(base, tmp_path / 'left', device='cpu', action_dim=8)
     left_config = json.loads((left/'config.json').read_text())
     assert left_config['input_features']['observation.state']['shape'] == [8]
@@ -140,3 +146,67 @@ def test_training_schedule_overrides(tmp_path: Path) -> None:
     assert config["scheduler_decay_steps"] == 20000
     assert config["scheduler_warmup_steps"] == 100
     assert config["num_steps"] == 25
+
+
+def test_train_act_command_and_dry_run(tmp_path: Path) -> None:
+    root = _dataset(tmp_path / "act_dataset")
+    (root / "collection_summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "task": "cookie_transfer",
+                "stored_action_mode": "joint_position",
+                "training_arm_mode": "left",
+                "config": {
+                    "cameras": {
+                        "front_position_m": [0.5, -0.18, 1.25],
+                        "front_fovy_deg": 48.0,
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    # Fix dataset state/action shape for left-only arm (8D)
+    meta = json.loads((root / "meta" / "info.json").read_text())
+    meta["features"]["observation.state"]["shape"] = [8]
+    meta["features"]["action"]["shape"] = [8]
+    (root / "meta" / "info.json").write_text(json.dumps(meta))
+
+    cameras = dataset_camera_config(root)
+    assert cameras is not None
+    assert cameras.front_fovy_deg == 48.0
+    assert cameras.front_position_m == (0.5, -0.18, 1.25)
+
+    command = build_train_act_command(
+        dataset_root=root,
+        repo_id="local/test-act",
+        output_dir=tmp_path / "out_act",
+        steps=50,
+        batch_size=2,
+        seed=42,
+        device="cuda",
+        chunk_size=100,
+        n_action_steps=100,
+    )
+    joined = " ".join(command)
+    assert "--policy.type=act" in joined
+    assert "--policy.chunk_size=100" in joined
+    assert "--policy.n_action_steps=100" in joined
+    assert "--steps=50" in joined
+    assert "--batch_size=2" in joined
+
+    res = train_act(
+        dataset_root=root,
+        repo_id="local/test-act",
+        output_dir=tmp_path / "out_act",
+        steps=50,
+        batch_size=2,
+        seed=42,
+        device="cuda",
+        dry_run=True,
+    )
+    assert res["episodes"] == 1
+    assert res["action_dim"] == 8
+    assert res["device"] == "cuda"
+    assert res["command"] == command
