@@ -374,28 +374,45 @@ class RightBoxCarryController:
     #: achieved orientation of the copied pose is not the commanded one: at the station
     #: it misses by 4.279 deg with ``R_WRIST_P`` and ``R_SHOULDER_R`` on their bounds.
     #:
-    #: **That error is real but it is not what the delivered yaw consists of**, which
-    #: took a sweep to establish and is worth flagging before anyone optimises it again.
-    #: Decomposed at the station (`q9_error_components.py`), and compared against the
-    #: yaw the box is actually handed in a rollout (`q8_bench.py`):
+    #: **That error is real but it is not what the delivered yaw consists of.**
+    #: Decomposed at the station (`q9_error_components.py`), against the pitch the grip
+    #: is commanded to hold:
     #:
-    #:   pitch   err deg   yaw part   pitch part   delivered |yaw| mean
-    #:     0.0     4.279     -3.916      -1.700        6.03 deg over 4 seeds
-    #:     1.0     3.434     -3.147      -1.353        6.65 deg over 6 seeds
-    #:     2.0     2.586     -2.374      -1.009        6.59 deg over 4 seeds
-    #:     6.0     0.000      0.000       0.000        jams at 31-56 mm
+    #:   pitch   err deg   yaw part   pitch part
+    #:     0.0     4.279     -3.916      -1.700
+    #:     1.0     3.434     -3.147      -1.353
+    #:     2.0     2.586     -2.374      -1.009
+    #:     6.0     0.000      0.000       0.000
     #:
-    #: The orientation error can be driven to zero and the yaw the box leaves with does
-    #: not move, so the box is not tracking the pads' orientation; what it tracks is the
-    #: contact, and the pads' orientation is one input to that rather than the answer.
+    #: The orientation error can be driven to zero while the yaw the box leaves with
+    #: barely moves -- measured at 1.7 to 1.9 deg mean over six seeds in the one setup
+    #: that reproduces the relay's own preconditions (`p14_grip_ab.py`), against a
+    #: pads' error of 4.3 deg.  So the box is not tracking the pads' orientation; what
+    #: it tracks is the contact, and the pads' orientation is one input to that rather
+    #: than the answer.
+    #:
+    #: **Every carry rollout recorded in this file before `p13_a_cleared.py` was
+    #: measured without the relay's own precondition**, and those numbers should not be
+    #: quoted.  The stage machine runs FILL, then PUSH, then VERIFY_PUSH -- which
+    #: refuses to hand over until the filled box is 85 mm clear of the station -- and
+    #: only then the carry.  A bench that runs the carry *alone* slides the queued box
+    #: into an occupied station and shoves the filled box along: measured, the two boxes
+    #: are in contact for 54-97 steps and the queued box leaves 4.30 deg yawed on
+    #: average, worst 7.83 deg.  With the station cleared first, the same four seeds
+    #: give 1.28 deg mean and 2.74 deg worst, and the boxes never touch.  The carry was
+    #: never what was wrong.
     #:
     #: Three axes were swept for a family whose warm pose *is* achievable, all at the
     #: carry's own anchor and all converged (`q2_reachable_grip.py`, `q3_...`):
     #:
     #:   - **yaw** about the world's vertical axis: reachable from 9 deg on (0.779 deg
-    #:     residual), but it turns the pad faces out of the wall's plane and the
-    #:     readiness is a lie -- rolled out, the box is handed 9.28 deg and 11.60 deg at
-    #:     9 and 15 deg of yaw against 6.69 deg at zero, and two runs in three fail;
+    #:     residual), but it turns the pad faces out of the wall's plane, so the
+    #:     reachability is a lie -- the grip needs those faces on the wall.  Rolled out,
+    #:     the runs ended 28 and 34 mm short of the station, which in a bench whose
+    #:     station was still occupied is where the *next box* is, so the number that
+    #:     sweep produced is a collision and not a yaw cost.  The axis is left at zero
+    #:     because a grip with its faces off the wall is not a grip, which is a
+    #:     statement about geometry rather than about the rollouts;
     #:   - **roll** about the pads' own face normal: exhausted at 3.84 deg, and it is
     #:     the one axis the grip is indifferent to, so there was nothing to win;
     #:   - **pitch** about the world's x axis: the station comes back exactly, and it is
@@ -412,17 +429,20 @@ class RightBoxCarryController:
     #: So 6 deg is where the wrist comes off its bound and the orientation becomes
     #: exact, and everything above it holds with *slack*.  **It is still not usable**,
     #: which is the whole reason this knob ships at zero: reachability is a joint-space
-    #: fact, and the grip is a contact fact.  Rolled out with the derived pinch
-    #: (`q8_bench.py`), the pitched grip jams the slide instead of the wrist:
+    #: fact, and the grip is a contact fact.  Rolled out (`q8_bench.py`), the pitched
+    #: grip jams the slide instead of the wrist:
     #:
-    #:   pitch    seeds   finished   travel        delivered |yaw|
-    #:     0.0       4        4/4     159-196 mm    6.03 deg mean
+    #:   pitch    seeds   finished   travel
+    #:     0.0       4        4/4     159-196 mm
     #:     4.0       1        0/1      63 mm       jams, "rotated during carry"
-    #:     6.0       4        0/4      31-56 mm    10.25 deg mean
+    #:     6.0       4        0/4      31-56 mm    jams, "rotated during carry"
     #:
-    #: The pitched pads bite the wall on one z-edge ahead of the other, and a hard
-    #: pinch turns that asymmetry into a couple the box cannot resist.  So the pitch
-    #: buys an exact orientation and loses the grip, exactly as yaw did.
+    #: Those jams are early enough to be about the pitch rather than about the box in
+    #: front: the slide starts 160 mm from the station, so a jam at 31-56 mm is nowhere
+    #: near the box it would eventually meet.  The pitched pads bite the wall on one
+    #: z-edge ahead of the other, and a hard pinch turns that asymmetry into a couple the
+    #: box cannot resist.  So the pitch buys an exact orientation and loses the grip,
+    #: exactly as yaw did.
     GRASP_ROTATION = (
         (0.0, 0.0, 1.0),
         (1.0, 0.0, 0.0),
