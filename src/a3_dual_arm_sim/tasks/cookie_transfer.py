@@ -22,11 +22,16 @@ class CookieTransferTaskConfig:
     max_linear_speed_m_s: float = 0.06
     max_angular_speed_rad_s: float = 0.30
     max_tilt_rad: float = np.deg2rad(15.0)
+    wall_contact_tolerance_m: float = 0.026
     terminate_on_success: bool = True
     require_exact_slots: bool = True
     require_released: bool = False
 
     def __post_init__(self) -> None:
+        if self.success_hold_steps < 1:
+            raise ValueError("success_hold_steps must be positive")
+        if not np.isfinite(self.wall_contact_tolerance_m) or self.wall_contact_tolerance_m < 0:
+            raise ValueError("wall_contact_tolerance_m must be finite and non-negative")
         if self.required_cookies != 10:
             raise ValueError("the 2x5 target contract requires exactly 10 cookies")
 
@@ -458,6 +463,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         tb_pos = self.data.xpos[self._target_bin_body]
         tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
         occupancy = [-1] * len(self.TARGET_SLOTS_LOCAL)
+        candidates: dict[int, list[int]] = {}
         for cookie_index, eligible in enumerate(in_target):
             if not eligible:
                 continue
@@ -465,8 +471,23 @@ class A3CookieTransferEnv(A3DualArmEnv):
             p_rel = tb_mat.T @ (c_pos - tb_pos)
             distances = np.abs(np.asarray(self.TARGET_SLOTS_LOCAL) - p_rel[:2])
             matches = np.flatnonzero(np.all(distances <= self.TARGET_SLOT_TOLERANCE, axis=1))
-            if len(matches) == 1 and occupancy[int(matches[0])] < 0:
-                occupancy[int(matches[0])] = cookie_index
+            candidates[cookie_index] = sorted(
+                matches.tolist(), key=lambda slot: float(np.linalg.norm(distances[slot]))
+            )
+
+        def assign(cookie_index: int, visited: set[int]) -> bool:
+            # Maximum one-to-one matching also handles overlapping slot tolerances.
+            for slot in candidates[cookie_index]:
+                if slot in visited:
+                    continue
+                visited.add(slot)
+                if occupancy[slot] < 0 or assign(occupancy[slot], visited):
+                    occupancy[slot] = cookie_index
+                    return True
+            return False
+
+        for cookie_index in candidates:
+            assign(cookie_index, set())
         return tuple(occupancy)
 
     def _collection_touches_all_walls(
@@ -507,8 +528,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
         lower = np.min(np.asarray([edge[0] for edge in edges]), axis=0)
         upper = np.max(np.asarray([edge[1] for edge in edges]), axis=0)
         return bool(
-            np.all(lower <= inner_lower + self.WALL_CONTACT_TOLERANCE_M)
-            and np.all(upper >= inner_upper - self.WALL_CONTACT_TOLERANCE_M)
+            np.all(lower <= inner_lower + self.task_config.wall_contact_tolerance_m)
+            and np.all(upper >= inner_upper - self.task_config.wall_contact_tolerance_m)
         )
 
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:

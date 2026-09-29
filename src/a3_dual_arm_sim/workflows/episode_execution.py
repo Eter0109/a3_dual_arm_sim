@@ -8,8 +8,11 @@ and cookies. Scoring is based on the number of cookies settled in the target box
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import EpisodeContext
@@ -40,7 +43,24 @@ class EpisodeExecution:
         cookie_noise_m: float = 0.0003,
         cookie_yaw_noise_rad: float = 0.015,
         render: bool = False,
+        success_hold_steps: int = 5,
+        slot_tolerance_m: tuple[float, float] = (0.015, 0.005),
+        wall_contact_tolerance_m: float = 0.030,
     ):
+        if (
+            isinstance(success_hold_steps, bool)
+            or not isinstance(success_hold_steps, int)
+            or success_hold_steps < 1
+        ):
+            raise ValueError("success_hold_steps must be a positive integer")
+        if len(slot_tolerance_m) != 2 or not all(
+            np.isfinite(x) and x > 0 for x in slot_tolerance_m
+        ):
+            raise ValueError("slot_tolerance_m must contain two finite positive values")
+        if not np.isfinite(wall_contact_tolerance_m) or wall_contact_tolerance_m < 0:
+            raise ValueError("wall_contact_tolerance_m must be finite and non-negative")
+        self.success_hold_steps = success_hold_steps
+        self.wall_contact_tolerance_m = wall_contact_tolerance_m
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
         self.max_steps = max_steps
         self.randomize_boxes = randomize_boxes
@@ -52,7 +72,13 @@ class EpisodeExecution:
         self.cookie_yaw_noise_rad = cookie_yaw_noise_rad
         self.render = render
 
-        self.config = load_config(self.config_path)
+        config = load_config(self.config_path)
+        self.config = replace(
+            config,
+            cookie_transfer=replace(
+                config.cookie_transfer, target_slot_tolerance_m=tuple(slot_tolerance_m)
+            ),
+        )
 
     def create_env(self, *, render_cameras: bool = False) -> A3CookieTransferEnv:
         return A3CookieTransferEnv(
@@ -60,6 +86,8 @@ class EpisodeExecution:
             task_config=CookieTransferTaskConfig(
                 cookie_count=80,
                 required_cookies=10,
+                success_hold_steps=self.success_hold_steps,
+                wall_contact_tolerance_m=self.wall_contact_tolerance_m,
                 position_noise_m=self.cookie_noise_m,
                 yaw_noise_rad=self.cookie_yaw_noise_rad,
             ),

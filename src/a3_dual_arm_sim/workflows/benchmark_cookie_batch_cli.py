@@ -42,6 +42,14 @@ class DiagnosticBenchmark(CookieBatchBenchmark):
 def run_metadata(args, benchmark):
     metadata = vars(args).copy()
     metadata["config"] = asdict(benchmark.config)
+    metadata["success_conditions"] = {
+        "required_cookies_in_target": 10,
+        "required_cookies_in_source": 70,
+        "require_exact_slots": True,
+        "success_hold_steps": benchmark.success_hold_steps,
+        "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
+        "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
+    }
     metadata["randomization"] = {
         "boxes": benchmark.randomize_boxes,
         "cookies": benchmark.randomize_cookies,
@@ -154,6 +162,19 @@ def main() -> int:
         action="store_true",
         help="Open viewer to visually watch simulation execution",
     )
+    parser.add_argument("--success-hold-steps", type=int, default=5)
+    parser.add_argument(
+        "--slot-tolerance-x", type=float, default=0.015, help="Slot x tolerance in meters"
+    )
+    parser.add_argument(
+        "--slot-tolerance-y", type=float, default=0.005, help="Slot y tolerance in meters"
+    )
+    parser.add_argument(
+        "--wall-contact-tolerance",
+        type=float,
+        default=0.030,
+        help="Group boundary coverage tolerance in meters",
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default=None)
     parser.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
     parser.add_argument("--inference-seed", type=int, default=None)
@@ -194,6 +215,9 @@ def main() -> int:
         source_bin_noise_m=args.source_box_noise,
         randomize_cookies=not args.no_randomize_cookies,
         render=args.render,
+        success_hold_steps=args.success_hold_steps,
+        slot_tolerance_m=(args.slot_tolerance_x, args.slot_tolerance_y),
+        wall_contact_tolerance_m=args.wall_contact_tolerance,
     )
 
     workers = 1 if args.render else args.workers
