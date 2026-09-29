@@ -1,0 +1,31 @@
+# Opt-in Qwen3.5 visual planning/verification; retain the Qwen2.5 baseline config.
+# The backend disables thinking to preserve strict JSON / Yes-No interfaces.
+# This is a public model, NOT the paper's A3-finetuned verifier.
+planner:
+  kind: local_qwen
+  model_family: qwen3_5
+  model: models/Qwen3.5-4B
+  dtype: bfloat16
+  device: cuda
+  max_tokens: 512
+  image_max_edge: 512
+verifier:
+  kind: local_qwen
+  model_family: qwen3_5
+  model: models/Qwen3.5-4B
+  dtype: bfloat16
+  device: cuda
+  max_tokens: 512
+  image_max_edge: 512
+executor: {}
+loop:
+  verify_every_steps: 20
+  # At 20 Hz: five snapshots 0.5 s apart cover 2.0 s of execution.
+  frame_interval: 10
+  window_frames: 5
+  min_stuck_steps: 40
+  stuck_confirmations: 2
+  skill_timeout_steps: 600
+  max_steps: 2400
+  max_retries: 2
+  recovery_steps: 15

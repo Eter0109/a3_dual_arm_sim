@@ -1,0 +1,31 @@
+# Template: train a local verifier first, then set adapter_path to its adapter/ directory.
+# Relative model and adapter paths are resolved against the project resource root.
+planner:
+  kind: local_qwen
+  model_family: qwen3_5
+  model: models/Qwen3.5-4B
+  dtype: bfloat16
+  device: cuda
+  max_tokens: 512
+  image_max_edge: 512
+verifier:
+  kind: local_qwen
+  model_family: qwen3_5
+  model: models/Qwen3.5-4B
+  adapter_path: outputs/train/verifier/adapter
+  fine_tuned: true
+  dtype: bfloat16
+  device: cuda
+  max_tokens: 32
+  image_max_edge: 256
+executor: {}
+loop:
+  verify_every_steps: 20
+  frame_interval: 10
+  window_frames: 5
+  min_stuck_steps: 40
+  stuck_confirmations: 2
+  skill_timeout_steps: 600
+  max_steps: 2400
+  max_retries: 2
+  recovery_steps: 15

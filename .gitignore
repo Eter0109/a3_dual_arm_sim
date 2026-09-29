@@ -4,11 +4,18 @@ __pycache__/
 .ruff_cache/
 .venv/
 .runtime/
+# Downloaded model families and local caches (existing tracked XML assets stay tracked).
+/models/
+# Machine-local experiment config; use the portable LoRA template for new runs.
+/configs/agents/agentic_qwen35_lora_v3.yaml
+.env
+.env.local
 outputs/
 datasets/
 MUJOCO_LOG.TXT
-artifacts/batch_snapshots/
-artifacts/batch_snapshots_*/
-artifacts/batch_dev_*.json
+# Generated experiments are not source code. Curated documentation belongs in docs/.
+artifacts/
+reports/
+runs/
 *.egg-info/
 .DS_Store

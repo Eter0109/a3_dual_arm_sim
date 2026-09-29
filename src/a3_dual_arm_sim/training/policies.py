@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from a3_dual_arm_sim.core.paths import project_root
+from a3_dual_arm_sim.data.audit import CAMERA_KEYS, audit_training_dataset
+
+
+def default_base_model() -> Path:
+    return (
+        project_root().parent
+        / "vla_ur5e_sim"
+        / "assets"
+        / "policy"
+        / "base"
+        / "pretrained_model"
+    )
+
+
+def _local_hub_snapshot(repo_id: str) -> Path | None:
+    cache_root = Path(
+        os.environ.get("HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+    )
+    repository = cache_root / f"models--{repo_id.replace('/', '--')}"
+    main_ref = repository / "refs" / "main"
+    if not main_ref.is_file():
+        return None
+    snapshot = repository / "snapshots" / main_ref.read_text(encoding="utf-8").strip()
+    return snapshot if (snapshot / "config.json").is_file() else None
+
+
+def prepare_a3_smolvla_source(base_model: Path, runtime_dir: Path, *, device: str) -> Path:
+    """Create a lightweight adapted checkpoint view without copying the 1.2 GB weights."""
+    base_model = base_model.expanduser().resolve()
+    runtime_dir = runtime_dir.expanduser().resolve()
+    config_path = base_model / "config.json"
+    weights_path = base_model / "model.safetensors"
+    if not config_path.is_file() or not weights_path.is_file():
+        raise FileNotFoundError(f"Not a LeRobot pretrained policy directory: {base_model}")
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if config.get("type") != "smolvla":
+        raise ValueError(f"Expected a SmolVLA checkpoint, got {config.get('type')!r}")
+    if int(config.get("max_state_dim", 0)) < 16 or int(config.get("max_action_dim", 0)) < 16:
+        raise ValueError("The base checkpoint cannot represent the A3 16D state/action contract")
+
+    visual = {"type": "VISUAL", "shape": [3, 256, 256]}
+    config["input_features"] = {
+        **{key: visual.copy() for key in CAMERA_KEYS},
+        "observation.state": {"type": "STATE", "shape": [16]},
+    }
+    config["output_features"] = {"action": {"type": "ACTION", "shape": [16]}}
+    config["device"] = device
+    config["use_amp"] = device == "cuda"
+    config["push_to_hub"] = False
+    config["repo_id"] = None
+    vlm_model_name = config.get("vlm_model_name")
+    cached_vlm = _local_hub_snapshot(vlm_model_name) if vlm_model_name else None
+    if cached_vlm is not None:
+        config["vlm_model_name"] = str(cached_vlm)
+
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    for source in base_model.iterdir():
+        if source.name in {"config.json", "model.safetensors", "train_config.json"}:
+            continue
+        if source.is_file():
+            shutil.copy2(source, runtime_dir / source.name)
+    preprocessor_path = runtime_dir / "policy_preprocessor.json"
+    if cached_vlm is not None and preprocessor_path.is_file():
+        preprocessor = json.loads(preprocessor_path.read_text(encoding="utf-8"))
+        for step in preprocessor.get("steps", []):
+            if step.get("registry_name") == "tokenizer_processor":
+                step["config"]["tokenizer_name"] = str(cached_vlm)
+        preprocessor_path.write_text(json.dumps(preprocessor, indent=2) + "\n", encoding="utf-8")
+    runtime_weights = runtime_dir / "model.safetensors"
+    if runtime_weights.exists():
+        try:
+            if not runtime_weights.samefile(weights_path):
+                runtime_weights.unlink()
+        except OSError:
+            runtime_weights.unlink()
+    if not runtime_weights.exists():
+        try:
+            runtime_weights.symlink_to(weights_path)
+        except OSError:
+            try:
+                runtime_weights.hardlink_to(weights_path)
+            except OSError:
+                shutil.copy2(weights_path, runtime_weights)
+    return runtime_dir
+
+
+def build_train_command(
+    *,
+    dataset_root: Path,
+    repo_id: str,
+    policy_source: Path,
+    output_dir: Path,
+    steps: int,
+    batch_size: int,
+    seed: int,
+) -> list[str]:
+    if steps <= 0 or batch_size <= 0:
+        raise ValueError("steps and batch_size must be positive")
+    return [
+        sys.executable,
+        "-m",
+        "lerobot.scripts.lerobot_train",
+        f"--dataset.repo_id={repo_id}",
+        f"--dataset.root={dataset_root.expanduser().resolve()}",
+        "--dataset.video_backend=pyav",
+        f"--policy.path={policy_source.expanduser().resolve()}",
+        f"--output_dir={output_dir.expanduser().resolve()}",
+        "--job_name=a3_grasp_smolvla",
+        f"--seed={seed}",
+        "--num_workers=0",
+        f"--batch_size={batch_size}",
+        f"--steps={steps}",
+        "--eval_freq=0",
+        "--log_freq=1",
+        "--save_checkpoint=true",
+        f"--save_freq={steps}",
+        "--wandb.enable=false",
+    ]
+
+
+def train_smolvla(
+    *,
+    dataset_root: Path,
+    repo_id: str,
+    base_model: Path,
+    output_dir: Path,
+    steps: int,
+    batch_size: int,
+    seed: int,
+    device: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    audit = audit_training_dataset(dataset_root, repo_id=repo_id)
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    output_dir = output_dir.expanduser().resolve()
+    if output_dir.exists():
+        raise FileExistsError(f"Training output already exists: {output_dir}")
+    policy_source = prepare_a3_smolvla_source(
+        base_model,
+        output_dir.parent / ".a3_smolvla_source",
+        device=device,
+    )
+    command = build_train_command(
+        dataset_root=dataset_root,
+        repo_id=repo_id,
+        policy_source=policy_source,
+        output_dir=output_dir,
+        steps=steps,
+        batch_size=batch_size,
+        seed=seed,
+    )
+    result = {**audit, "device": device, "output_dir": str(output_dir), "command": command}
+    if dry_run:
+        return result
+
+    env = os.environ.copy()
+    env.update(
+        {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"}
+    )
+    subprocess.run(command, check=True, env=env)
+    checkpoints = sorted((output_dir / "checkpoints").glob("*/pretrained_model/config.json"))
+    if not checkpoints:
+        raise RuntimeError("LeRobot exited without writing a final SmolVLA checkpoint")
+    result["checkpoint"] = str(checkpoints[-1].parent)
+    return result

@@ -1,0 +1,51 @@
+physics_hz: 500
+control_hz: 20
+horizon: 1000
+image_width: 256
+image_height: 256
+max_joint_step_rad: 0.05
+max_gripper_step: 0.08
+cartesian_translation_scale_m: 0.025
+cartesian_rotation_scale_rad: 0.10
+ik_damping: 0.05
+ik_iterations: 8
+joint_damping: 0.8
+joint_armature: 0.02
+object_position_noise_m: 0.025
+home:
+  left: [0.0, 0.35, 0.0, -0.65, 0.0, 0.25, 0.0]
+  right: [0.0, -0.35, 0.0, 0.65, 0.0, -0.25, 0.0]
+  grippers: [0.6, 0.6]
+
+# Current example values. These are visual estimates, not calibrated measurements.
+cameras:
+  calibration_status: prototype_estimate
+  workspace_target_m: [0.16, 0.24, 0.80]
+  front_position_m: [0.38, -0.02, 1.30]
+  front_fovy_deg: 42.0
+  left_wrist_position_m: [0.0, 0.045, 0.085]
+  left_wrist_target_m: [0.0, 0.150, 0.0]
+  right_wrist_position_m: [0.0, -0.045, 0.085]
+  right_wrist_target_m: [0.0, -0.150, 0.0]
+  wrist_fovy_deg: 70.0
+
+# Grid centers and mirrored home inherit CookieSceneConfig defaults.
+# 4 columns x 20 upright pieces; destination capacity 2 columns x 5.
+cookie_transfer:
+  calibration_status: prototype_estimate
+  cookie_half_size_m: [0.025, 0.0031666666666666666, 0.0125]
+  # 45-degree chamfer on the upper/lower long edges of each upright Cookie.
+  cookie_edge_bevel_m: 0.0025
+  cookie_mass_kg: 0.005833333333333334
+  cookie_model_z_m: 0.7685
+  cookie_reset_z_m: 0.7688
+  source_bin_center_m: [0.175, 0.315]
+  source_bin_half_size_m: [0.1096, 0.07613333333333333]
+  source_bin_wall_height_m: 0.036
+  source_floor_z_m: 0.753
+  source_wall_base_z_m: 0.750
+  target_bin_world_position_m: [0.1246, -0.01156666666666667, 0.753]
+  target_bin_half_size_m: [0.0562, 0.022633333333333333]
+  target_bin_wall_height_m: 0.031
+  target_floor_z_m: 0.003
+  target_slot_tolerance_m: [0.010, 0.0025]

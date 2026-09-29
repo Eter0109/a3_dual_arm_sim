@@ -1,0 +1,31 @@
+# Paper-inspired SAP adaptation. Default CLI is an explicit fixed/oracle baseline.
+# VLM mode does not silently fall back to simulator truth or fixed planning.
+planner:
+  kind: local_qwen
+  model: models/Qwen2.5-VL-3B-Instruct
+  device: cuda
+  max_tokens: 512
+  image_max_edge: 512
+verifier:
+  kind: local_qwen
+  model: models/Qwen2.5-VL-3B-Instruct
+  device: cuda
+  max_tokens: 512
+  image_max_edge: 512
+# HTTP backend alternative for either role:
+# kind: http
+# model: YOUR_MULTIMODAL_MODEL
+# base_url: https://YOUR_PROVIDER/v1
+# api_key_env: A3_AGENT_API_KEY
+executor: {}
+loop:
+  verify_every_steps: 20
+  # At 20 Hz: five snapshots 0.5 s apart cover 2.0 s of execution.
+  frame_interval: 10
+  window_frames: 5
+  min_stuck_steps: 40
+  stuck_confirmations: 2
+  skill_timeout_steps: 600
+  max_steps: 2400
+  max_retries: 2
+  recovery_steps: 15

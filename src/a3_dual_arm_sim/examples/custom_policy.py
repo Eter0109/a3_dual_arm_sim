@@ -1,6 +1,6 @@
 """Minimal user policy loaded with ``--policy module:factory``."""
 
-from a3_dual_arm_sim.policy import SineJointPolicy
+from a3_dual_arm_sim.policies.base import SineJointPolicy
 
 
 def make_policy() -> SineJointPolicy:
