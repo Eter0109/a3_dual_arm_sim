@@ -1,39 +1,46 @@
-# 入口索引与管理
+# 入口索引与实验管理
 
-正式实现都在 `src/a3_dual_arm_sim/`，`examples/` 只做转发。历史实验脚本（`experiments/legacy`）
-与旧模块兼容层已在清理中删除，下表入口全部指向维护中的实现。
+正式实现位于 `src/a3_dual_arm_sim/`，`examples/` 仅转发对应模块。源码用户运行脚本，wheel 用户使用 `python -m a3_dual_arm_sim.<实现模块>`。所有入口支持 `--help`。
 
-| 入口 | 实现 | 状态 |
+## 主流程
+
+| 入口 | 实现模块（包名之后） | 用途 |
 | --- | --- | --- |
-| `examples/audit_smolvla_data.py` | [src/a3_dual_arm_sim/data/audit_smolvla_data_cli.py](../src/a3_dual_arm_sim/data/audit_smolvla_data_cli.py) | maintained entrypoint |
-| `examples/benchmark_cookie_batch.py` | [src/a3_dual_arm_sim/workflows/benchmark_cookie_batch_cli.py](../src/a3_dual_arm_sim/workflows/benchmark_cookie_batch_cli.py) | maintained entrypoint |
-| `examples/collect_cookie_benchmark.py` | [src/a3_dual_arm_sim/data/collect_cookie_benchmark_cli.py](../src/a3_dual_arm_sim/data/collect_cookie_benchmark_cli.py) | maintained entrypoint |
-| `examples/collect_smolvla_dagger.py` | [src/a3_dual_arm_sim/data/collect_smolvla_dagger_cli.py](../src/a3_dual_arm_sim/data/collect_smolvla_dagger_cli.py) | maintained entrypoint |
-| `examples/collect_smolvla_recovery.py` | [src/a3_dual_arm_sim/data/collect_smolvla_recovery_cli.py](../src/a3_dual_arm_sim/data/collect_smolvla_recovery_cli.py) | maintained entrypoint |
-| `examples/diagnose_smolvla.py` | [src/a3_dual_arm_sim/workflows/diagnose_smolvla_cli.py](../src/a3_dual_arm_sim/workflows/diagnose_smolvla_cli.py) | maintained entrypoint |
-| `examples/evaluate_cookie_transfer.py` | [src/a3_dual_arm_sim/workflows/evaluate_cookie_transfer_cli.py](../src/a3_dual_arm_sim/workflows/evaluate_cookie_transfer_cli.py) | maintained entrypoint |
-| `examples/improve_smolvla_50.py` | [src/a3_dual_arm_sim/workflows/improve_smolvla_50_cli.py](../src/a3_dual_arm_sim/workflows/improve_smolvla_50_cli.py) | maintained entrypoint |
-| `examples/prepare_left_arm_dataset.py` | [src/a3_dual_arm_sim/data/prepare_left_arm_dataset_cli.py](../src/a3_dual_arm_sim/data/prepare_left_arm_dataset_cli.py) | maintained entrypoint |
-| `examples/prepare_smolvla_retraining.py` | [src/a3_dual_arm_sim/learning/prepare_smolvla_retraining_cli.py](../src/a3_dual_arm_sim/learning/prepare_smolvla_retraining_cli.py) | maintained entrypoint |
-| `examples/preview_cameras.py` | [src/a3_dual_arm_sim/workflows/preview_cameras_cli.py](../src/a3_dual_arm_sim/workflows/preview_cameras_cli.py) | maintained entrypoint |
-| `examples/probe_smolvla_retrain.py` | [src/a3_dual_arm_sim/learning/probe_smolvla_retrain_cli.py](../src/a3_dual_arm_sim/learning/probe_smolvla_retrain_cli.py) | maintained entrypoint |
-| `examples/run_cookie_batch.py` | [src/a3_dual_arm_sim/workflows/run_cookie_batch_cli.py](../src/a3_dual_arm_sim/workflows/run_cookie_batch_cli.py) | maintained entrypoint |
-| `examples/run_cookie_same_column.py` | [src/a3_dual_arm_sim/workflows/run_cookie_same_column_cli.py](../src/a3_dual_arm_sim/workflows/run_cookie_same_column_cli.py) | maintained entrypoint |
-| `examples/run_cookie_transfer.py` | [src/a3_dual_arm_sim/workflows/run_cookie_transfer_cli.py](../src/a3_dual_arm_sim/workflows/run_cookie_transfer_cli.py) | maintained entrypoint |
-| `examples/run_smolvla_improvement.py` | [src/a3_dual_arm_sim/workflows/run_smolvla_improvement_cli.py](../src/a3_dual_arm_sim/workflows/run_smolvla_improvement_cli.py) | maintained entrypoint |
-| `examples/smolvla_deployment_sweep.py` | [src/a3_dual_arm_sim/workflows/smolvla_deployment_sweep_cli.py](../src/a3_dual_arm_sim/workflows/smolvla_deployment_sweep_cli.py) | maintained entrypoint |
-| `examples/smolvla_offline_error.py` | [src/a3_dual_arm_sim/workflows/smolvla_offline_error_cli.py](../src/a3_dual_arm_sim/workflows/smolvla_offline_error_cli.py) | maintained entrypoint |
-| `examples/summarize_smolvla_trace.py` | [src/a3_dual_arm_sim/workflows/summarize_smolvla_trace_cli.py](../src/a3_dual_arm_sim/workflows/summarize_smolvla_trace_cli.py) | maintained entrypoint |
-| `examples/train_after_collection.py` | [src/a3_dual_arm_sim/learning/train_after_collection_cli.py](../src/a3_dual_arm_sim/learning/train_after_collection_cli.py) | maintained entrypoint |
+| `a3-sim inspect/smoke/run/teleop/replay` | `cli` | 通用仿真与策略、遥操作及回放 |
+| `a3-sim download-smolvla/train-smolvla` | `cli` | Hub 下载及公开 LeRobot 训练 |
+| `a3-sim train-act` | `learning.act_training` | ACT 配置适配及公开 LeRobot 训练 |
+| `run_cookie_batch.py` | `workflows.run_cookie_batch_cli` | 同列/跨列专家 |
+| `run_cookie_same_column.py` | `workflows.run_cookie_same_column_cli` | 同列专家便利入口 |
+| `run_cookie_transfer.py` | `workflows.run_cookie_transfer_cli` | 单块/协作搬运专家 |
+| `evaluate_cookie_transfer.py` | `workflows.evaluate_cookie_transfer_cli` | 单块任务评估 |
+| `benchmark_cookie_batch.py` | `workflows.benchmark_cookie_batch_cli` | 批次随机闭环评估 |
+| `preview_cameras.py` | `workflows.preview_cameras_cli` | 三相机预览 |
+| `collect_cookie_benchmark.py` | `data.collect_cookie_benchmark_cli` | 成功专家演示采集 |
+| `prepare_left_arm_dataset.py` | `data.prepare_left_arm_dataset_cli` | 16D→8D 数据转换 |
+| `audit_smolvla_data.py` | `data.audit_smolvla_data_cli` | 数据及检查点统计审计 |
+| `smolvla_offline_error.py` | `workflows.smolvla_offline_error_cli` | 训练数据首动作误差，`--policy-type act` 支持 ACT |
+| `summarize_smolvla_trace.py` | `workflows.summarize_smolvla_trace_cli` | 汇总诊断动作轨迹 |
 
+主流程指维护入口，不代表所有任务已获得成功率或完整训练验收。单块顺序专家在密集 80 块布局上的两个测试为既有预期失败；批次任务优先使用同列/跨列专家，不能据此宣称单块专家已通过该布局验收。
 
-## 新实验规范
+## 高级实验入口
 
-1. 使用独立 `outputs/<experiment-id>`，禁止复用旧报告冒充新结果。
-2. 保存完整命令、配置快照、Git revision 与 dirty diff、检查点实际路径与 SHA256、数据根路径/版本、场景和推理 seed。
-3. 普通/EMA 权重分开标记，按完整 episode 恢复；原始数据/模型不纳入 Git。
-4. 通用采集、训练、诊断调用正式包；新实验专有实现放 `experiments/`，不继续扩大 `examples` 或顶层业务模块。
-5. 部署评测必须传 `--dataset-root`，报告 checkpoint 路径与 seed；短程启动测试不等于任务成功率。
+| 脚本 | 实现模块（包名之后） | 限制 |
+| --- | --- | --- |
+| `diagnose_smolvla.py` | `workflows.diagnose_smolvla_cli` | 多阶段诊断；部分阶段假设普通/EMA 两类已有检查点 |
+| `smolvla_deployment_sweep.py` | `workflows.smolvla_deployment_sweep_cli` | 部署配置对照 |
+| `collect_smolvla_recovery.py` | `data.collect_smolvla_recovery_cli` | 恢复示范采集 |
+| `collect_smolvla_dagger.py` | `data.collect_smolvla_dagger_cli` | 专家接管与 DAgger 实验 |
+| `prepare_smolvla_retraining.py` | `learning.prepare_smolvla_retraining_cli` | 再训练数据与命令准备 |
+| `probe_smolvla_retrain.py` | `learning.probe_smolvla_retrain_cli` | 再训练候选短验证 |
+| `train_after_collection.py` | `learning.train_after_collection_cli` | Linux PID/锁编排，要求特定 100 episode 采集契约 |
+| `run_smolvla_improvement.py` | `workflows.run_smolvla_improvement_cli` | 带门控的实验流水线 |
+| `improve_smolvla_50.py` | `workflows.improve_smolvla_50_cli` | 扩展实验编排 |
 
-当前保留的产物只有 `datasets/a3_front_close_left_100` 与 `outputs/smolvla_front_close_left_20k`；
-其它入口在需要时应把 `--root`/`--dataset-root` 指向新采集的数据与新 run。
+这些入口保留已有研究功能，其整条流水线不属于本次发布冒烟验收。使用前检查 `--help`、数据与实际检查点；不存在的 EMA 权重不得视为已产生，单阶段准备成功也不等于整条流水线成功。部分编排默认依赖仓库内 `examples/`，适用于源码安装；wheel 主流程使用模块入口。
+
+## 结果追踪
+
+每个实验使用独立 `outputs/<run>`，保留命令、配置、环境版本、Git revision/dirty diff、数据 revision、实际检查点及 SHA256、场景与推理 seed。普通/EMA 权重和部署后处理分开标记。开发 seed 与最终验收 seed 隔离。
+
+比较时保持场景、随机化、控制频率、最大步数、数据统计及 seed 一致。模型评估显式传 `--dataset-root`；默认目录仅是便利约定。原始数据、权重、缓存及日志不纳入 Git。新增功能按架构职责归属正式包，不在示例转发脚本中写业务。

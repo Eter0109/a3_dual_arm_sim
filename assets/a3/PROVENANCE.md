@@ -1,25 +1,15 @@
-# A3 model provenance
+# A3 仿真资源来源
 
-The source URDF and meshes were copied, without modifying the source directory, from:
+## A3 机器人
 
-`/home/eter/下载/A3_n_waiguan-urdf-20260409`
+`source/A3.urdf`、`source/A3_mujoco.urdf` 与 A3 网格来自提供的 A3 外观 URDF 包（包名标识 `lanxin-urdf-20260204`）。原包包含每臂七个旋转关节。
 
-The package describes `lanxin-urdf-20260204` and contains fourteen revolute arm joints.
-`L_LAST_S.STL` and `R_LAST_S.STL` were deliberately not vendored: each is an invalid,
-header-only STL. The runtime model replaces those empty links with parameterized flange,
-camera, force/torque, and gripper elements.
+`L_LAST_S.STL` 和 `R_LAST_S.STL` 为无有效几何的 header-only 文件，因此未收录；运行时以参数化法兰、相机、力反馈和夹爪元素替代空链接。
 
-No motor transmission, joint friction identification, controller tuning, calibrated zero pose,
-camera calibration, or production gripper model was present in the source package. Values for
-those properties in this project are functional simulation defaults, not digital-twin claims.
+原始包未提供电机传动、摩擦辨识、控制器参数、零位标定、相机标定或生产夹爪模型。本项目相应参数为仿真默认值。当前未找到 A3 原始 URDF/网格明确的再分发许可，公开发布前需维护者确认授权。
 
-## Robotiq 2F-85 gripper visuals
+## Robotiq 2F-85 外观
 
-The five `robotiq_arg2f_85_*` STL files in `meshes/` were copied from the locally installed
-robosuite 1.4.0 package at:
+五个 `robotiq_arg2f_85_*` STL 来自 robosuite 1.4.0 的 Robotiq 85 gripper mesh 资源，保留 MIT 声明于 [ROBOSUITE_LICENSE.txt](ROBOSUITE_LICENSE.txt)。这些网格用于外观；碰撞与驱动采用简化平行夹爪模型。
 
-`/home/eter/miniforge3/lib/python3.13/site-packages/robosuite/models/assets/grippers/meshes/robotiq_85_gripper`
-
-They retain robosuite's MIT license in `../ROBOSUITE_LICENSE.txt`. The visual shell uses these
-meshes, while this project keeps a simplified 85 mm parallel-jaw collision and actuation model so
-the public one-opening action, fingertip touch sensors, and force feedback remain stable.
+第三方声明只覆盖对应资源，不能据此推定 A3 原始资产或项目源码的许可证。

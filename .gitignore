@@ -12,3 +12,6 @@ artifacts/batch_snapshots_*/
 artifacts/batch_dev_*.json
 *.egg-info/
 .DS_Store
+build/
+dist/
+models/smolvla_base/

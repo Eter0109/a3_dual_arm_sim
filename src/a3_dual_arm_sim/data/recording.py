@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -17,11 +16,6 @@ from a3_dual_arm_sim.contracts import (
     VELOCITY,
     EpisodeContext,
 )
-from a3_dual_arm_sim.paths import project_root
-
-_RUNTIME = project_root() / ".runtime"
-os.environ.setdefault("HF_HOME", str(_RUNTIME / "huggingface"))
-os.environ.setdefault("HF_DATASETS_CACHE", str(_RUNTIME / "datasets"))
 
 ACTION = "action"
 TASK = "task"

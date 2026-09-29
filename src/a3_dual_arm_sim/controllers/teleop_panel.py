@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any
 
 from a3_dual_arm_sim.controllers.teleop import KeyboardTeleopPolicy
-
-ResultT = TypeVar("ResultT")
 
 
 class TeleopControlPanel:
@@ -328,7 +326,7 @@ class TeleopControlPanel:
         self.root.mainloop()
 
 
-def run_teleop_control_panel(
+def run_teleop_control_panel[ResultT](
     policy: KeyboardTeleopPolicy, rollout: Callable[[], ResultT]
 ) -> ResultT:
     """Run simulation in a worker while Tk owns input on the main thread."""

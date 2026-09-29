@@ -52,15 +52,15 @@ from a3_dual_arm_sim.data.recording import LeRobotV3Recorder
 from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark, SmolVLAPolicyAdapter
 
 TASK = "transfer 10 cookies into target box"
-RAW_PURE = dict(
-    ema_alpha=0,
-    anchor_right_arm=False,
-    gripper_sharpening=False,
-    align_vertical=False,
-    clamp_z=False,
-    n_action_steps=8,
-    num_steps=25,
-)
+RAW_PURE = {
+    "ema_alpha": 0,
+    "anchor_right_arm": False,
+    "gripper_sharpening": False,
+    "align_vertical": False,
+    "clamp_z": False,
+    "n_action_steps": 8,
+    "num_steps": 25,
+}
 STALL_DEFAULTS = {
     "trigger": "budget",  # "budget" (v0.2) | "hover" (v0 legacy) | force_at overrides both
     "budget_T0": 250,  # budget mode: takeover when step >= this and delivered == 0
@@ -369,16 +369,16 @@ def main():
             recorder = GatedRecorder(inner, gate) if inner is not None else None
             try:
                 score = bench.run_episode(policy, seed, recorder=recorder)
-            except Exception as exc:  # 10h-run resilience: log and continue
-                record = dict(
-                    seed=seed,
-                    takeover=gate.taken,
-                    outcome="crashed",
-                    stall_type="crashed",
-                    ingested=False,
-                    error=f"{type(exc).__name__}: {exc}"[:300],
-                    result={},
-                )
+            except Exception as exc:  # noqa: BLE001 - persist per-episode crashes and continue
+                record = {
+                    "seed": seed,
+                    "takeover": gate.taken,
+                    "outcome": "crashed",
+                    "stall_type": "crashed",
+                    "ingested": False,
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                    "result": {},
+                }
                 records.append(record)
                 attempts_path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
                 print(json.dumps(record), flush=True)
@@ -419,23 +419,23 @@ def main():
                 outcome = "aborted_reinit"
             else:
                 outcome = "not_taken"
-            record = dict(
-                seed=seed,
-                takeover=gate.taken,
-                takeover_step=gate.takeover_step,
-                skip_reason=gate.skip_reason,
-                reinit_deltas=gate.reinit_deltas,
-                expert_phase=expert_phase,
-                stall_type=stall_type,
-                outcome=outcome,
-                ingested=outcome in ("recovered_full", "recovered_partial"),
-                model_profile=dict(
-                    model_steps=policy.model_steps_run,
-                    open_frac=round(open_frac, 3),
-                    gripper_transitions=policy.gripper_transitions,
-                ),
-                result=result,
-            )
+            record = {
+                "seed": seed,
+                "takeover": gate.taken,
+                "takeover_step": gate.takeover_step,
+                "skip_reason": gate.skip_reason,
+                "reinit_deltas": gate.reinit_deltas,
+                "expert_phase": expert_phase,
+                "stall_type": stall_type,
+                "outcome": outcome,
+                "ingested": outcome in ("recovered_full", "recovered_partial"),
+                "model_profile": {
+                    "model_steps": policy.model_steps_run,
+                    "open_frac": round(open_frac, 3),
+                    "gripper_transitions": policy.gripper_transitions,
+                },
+                "result": result,
+            }
             records.append(record)
             attempts_path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
             print(
@@ -464,15 +464,15 @@ def main():
     for r in records:
         crosstab.setdefault(r["stall_type"], {}).setdefault(r["outcome"], 0)
         crosstab[r["stall_type"]][r["outcome"]] += 1
-    summary = dict(
-        seeds=len(records),
-        takeovers=len(taken),
-        takeover_successes=sum(1 for r in taken if r["result"].get("success")),
-        ingested=sum(1 for r in records if r.get("ingested")),
-        crashes=sum(1 for r in records if r.get("outcome") == "crashed"),
-        skips=sorted({r["skip_reason"] for r in records if r.get("skip_reason")}),
-        crosstab_stalltype_x_outcome=crosstab,
-    )
+    summary = {
+        "seeds": len(records),
+        "takeovers": len(taken),
+        "takeover_successes": sum(1 for r in taken if r["result"].get("success")),
+        "ingested": sum(1 for r in records if r.get("ingested")),
+        "crashes": sum(1 for r in records if r.get("outcome") == "crashed"),
+        "skips": sorted({r["skip_reason"] for r in records if r.get("skip_reason")}),
+        "crosstab_stalltype_x_outcome": crosstab,
+    }
     (args.root / "dagger_summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2), flush=True)
 

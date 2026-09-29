@@ -15,12 +15,15 @@ import numpy as np
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.controllers.expert import CookiePhase
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3SameColumnBatchExpert
+from a3_dual_arm_sim.paths import resource_root
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("configs/cookie_same_column.yaml"))
+    parser.add_argument(
+        "--config", type=Path, default=resource_root() / "configs/cookie_same_column.yaml"
+    )
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=6000)

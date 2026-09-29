@@ -337,7 +337,11 @@ def write_generated_xml(
     root = ET.fromstring(build_model(config, scene=scene).xml)
     compiler = root.find("compiler")
     if compiler is not None:
-        relative_meshes = os.path.relpath(asset_root() / "meshes", destination.parent)
-        compiler.set("meshdir", Path(relative_meshes).as_posix())
+        try:
+            relative_meshes = os.path.relpath(asset_root() / "meshes", destination.parent)
+            compiler.set("meshdir", Path(relative_meshes).as_posix())
+        except ValueError:
+            # Windows cannot form a relative path between different drive letters.
+            compiler.set("meshdir", (asset_root() / "meshes").as_posix())
     destination.write_text(ET.tostring(root, encoding="unicode"), encoding="utf-8")
     return destination

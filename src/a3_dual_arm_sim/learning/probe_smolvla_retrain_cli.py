@@ -13,12 +13,20 @@ from a3_dual_arm_sim.paths import project_root
 from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark, SmolVLAPolicyAdapter
 from a3_dual_arm_sim.workflows.diagnostics import EpisodeDiagnostic
 
-FULL = dict(
-    ema_alpha=0.75, anchor_right_arm=True, gripper_sharpening=True, n_action_steps=8, num_steps=25
-)
-RAW = dict(
-    ema_alpha=0, anchor_right_arm=False, gripper_sharpening=False, n_action_steps=8, num_steps=25
-)
+FULL = {
+    "ema_alpha": 0.75,
+    "anchor_right_arm": True,
+    "gripper_sharpening": True,
+    "n_action_steps": 8,
+    "num_steps": 25,
+}
+RAW = {
+    "ema_alpha": 0,
+    "anchor_right_arm": False,
+    "gripper_sharpening": False,
+    "n_action_steps": 8,
+    "num_steps": 25,
+}
 CONFIGS = {
     "full_fkik": dict(FULL, align_vertical=True, clamp_z=True),
     "full_nofkik": dict(FULL, align_vertical=False, clamp_z=False),
@@ -94,11 +102,11 @@ def main():
         finally:
             if policy is not None:
                 policy.close()
-        summary[name] = dict(
-            successes=sum(r["success"] for r in rows),
-            episodes=len(rows),
-            mean_target=sum(r["cookies_in_target"] for r in rows) / len(rows),
-        )
+        summary[name] = {
+            "successes": sum(r["success"] for r in rows),
+            "episodes": len(rows),
+            "mean_target": sum(r["cookies_in_target"] for r in rows) / len(rows),
+        }
         (args.root / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2), flush=True)
 

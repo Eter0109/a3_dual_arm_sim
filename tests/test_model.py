@@ -19,7 +19,9 @@ from a3_dual_arm_sim.sim.model import (
 
 
 def test_source_assets_exclude_invalid_terminal_meshes() -> None:
-    meshes = {path.name for path in (asset_root() / "meshes").glob("*.STL")}
+    meshes = {
+        path.name for path in (asset_root() / "meshes").iterdir() if path.name.endswith(".STL")
+    }
     assert "L_LAST_S.STL" not in meshes
     assert "R_LAST_S.STL" not in meshes
     assert "base_link.STL" in meshes
@@ -173,3 +175,17 @@ def test_wrist_camera_mount_does_not_rotate_relative_to_flange():
         for position, rotation in poses[1:]:
             np.testing.assert_allclose(position, poses[0][0], atol=1e-10)
             np.testing.assert_allclose(rotation, poses[0][1], atol=1e-10)
+
+
+def test_generated_xml_across_drives_uses_absolute_mesh_path(tmp_path, monkeypatch):
+    from a3_dual_arm_sim.sim import model as model_module
+
+    def cross_drive(*args):
+        raise ValueError("path is on a different drive")
+
+    monkeypatch.setattr(model_module.os.path, "relpath", cross_drive)
+    destination = tmp_path / "cross_drive.xml"
+    write_generated_xml(destination, load_config())
+    compiler = ET.parse(destination).getroot().find("compiler")
+    assert compiler.get("meshdir") == (asset_root() / "meshes").as_posix()
+    assert mujoco.MjModel.from_xml_path(str(destination)).nu == 18

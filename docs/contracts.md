@@ -1,15 +1,43 @@
-# 数据与动作契约
+# 动作与数据契约
 
-本次整理不改变接口、模型几何、奖励、成功标准或归一化算法。
+## 环境接口
 
-- 环境执行 `joint_position` 16 维：`[L1..L7,L_gripper,R1..R7,R_gripper]`。
-- 关节为绝对目标 rad，夹爪为 [0,1] 开度，不是增量或力矩。`cartesian_delta` 为 14 维，通过 IK 转换后执行。
-- recorder 保存动作前观测和环境 `info["applied_action"]`，不是未经限位/限速的模型输出。
-- 原始采集 `observation.state/action` 为16维；三路256×256 RGB：front、left_wrist、right_wrist；另存速度、末端位姿、力反馈、task和episode元数据。
-- 左臂训练转换为前8维状态/动作，模型输出8维；部署补上 reset 时固定的右臂8维目标，形成16维。**不是补零**，零关节目标会移动右臂。
-- 双臂16维模型沿用16维，不追加填充值。维度由检查点契约识别。
-- 归一化/反归一化使用训练对应的 LeRobot processor 和统计；不在工作流重复实现。
-- 图像字段、通道与像素约定、控制频率以数据 metadata 和当前配置为准；相机变更应显式记录配置，不能混同旧数据。
+| 字段 | 形状 / 单位 | 含义 |
+| --- | --- | --- |
+| `joint_position` 动作 | `(16,)` | `[L1..L7,L_gripper,R1..R7,R_gripper]`；关节绝对目标 rad，夹爪 `[0,1]`，0 关闭、1 张开 |
+| `cartesian_delta` 动作 | `(14,)` | 每臂 6 个归一化位姿增量与夹爪指令，所有值位于 `[-1,1]`；经 IK 转为执行目标 |
+| `observation.state` | `(16,)` | 双臂关节位置与夹爪开度 |
+| `observation.velocity` | `(16,)` | 双臂状态变化率 |
+| `observation.eef_pose` | `(14,)` | 每臂位置 3D 与姿态四元数 4D |
+| `observation.force` | `(18,)` | 力反馈，具体排列由环境实现定义 |
+| 三路图像 | `H×W×3 uint8 RGB` | `observation.images.front`、`left_wrist`、`right_wrist` |
 
-任务成功由 tasks 中环境定义。benchmark 的方块分数不是完整成功：需同时满足原任务的源/目标计数、稳定保持及安全条件。
-policy 不拥有成功判定，诊断中的真值不得作为纯视觉 policy 输入。
+关节顺序见 `contracts.LEFT_JOINTS/RIGHT_JOINTS`。非法维度、非有限值及越界笛卡尔指令会被拒绝。绝对关节目标不是增量、速度或力矩；不得把其他动作空间的预测直接送入本项目。
+
+## 数据录制与左臂学习
+
+Recorder 保存动作前观测与环境返回的 `info["applied_action"]`，并保存 task、episode 元数据和是否成功。记录的是实际应用目标，可能已经过 IK、限位和限速，不能等同未经处理的策略预测。
+
+指定 Hub 数据为 LeRobot `v3.0`，100 episodes、42,681 帧、20 FPS；三路 256×256 RGB 以 parquet 图像字段保存。`observation.state` 和 `action` 为 8D 左臂数据，附加速度/力反馈等字段可继续保持原采集维度。具体信息以下载 revision 的 `meta/info.json` 为准。
+
+原始双臂采集的 state/action 为 16D。左臂转换只截取前 8D 并更新统计、features 与 A3 collection summary；不要再次转换指定的 8D Hub 数据。转换目标目录必须是新目录。
+
+部署 8D 模型时截取观测前 8D，预测左臂，再追加 reset 后首次观测中的右臂 8D 保持目标。**右臂不补零**。16D 模型保持完整双臂接口。
+
+## 模型与时序
+
+图像进入 LeRobot 时转换为模型需要的通道布局。状态和动作的归一化、反归一化由检查点 processor 与训练数据统计完成；工作流不实现第二套算法。测试必须指定与检查点对应的训练数据根目录。
+
+`chunk_size` 是一次预测的动作数，`n_action_steps` 是重新推理前消费的动作数，满足 `1 <= n_action_steps <= chunk_size`。20 Hz 下执行 8 个动作对应 0.4 秒；改变控制频率会改变物理执行时长。`num_steps` 是 flow 推理迭代次数，不是训练步数。相机参数、任务文本、控制频率和动作后处理都是部署条件，改变后必须单独记录。
+
+普通权重、训练期 EMA 权重与部署动作平滑是不同概念。公开 LeRobot 0.5.1 的本项目训练流程保存普通权重；既有 EMA 检查点可显式加载。报告必须记录最终解析到的检查点目录。
+
+## 成功与证据
+
+任务成功由环境的 `tasks` 判定，包括当前任务要求的计数、释放、稳定及安全条件。benchmark 的入盒数量分数不能代替完整任务成功。随机 benchmark 与固定布局专家演示的协议不同。
+
+训练 loss、训练数据上的 teacher-forced 误差、短程部署冒烟和完整闭环成功率分别报告。仅保存了检查点或执行了若干控制步，不代表完成装盒任务。
+
+## ACT 执行契约
+
+ACT 与 SmolVLA 共享三相机和 8D 左臂/16D 执行接口。ACT 使用自身检查点的 MEAN_STD processor；默认 chunk_size=50、n_action_steps=8，20 Hz 下执行 0.4 秒后重预测。每个 episode reset 清空队列和时间集成，重新捕获右臂初始保持目标。时间集成只允许 n_action_steps=1。任务文本不参与 ACT 推理。

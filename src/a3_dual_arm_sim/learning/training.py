@@ -12,18 +12,35 @@ from typing import Any
 
 from a3_dual_arm_sim.data.audit import CAMERA_KEYS as CAMERA_KEYS
 from a3_dual_arm_sim.data.audit import audit_training_dataset as audit_training_dataset
-from a3_dual_arm_sim.paths import project_root
 
 
-def default_base_model() -> Path:
-    return (
-        project_root().parent / "vla_ur5e_sim" / "assets" / "policy" / "base" / "pretrained_model"
-    )
+def default_base_model() -> str:
+    return "lerobot/smolvla_base"
+
+
+def resolve_base_model(
+    model: str | Path, *, revision: str | None = None, offline: bool = False
+) -> Path:
+    """Accept a local checkpoint or download an explicitly selected Hub revision."""
+    local = Path(model).expanduser()
+    if local.is_dir():
+        return local.resolve()
+    if isinstance(model, Path) or str(model).startswith(("/", ".", "~")):
+        raise FileNotFoundError(f"Missing local base model: {model}")
+    from huggingface_hub import snapshot_download
+
+    kwargs = {"repo_id": str(model), "revision": revision}
+    if offline:
+        kwargs["local_files_only"] = True
+    return Path(snapshot_download(**kwargs)).resolve()
 
 
 def _local_hub_snapshot(repo_id: str) -> Path | None:
     cache_root = Path(
-        os.environ.get("HF_HUB_CACHE", Path.home() / ".cache" / "huggingface" / "hub")
+        os.environ.get(
+            "HF_HUB_CACHE",
+            Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub",
+        )
     )
     repository = cache_root / f"models--{repo_id.replace('/', '--')}"
     main_ref = repository / "refs" / "main"
@@ -72,10 +89,13 @@ def prepare_a3_smolvla_source(
     config["output_features"] = {"action": {"type": "ACTION", "shape": [action_dim]}}
     config["device"] = device
     config["use_amp"] = device == "cuda"
+    # The policy checkpoint restores the complete VLM and expert state.
+    # Construct the VLM from config instead of downloading/loading its weights twice.
+    config["load_vlm_weights"] = False
     config["push_to_hub"] = False
     config["repo_id"] = None
 
-    # Tuned hyperparameters for expert distillation (Pillar 2)
+    # Training schedule for A3 expert demonstrations
     config["optimizer_lr"] = lr
     config["scheduler_decay_lr"] = decay_lr
     config["scheduler_warmup_steps"] = warmup_steps
@@ -83,7 +103,14 @@ def prepare_a3_smolvla_source(
     config["num_steps"] = num_steps
 
     vlm_model_name = config.get("vlm_model_name")
+    dependencies = base_model / "a3_dependencies.json"
     cached_vlm = _local_hub_snapshot(vlm_model_name) if vlm_model_name else None
+    if dependencies.is_file():
+        dependency = json.loads(dependencies.read_text())
+        pinned = Path(dependency["root"])
+        if dependency["repo_id"] != vlm_model_name or not (pinned / "config.json").is_file():
+            raise ValueError("Downloaded VLM dependency is unavailable; rerun download-smolvla")
+        cached_vlm = pinned
     if cached_vlm is not None:
         config["vlm_model_name"] = str(cached_vlm)
 
@@ -129,7 +156,7 @@ def build_train_command(
     batch_size: int,
     seed: int,
     num_workers: int = 2,
-    use_ema: bool = True,
+    use_ema: bool = False,
     ema_decay: float = 0.99,
     save_freq: int = 2000,
 ) -> list[str]:
@@ -149,15 +176,16 @@ def build_train_command(
         f"--num_workers={num_workers}",
         f"--batch_size={batch_size}",
         f"--steps={steps}",
-        "--env_eval_freq=0",
-        "--eval_steps=0",
-        "--log_freq=20",
+        "--eval_freq=0",
+        f"--log_freq={min(20, steps)}",
         "--save_checkpoint=true",
         f"--save_freq={save_freq}",
         "--wandb.enable=false",
     ]
     if use_ema:
-        cmd.extend(["--ema.enable=true", f"--ema.decay={ema_decay}"])
+        raise ValueError(
+            "Public LeRobot 0.5.1 does not support EMA training; use_ema must be False"
+        )
     return cmd
 
 
@@ -165,7 +193,7 @@ def train_smolvla(
     *,
     dataset_root: Path,
     repo_id: str,
-    base_model: Path,
+    base_model: str | Path,
     output_dir: Path,
     steps: int = 10000,
     batch_size: int = 16,
@@ -176,23 +204,30 @@ def train_smolvla(
     warmup_steps: int = 500,
     save_freq: int = 2000,
     num_workers: int = 2,
-    use_ema: bool = True,
+    use_ema: bool = False,
     ema_decay: float = 0.99,
     dry_run: bool = False,
+    model_revision: str | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
+    if steps <= 0 or batch_size <= 0 or save_freq <= 0 or num_workers < 0:
+        raise ValueError(
+            "steps, batch_size, save_freq must be positive and num_workers non-negative"
+        )
     audit = audit_training_dataset(dataset_root, repo_id=repo_id)
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'")
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists():
         raise FileExistsError(f"Training output already exists: {output_dir}")
+    base_model = resolve_base_model(base_model, revision=model_revision, offline=offline)
     policy_source = prepare_a3_smolvla_source(
         base_model,
-        output_dir.parent / ".a3_smolvla_source",
+        output_dir.parent / f".{output_dir.name}_a3_smolvla_source",
         device=device,
         lr=lr,
         decay_lr=decay_lr,
-        warmup_steps=warmup_steps,
+        warmup_steps=min(warmup_steps, max(1, steps - 1)),
         decay_steps=steps,
         action_dim=audit["action_dim"],
     )
@@ -214,12 +249,19 @@ def train_smolvla(
         return result
 
     env = os.environ.copy()
-    env.update(
-        {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false"}
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    if offline:
+        env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    (output_dir.parent / f"{output_dir.name}_launch.json").write_text(
+        json.dumps({**result, "base_model": str(base_model), "weights": "ordinary"}, indent=2)
+        + "\n"
     )
     subprocess.run(command, check=True, env=env)
     checkpoints = sorted((output_dir / "checkpoints").glob("*/pretrained_model/config.json"))
     if not checkpoints:
         raise RuntimeError("LeRobot exited without writing a final SmolVLA checkpoint")
-    result["checkpoint"] = str(checkpoints[-1].parent)
+    numbered = [p for p in checkpoints if p.parent.parent.name.isdigit()]
+    latest = max(numbered, key=lambda p: int(p.parent.parent.name)) if numbered else checkpoints[-1]
+    result["checkpoint"] = str(latest.parent)
     return result

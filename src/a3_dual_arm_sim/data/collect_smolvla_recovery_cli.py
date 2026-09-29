@@ -43,13 +43,13 @@ def main():
         result = runner.run(seed=args.seed, max_steps=1000)
         (args.root / "takeover.json").write_text(
             json.dumps(
-                dict(
-                    result=asdict(result),
-                    events=policy.events,
-                    initial_controller="model",
-                    review_required=True,
-                    training_eligible=False,
-                ),
+                {
+                    "result": asdict(result),
+                    "events": policy.events,
+                    "initial_controller": "model",
+                    "review_required": True,
+                    "training_eligible": False,
+                },
                 indent=2,
             )
         )

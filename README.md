@@ -1,58 +1,49 @@
-# A3 Dual-Arm MuJoCo Sandbox
+# A3 双臂 MuJoCo 仿真
 
-A3 双臂仿真、专家与遥操作、LeRobot v3 采集和 SmolVLA 训练/部署。
-源码按职责分包，包路径即导入路径，不再保留顶层兼容别名。
+A3 机器人双臂仿真项目，提供规则专家、键盘遥操作、可替换策略接口、LeRobot v3 数据录制，以及 SmolVLA 微调、ACT 训练和闭环评估。机器人每臂 7 个关节和一个夹爪控制量；单盒装盒任务将源盒中的 10 块饼干转移至目标盒。
 
-## 快速开始
+规则专家读取仿真位置与接触真值；SmolVLA 使用相机、关节状态和任务文本；ACT 使用相机和关节状态。仿真几何、动力学、相机及夹爪参数是功能性默认值，未完成真实硬件标定。本项目不承诺模型的任务成功率或真实机器人部署效果。
 
-在项目根目录执行：
+## 安装与快速运行
+
+推荐 Linux、Python 3.12；本次实际验证环境见 [发布检查](docs/release_checklist.md)。在仓库根目录执行：
 
 ```bash
-pip install -e '.[dev]'
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev]'
 a3-sim --help
-env -u MUJOCO_GL python examples/run_cookie_batch.py --expert same_column --render
-MUJOCO_GL=egl python examples/benchmark_cookie_batch.py --policy same_column --episodes 1 --seed-start 1000
+a3-sim inspect
+MUJOCO_GL=egl a3-sim smoke --steps 20
 ```
 
-训练和数据功能按需安装 `pip install -e '.[train]'`。窗口模式取消 `MUJOCO_GL`，无头使用 `MUJOCO_GL=egl`。
-专家读取仿真真值，不是视觉模型；模型缺少真实电机、摩擦、零位、夹爪及相机标定，不能视为已校准数字孪生。
-
-## SmolVLA 全流程（采集 → 训练 → benchmark）
+图形窗口需要桌面显示服务；无头相机渲染使用 EGL 和支持该后端的驱动：
 
 ```bash
-# 1. 采集 16 维演示（遥操作或任意策略，走同一个 recorder）
-MUJOCO_GL=egl a3-sim teleop --scene cookie_transfer \
-  --record datasets/<new16> --repo-id local/<new16>
-MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
-  --policy a3_dual_arm_sim.policies.base:make_hold_policy \
-  --record datasets/<new16> --steps 3
-
-# 2. 转成左臂 8 维契约（目标目录必须不存在）
-python examples/prepare_left_arm_dataset.py --source datasets/<new16> --output datasets/<new8>
-
-# 3. 训练
-python -m a3_dual_arm_sim.cli train-smolvla \
-  --root datasets/a3_front_close_left_100 --repo-id local/a3-front-close-left-100 \
-  --output outputs/<run>/model --steps 20000 --batch-size 64 --lr 0.00005 --device cuda
-
-# 4. benchmark（部署时必须用 --dataset-root 传入对应训练数据）
-MUJOCO_GL=egl HF_HUB_OFFLINE=1 python examples/benchmark_cookie_batch.py \
-  --policy smolvla:outputs/smolvla_front_close_left_20k/model/checkpoints/020000/pretrained_model \
-  --dataset-root datasets/a3_front_close_left_100 \
-  --episodes 20 --seed-start 1000 --n-action-steps 8 --workers 1 \
-  --output outputs/smolvla_front_close_left_20k/dev20.json
+env -u MUJOCO_GL python examples/run_cookie_batch.py --expert same_column --render
+MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
+  --policy same_column --episodes 1 --seed-start 1000 --workers 1 \
+  --max-steps 6000 --output outputs/expert/result.json
 ```
 
-本仓库当前只保留这一条流程所需的产物：`datasets/a3_front_close_left_100`（100 episodes，8 维左臂）
-与 `outputs/smolvla_front_close_left_20k`（002000–020000 普通/EMA 权重）。8 维 checkpoint 部署时补上
-reset 时固定的右臂 8 维目标，形成 16 维执行接口。SmolVLA 基座模型在兄弟仓库
-`vla_ur5e_sim/assets/policy/base/pretrained_model`，不在本仓库内。
+训练和数据功能按需安装 `python -m pip install -e '.[train]'`。默认基座为
+[`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base)，数据为
+[`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)。
+仓库不附带数据、模型权重或训练结果；首次使用需要下载。完整命令见训练手册。
 
-## 文档
+## 文档导航
 
-- [架构与维护入口](docs/architecture.md)：修改某项功能应该去哪。
-- [完整操作手册](docs/operations.md)：采集、训练、评估、可视化与遥操作命令。
-- [数据与动作契约](docs/contracts.md)：16 维执行、8 维左臂训练、相机与录制时序。
-- [入口索引与管理](docs/experiments.md)：正式入口与新增实验规范。
+- [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
+- [操作手册](docs/operations.md)：场景、专家、遥操作、相机、采集和回放。
+- [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
+- [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
+- [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
+- [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
+- [发布检查与限制](docs/release_checklist.md)：验证记录与待解决的发布阻碍。
 
-数据放 `datasets/`，模型、日志和报告放独立 `outputs/` 子目录；不要放入源码或提交大型产物。
+## 资源与许可
+
+源码包和 wheel 附带仿真配置、URDF 与必要网格，不需要其他项目目录。
+数据、下载模型与输出分别放在 `datasets/`、`models/smolvla_base/`、`outputs/`，这些目录中的大型产物不提交 Git。
+机器人资源来源与第三方声明见 [PROVENANCE](assets/a3/PROVENANCE.md)。源码及 A3 原始资源的再分发授权尚需维护者确认；当前整理不代表已解决公开发布许可。

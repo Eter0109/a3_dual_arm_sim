@@ -32,7 +32,7 @@ def best(directory):
     for name, settings in variants.items():
         rows = [json.loads(p.read_text()) for p in sorted((directory / name).glob("seed_*.json"))]
         ranked.append((rank(rows, settings), name, settings))
-    return sorted(ranked, key=lambda x: (x[0], x[1]))[0][2]
+    return min(ranked, key=lambda x: (x[0], x[1]))[2]
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
     root = project_root()
     output = args.root.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, MUJOCO_GL="egl", HF_HUB_OFFLINE="1")
+    env = dict(os.environ, MUJOCO_GL="egl")
 
     def run(stage, candidate=None):
         command = [
@@ -79,12 +79,12 @@ def main():
     (output / "selected_candidate.json").write_text(json.dumps(candidate, indent=2))
     (output / "gate.json").write_text(
         json.dumps(
-            dict(
-                development=summary,
-                stage_three_required=summary["successes"] < 16,
-                acceptance_started=False,
-                candidate=candidate,
-            ),
+            {
+                "development": summary,
+                "stage_three_required": summary["successes"] < 16,
+                "acceptance_started": False,
+                "candidate": candidate,
+            },
             indent=2,
         )
     )

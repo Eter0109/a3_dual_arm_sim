@@ -53,21 +53,23 @@ def test_left_only_ignores_right_state_and_holds_initial_right():
     p._action_dim = 8
     p._right_hold = None
     seen = []
+
     def select(batch):
-        seen.append(np.asarray(batch['observation.state']).copy())
+        seen.append(np.asarray(batch["observation.state"]).copy())
         return torch.ones((1, 8)) * 0.3
+
     p._policy.select_action = select
     state = np.arange(16, dtype=float)
-    first = p.act({'observation.state': state}, 'task')
+    first = p.act({"observation.state": state}, "task")
     changed = state.copy()
     changed[8:] += 50
-    second = p.act({'observation.state': changed}, 'task')
+    second = p.act({"observation.state": changed}, "task")
     assert np.array_equal(seen[0], state[:8])
     assert np.array_equal(seen[0], seen[1])
     assert np.array_equal(first, second)
     assert np.array_equal(first[8:], state[8:])
     assert np.array_equal(state, np.arange(16))
-    p.reset(EpisodeContext(seed=1, task='task', action_mode='joint_position'))
+    p.reset(EpisodeContext(seed=1, task="task", action_mode="joint_position"))
     assert p._right_hold is None
 
 
@@ -139,3 +141,14 @@ def test_manual_takeover_marks_boundaries_and_keeps_action_interfaces():
     p.handle_key(ord("T"))
     assert p.act(obs, "task").shape == (16,)
     assert p.events == [{"step": 1, "controller": "human"}, {"step": 2, "controller": "model"}]
+
+
+def test_left_only_offline_prediction_accepts_dataset_state():
+    p = plugin()
+    p._action_dim = 8
+    p._policy = SimpleNamespace(select_action=lambda batch: torch.ones((1, 8)) * 0.3)
+    result = p.predict_action({"observation.state": np.zeros(8)}, "task")
+    assert result.shape == (8,)
+    assert np.allclose(result, 0.3)
+    with pytest.raises(ValueError, match="environment's 16-D"):
+        p.act({"observation.state": np.zeros(8)}, "task")

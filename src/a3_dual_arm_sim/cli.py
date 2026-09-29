@@ -102,12 +102,31 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--max-attempts", type=int, default=None)
     collect.set_defaults(function=_collect_grasp)
 
+    from a3_dual_arm_sim.learning.download import main as download_main
+
+    download = commands.add_parser("download-smolvla", help="Download A3 data, base model and VLM")
+    download.add_argument(
+        "--dataset-root", type=Path, default=Path("datasets/a3_front_close_left_100")
+    )
+    download.add_argument("--model-root", type=Path, default=Path("models/smolvla_base"))
+    download.add_argument("--manifest", type=Path, default=Path("outputs/download_manifest.json"))
+    download.add_argument("--dataset-revision", default="main")
+    download.add_argument("--model-revision", default="main")
+    download.add_argument("--vlm-revision", default="main")
+    download.set_defaults(function=download_main)
+
     train = commands.add_parser(
         "train-smolvla", help="Fine-tune SmolVLA on a validated A3 grasp dataset"
     )
     train.add_argument("--root", type=Path, required=True, help="LeRobot v3 dataset root")
-    train.add_argument("--repo-id", default="local/a3-grasp")
-    train.add_argument("--model", type=Path, default=default_base_model())
+    train.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
+    train.add_argument(
+        "--model", default=default_base_model(), help="Hub repo ID or local checkpoint"
+    )
+    train.add_argument("--model-revision", default=None)
+    train.add_argument("--offline", action="store_true")
+    train.add_argument("--save-freq", type=int, default=2000)
+    train.add_argument("--num-workers", type=int, default=2)
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--steps", type=int, default=10_000)
     train.add_argument("--batch-size", type=int, default=16)
@@ -116,6 +135,25 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     train.add_argument("--dry-run", action="store_true")
     train.set_defaults(function=_train_smolvla)
+    from a3_dual_arm_sim.learning.act_training import main as act_main
+
+    act = commands.add_parser("train-act", help="Train ACT on a validated A3 dataset")
+    act.add_argument("--root", type=Path, required=True)
+    act.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
+    act.add_argument("--output", type=Path, required=True)
+    act.add_argument("--steps", type=int, default=20_000)
+    act.add_argument("--batch-size", type=int, default=8)
+    act.add_argument("--seed", type=int, default=1000)
+    act.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    act.add_argument("--lr", type=float, default=1e-5)
+    act.add_argument("--chunk-size", type=int, default=50)
+    act.add_argument("--n-action-steps", type=int, default=8)
+    act.add_argument("--temporal-ensemble-coeff", type=float, default=None)
+    act.add_argument("--save-freq", type=int, default=2000)
+    act.add_argument("--num-workers", type=int, default=2)
+    act.add_argument("--pretrained-backbone", action=argparse.BooleanOptionalAction, default=True)
+    act.add_argument("--dry-run", action="store_true")
+    act.set_defaults(function=act_main)
     return root
 
 

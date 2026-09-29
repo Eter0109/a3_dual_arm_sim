@@ -92,7 +92,7 @@ def main():
             subprocess.run(
                 command,
                 cwd=project,
-                env=dict(os.environ, HF_HUB_OFFLINE="1", MUJOCO_GL="egl"),
+                env=dict(os.environ, MUJOCO_GL="egl"),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 check=True,

@@ -1,0 +1,6 @@
+recursive-include assets *.STL *.stl *.urdf *.md *.txt
+recursive-include configs *.yaml
+recursive-include docs *.md
+include setup.py
+recursive-include examples *.py
+recursive-include tests *.py

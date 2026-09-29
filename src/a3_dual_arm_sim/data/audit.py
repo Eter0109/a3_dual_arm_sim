@@ -12,7 +12,7 @@ CAMERA_KEYS = (
 
 
 def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
-    """Fail fast on the parts of the LeRobot v3 contract used by SmolVLA."""
+    """Fail fast on the parts of the LeRobot v3 contract used by A3 learned policies."""
     root = root.expanduser().resolve()
     info_path = root / "meta" / "info.json"
     metadata_path = root / "a3_episode_metadata.jsonl"
@@ -37,9 +37,9 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
         collection_summary.get("task") == "cookie_transfer"
         and collection_summary.get("stored_action_mode") != "joint_position"
     ):
-        raise ValueError("Cookie SmolVLA datasets require joint_position actions")
+        raise ValueError("Cookie training datasets require joint_position actions")
     if info.get("codebase_version") != "v3.0":
-        raise ValueError("SmolVLA training requires a LeRobot v3.0 dataset")
+        raise ValueError("A3 policy training requires a LeRobot v3.0 dataset")
     features = info.get("features", {})
     arm_mode = collection_summary.get("training_arm_mode", "dual")
     if arm_mode not in {"dual", "left"}:

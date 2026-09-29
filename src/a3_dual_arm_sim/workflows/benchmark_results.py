@@ -10,9 +10,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.paths import resource_root
 
-DEFAULT_CONFIG_PATH = project_root() / "configs" / "cookie_batch.yaml"
+DEFAULT_CONFIG_PATH = resource_root() / "configs" / "cookie_batch.yaml"
 
 
 @dataclass
@@ -79,7 +79,7 @@ class BenchmarkResult:
             f"Total Score         : {self.total_score} / {self.max_possible_score} ({self.total_score / self.max_possible_score * 100:.1f}%)",
             f"Mean Score / Ep     : {self.mean_score:.2f} / 10.00",
             f"Min / Max Score     : {self.min_score} / {self.max_score}",
-            f"Success Rate (10/10): {self.success_rate * 100:.1f}%",
+            f"Complete Task Success: {self.success_rate * 100:.1f}%",
             f"Mean Steps / Ep     : {self.mean_steps:.1f}",
             f"Mean Wall Time / Ep : {self.mean_wall_seconds:.2f}s",
             f"Score Distribution  : {dict(sorted(self.score_distribution.items(), reverse=True))}",

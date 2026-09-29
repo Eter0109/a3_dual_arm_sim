@@ -451,7 +451,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                             )
                         ]
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - viewer HUD is best effort
                     pass
 
             # 窗口标题栏同步显示当前最大值与峰值
@@ -461,7 +461,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
             try:
                 self._viewer.title = title_text
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - viewer HUD is best effort
                 pass
 
             window = getattr(self._viewer, "_window", None)
@@ -470,9 +470,9 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                     import glfw
 
                     glfw.set_window_title(window, title_text)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - viewer HUD is best effort
                     pass
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - viewer HUD is best effort
             pass
 
     def render(self) -> np.ndarray | None:

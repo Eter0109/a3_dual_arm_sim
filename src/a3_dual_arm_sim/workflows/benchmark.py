@@ -21,6 +21,7 @@ from .benchmark_results import BenchmarkResult as BenchmarkResult
 from .benchmark_results import EpisodeScore as EpisodeScore
 from .episode_execution import DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH
 from .episode_execution import EpisodeExecution as EpisodeExecution
+from .policy_adapters import ACTPolicyAdapter as ACTPolicyAdapter
 from .policy_adapters import BenchmarkPolicy as BenchmarkPolicy
 from .policy_adapters import ExpertPolicyAdapter as ExpertPolicyAdapter
 from .policy_adapters import SmolVLAPolicyAdapter as SmolVLAPolicyAdapter

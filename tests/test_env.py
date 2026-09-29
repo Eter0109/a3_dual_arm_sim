@@ -85,7 +85,9 @@ def test_cartesian_adapter_changes_selected_arm_and_stays_finite() -> None:
         env.close()
 
 
-@pytest.mark.parametrize(("side", "object_index", "force_slice"), [("L", 0, slice(12, 14)), ("R", 1, slice(14, 16))])
+@pytest.mark.parametrize(
+    ("side", "object_index", "force_slice"), [("L", 0, slice(12, 14)), ("R", 1, slice(14, 16))]
+)
 def test_each_gripper_reports_touch_and_actuator_force(
     side: str, object_index: int, force_slice: slice
 ) -> None:

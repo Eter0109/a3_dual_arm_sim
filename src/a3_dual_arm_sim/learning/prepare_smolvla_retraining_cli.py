@@ -46,12 +46,12 @@ def main():
     merged = merge_datasets(datasets, "local/a3-improvement-200", args.output / "dataset")
     train = list(range(80)) + list(range(100, 200))
     validation = list(range(80, 100))
-    split = dict(
-        train_episodes=train,
-        validation_episodes=validation,
-        original_train=list(range(80)),
-        original_validation=validation,
-    )
+    split = {
+        "train_episodes": train,
+        "validation_episodes": validation,
+        "original_train": list(range(80)),
+        "original_validation": validation,
+    }
     (args.output / "split.json").write_text(json.dumps(split, indent=2))
     per_episode = []
     for p in (merged.root / "meta/episodes").rglob("*.parquet"):
@@ -96,7 +96,7 @@ def main():
         "--dataset.image_transforms.enable=true",
     ]
     (args.output / "train_command.json").write_text(json.dumps(command, indent=2))
-    print(json.dumps(dict(split=split, command=command), indent=2))
+    print(json.dumps({"split": split, "command": command}, indent=2))
 
 
 if __name__ == "__main__":

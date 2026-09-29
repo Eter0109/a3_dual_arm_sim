@@ -116,7 +116,15 @@ class CartesianDeltaAdapter:
             limits = self._ranges[arm_index]
             rot_weight = 0.12 if has_rot else 0.03
 
-            def residual(qpos: np.ndarray) -> np.ndarray:
+            def residual(
+                qpos: np.ndarray,
+                qids=qids,
+                site_id=site_id,
+                target_quaternion=target_quaternion,
+                target_position=target_position,
+                initial_q=initial_q,
+                rot_weight=rot_weight,
+            ) -> np.ndarray:
                 work.qpos[qids] = qpos
                 mujoco.mj_kinematics(self.model, work)
                 current_quaternion = np.empty(4, dtype=np.float64)

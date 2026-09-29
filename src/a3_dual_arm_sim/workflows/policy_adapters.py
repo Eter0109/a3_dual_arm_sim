@@ -17,10 +17,10 @@ import numpy as np
 from a3_dual_arm_sim.contracts import ActionMode, EpisodeContext
 from a3_dual_arm_sim.controllers.batch_expert import A3CookieBatchExpert
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3SameColumnBatchExpert
-from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.paths import resource_root
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
 
-DEFAULT_CONFIG_PATH = project_root() / "configs" / "cookie_batch.yaml"
+DEFAULT_CONFIG_PATH = resource_root() / "configs" / "cookie_batch.yaml"
 
 
 @runtime_checkable
@@ -72,10 +72,18 @@ class ExpertPolicyAdapter:
         return phase.name if phase is not None else ""
 
 
-def resolve_smolvla_checkpoint(checkpoint: str | Path) -> Path:
+def resolve_policy_checkpoint(checkpoint: str | Path) -> Path:
     path = Path(checkpoint).expanduser().resolve()
     if (path / "checkpoints").is_dir():
-        numbered = [p for p in (path / "checkpoints").iterdir() if p.name.isdigit()]
+        numbered = [
+            p
+            for p in (path / "checkpoints").iterdir()
+            if p.name.isdigit()
+            and any(
+                (p / name / "config.json").is_file()
+                for name in ("pretrained_model", "pretrained_model_ema")
+            )
+        ]
         if numbered:
             path = max(numbered, key=lambda p: int(p.name))
         else:
@@ -83,34 +91,16 @@ def resolve_smolvla_checkpoint(checkpoint: str | Path) -> Path:
         ema = path / "pretrained_model_ema"
         path = ema if (ema / "config.json").is_file() else path / "pretrained_model"
     if not (path / "config.json").is_file():
-        raise FileNotFoundError(f"Missing SmolVLA checkpoint config: {path}")
+        raise FileNotFoundError(f"Missing policy checkpoint config: {path}")
     return path.resolve()
 
 
-class SmolVLAPolicyAdapter:
-    """Adapts a trained SmolVLA checkpoint to the standard BenchmarkPolicy interface."""
+# Backward-compatible public name.
+resolve_smolvla_checkpoint = resolve_policy_checkpoint
 
-    def __init__(
-        self,
-        checkpoint: str | Path,
-        dataset_root: str | Path = Path("datasets/a3_front_close_left_100"),
-        repo_id: str = "local/a3-front-close-left-100",
-        device: str | None = None,
-        name: str = "smolvla",
-        **kwargs: Any,
-    ):
-        import torch
 
-        from a3_dual_arm_sim.policies.smolvla import SmolVLAPolicyPlugin
-
-        checkpoint_path = resolve_smolvla_checkpoint(checkpoint)
-
-        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.plugin = SmolVLAPolicyPlugin(
-            checkpoint_path, Path(dataset_root), repo_id, dev, **kwargs
-        )
-        self.name = name
-        self.action_mode: ActionMode = "joint_position"
+class LearnedPolicyAdapter:
+    """Shared benchmark delegation for independently implemented learned policies."""
 
     def reset(self, context: EpisodeContext | None = None) -> None:
         self.plugin.reset(
@@ -131,6 +121,59 @@ class SmolVLAPolicyAdapter:
 
     def close(self) -> None:
         self.plugin.close()
+
+
+class SmolVLAPolicyAdapter(LearnedPolicyAdapter):
+    """Adapts a trained SmolVLA checkpoint to the standard BenchmarkPolicy interface."""
+
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        dataset_root: str | Path = Path("datasets/a3_front_close_left_100"),
+        repo_id: str = "Eter0109/a3-front-close-left-100",
+        device: str | None = None,
+        name: str = "smolvla",
+        **kwargs: Any,
+    ):
+        import torch
+
+        from a3_dual_arm_sim.policies.smolvla import SmolVLAPolicyPlugin
+
+        checkpoint_path = resolve_smolvla_checkpoint(checkpoint)
+
+        dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.plugin = SmolVLAPolicyPlugin(
+            checkpoint_path, Path(dataset_root), repo_id, dev, **kwargs
+        )
+        self.name = name
+        self.action_mode: ActionMode = "joint_position"
+
+
+class ACTPolicyAdapter(LearnedPolicyAdapter):
+    """Reuse only benchmark delegation; ACT owns its inference implementation."""
+
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        dataset_root: str | Path = Path("datasets/a3_front_close_left_100"),
+        repo_id: str = "Eter0109/a3-front-close-left-100",
+        device: str | None = None,
+        name: str = "act",
+        **kwargs: Any,
+    ):
+        import torch
+
+        from a3_dual_arm_sim.policies.act import ACTPolicyPlugin
+
+        self.plugin = ACTPolicyPlugin(
+            resolve_policy_checkpoint(checkpoint),
+            Path(dataset_root),
+            repo_id,
+            device or ("cuda" if torch.cuda.is_available() else "cpu"),
+            **kwargs,
+        )
+        self.name = name
+        self.action_mode: ActionMode = "joint_position"
 
 
 def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = None) -> Any:
@@ -154,6 +197,8 @@ def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = N
             elif Path(policy_or_spec).exists():
                 ckpt = Path(policy_or_spec)
             return SmolVLAPolicyAdapter(ckpt)
+        if spec.startswith("act:"):
+            return ACTPolicyAdapter(policy_or_spec.split(":", 1)[1])
         # Handle module:factory policy spec
         if ":" in policy_or_spec:
             mod_name, func_name = policy_or_spec.rsplit(":", 1)

@@ -303,6 +303,10 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         device=args.device,
         lr=getattr(args, "lr", 5e-5),
         dry_run=args.dry_run,
+        model_revision=args.model_revision,
+        offline=args.offline,
+        save_freq=args.save_freq,
+        num_workers=args.num_workers,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

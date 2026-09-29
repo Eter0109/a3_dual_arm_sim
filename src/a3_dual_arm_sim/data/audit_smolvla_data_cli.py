@@ -10,13 +10,19 @@ import pyarrow.parquet as pq
 from PIL import Image
 from safetensors.numpy import load_file
 
+from a3_dual_arm_sim.data.audit import audit_training_dataset
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    contract = audit_training_dataset(args.root, repo_id=args.repo_id)
+    info = json.loads((args.root / "meta/info.json").read_text())
+    fps = info["fps"]
     samples = {}
     frames = 0
     for path in sorted((args.root / "data").rglob("*.parquet")):
@@ -24,7 +30,8 @@ def main():
         for row in table.to_pylist():
             frames += 1
             for key in ("action", "observation.state"):
-                assert len(row[key]) == 16 and np.isfinite(row[key]).all()
+                if len(row[key]) != contract["action_dim"] or not np.isfinite(row[key]).all():
+                    raise ValueError(f"Invalid {key} in episode {row['episode_index']}")
             ep = row["episode_index"]
             if ep not in samples:
                 samples[ep] = {"frames": 0, "images": {}}
@@ -36,25 +43,39 @@ def main():
                         else Image.open(args.root / encoded["path"])
                     )
                     a = np.asarray(image)
-                    assert a.shape == (256, 256, 3) and a.dtype == np.uint8
+                    if a.shape != (256, 256, 3) or a.dtype != np.uint8:
+                        raise ValueError(f"Invalid camera {camera} in episode {ep}")
                     samples[ep]["images"][camera] = {
                         "min": int(a.min()),
                         "max": int(a.max()),
                         "std": float(a.std()),
                     }
-            assert row["frame_index"] == samples[ep]["frames"]
-            assert abs(row["timestamp"] - row["frame_index"] / 20) < 1e-4
+            if row["frame_index"] != samples[ep]["frames"]:
+                raise ValueError(f"Non-contiguous frames in episode {ep}")
+            if abs(row["timestamp"] - row["frame_index"] / fps) >= 1e-4:
+                raise ValueError(f"Timestamp mismatch in episode {ep}")
             samples[ep]["frames"] += 1
     stats = json.loads((args.root / "meta/stats.json").read_text())
     matches = {}
-    for path in args.checkpoint.glob("*processor*.safetensors"):
+    for key in ("action", "observation.state"):
+        for stat in ("mean", "std"):
+            values = np.asarray(stats[key][stat])
+            if values.shape != (contract["action_dim"],) or not np.isfinite(values).all():
+                raise ValueError(f"Invalid statistics: {key}.{stat}")
+    if frames != contract["frames"] or len(samples) != contract["episodes"]:
+        raise ValueError("Parquet frame/episode counts differ from metadata")
+    for path in args.checkpoint.glob("*processor*.safetensors") if args.checkpoint else []:
         values = load_file(path)
         matches[path.name] = all(
             np.allclose(values[f"{key}.{stat}"], stats[key][stat])
             for key in ("action", "observation.state")
             for stat in ("mean", "std")
         )
+    if matches and not all(matches.values()):
+        raise ValueError("Checkpoint processor statistics differ from dataset")
     report = {
+        "contract": contract,
+        "fps": fps,
         "frames": frames,
         "episodes": len(samples),
         "sampled_images": samples,

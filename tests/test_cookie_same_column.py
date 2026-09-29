@@ -39,9 +39,7 @@ def test_batch_thin_pad_is_left_only_and_configurable():
 
     default_config = replace(
         config,
-        cookie_transfer=replace(
-            config.cookie_transfer, left_finger_pad_half_thickness_m=0.003175
-        ),
+        cookie_transfer=replace(config.cookie_transfer, left_finger_pad_half_thickness_m=0.003175),
     )
     default_model = build_model(default_config, scene="cookie_transfer").model
     assert default_model.geom("L_finger_inner_geom").size[1] == pytest.approx(0.003175)
@@ -51,7 +49,8 @@ def test_next_batch_stays_in_same_column_despite_tilt():
     source = load_config(CONFIG).cookie_transfer.cookie_source_positions_m
     expert = object.__new__(A3SameColumnBatchExpert)
     expert.env = SimpleNamespace(
-        SOURCE_POSITIONS=source, _cookie_bodies=tuple(range(80)),
+        SOURCE_POSITIONS=source,
+        _cookie_bodies=tuple(range(80)),
         privileged_cookie_in_source=lambda i: True,
     )
     expert.data = SimpleNamespace(xmat=np.tile(np.eye(3).ravel(), (80, 1)))
@@ -100,9 +99,10 @@ def test_batch_rejects_unreachable_table_box_before_grasping():
 
     config = load_config(CONFIG)
     config = replace(
-        config, cookie_transfer=replace(
+        config,
+        cookie_transfer=replace(
             config.cookie_transfer, target_bin_world_position_m=(0.135, -0.015, 0.753)
-        )
+        ),
     )
     env = A3CookieTransferEnv(config, render_cameras=False)
     try:
@@ -172,7 +172,8 @@ def test_grasp_requires_whole_five_cookie_contact_chain(monkeypatch, missing):
 def test_contact_chain_includes_bevel_cap_contacts(monkeypatch):
     expert = object.__new__(A3SameColumnBatchExpert)
     expert.env = SimpleNamespace(
-        _left_finger_geoms=(0, 6), _cookie_geoms=(1, 2, 3, 4, 5),
+        _left_finger_geoms=(0, 6),
+        _cookie_geoms=(1, 2, 3, 4, 5),
         _cookie_collision_geoms=tuple(frozenset((i, i + 6)) for i in range(1, 6)),
     )
     expert.batch_indices, expert.model, expert.max_pad_force = list(range(5)), None, 0.0
@@ -220,9 +221,12 @@ def test_batch_success_rejects_held_or_overhanging_cookie(monkeypatch):
 
 def test_released_count_success_requires_ten_and_resets_when_one_leaves():
     env = A3CookieTransferEnv(
-        CONFIG, render_cameras=False,
+        CONFIG,
+        render_cameras=False,
         task_config=CookieTransferTaskConfig(
-            require_exact_slots=False, require_released=True, terminate_on_success=False,
+            require_exact_slots=False,
+            require_released=True,
+            terminate_on_success=False,
             success_hold_steps=2,
         ),
     )

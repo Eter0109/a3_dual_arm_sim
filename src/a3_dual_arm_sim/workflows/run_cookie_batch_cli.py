@@ -12,6 +12,7 @@ from pathlib import Path
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.controllers.batch_expert import A3CookieBatchExpert
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3SameColumnBatchExpert
+from a3_dual_arm_sim.paths import resource_root
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 
@@ -23,7 +24,9 @@ def main():
         default="same_column",
         help="Batch expert strategy: 'same_column' (0-4 then 5-9, default) or 'cross_column' (0-4 then 20-24)",
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/cookie_batch.yaml"))
+    parser.add_argument(
+        "--config", type=Path, default=resource_root() / "configs/cookie_batch.yaml"
+    )
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=6000)

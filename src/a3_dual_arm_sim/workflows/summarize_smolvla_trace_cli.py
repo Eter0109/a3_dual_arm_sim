@@ -29,19 +29,24 @@ def main():
             )
             if state != previous:
                 events.append(
-                    dict(step=row["step"], source=state[0], target=state[1], expert_phase=state[2])
+                    {
+                        "step": row["step"],
+                        "source": state[0],
+                        "target": state[1],
+                        "expert_phase": state[2],
+                    }
                 )
                 previous = state
         source = [r["after"]["cookies_in_source"] for r in rows]
         target = [r["after"]["cookies_in_target"] for r in rows]
-        summary[str(path.relative_to(args.root))] = dict(
-            frames=len(rows),
-            events=events,
-            final_source=source[-1],
-            final_target=target[-1],
-            max_target=max(target),
-            phase_limit="Policy phases require video review; counts are not a phase classifier.",
-        )
+        summary[str(path.relative_to(args.root))] = {
+            "frames": len(rows),
+            "events": events,
+            "final_source": source[-1],
+            "final_target": target[-1],
+            "max_target": max(target),
+            "phase_limit": "Policy phases require video review; counts are not a phase classifier.",
+        }
         fig, axes = plt.subplots(2, 1, figsize=(9, 5), sharex=True)
         axes[0].plot(source, label="source count")
         axes[0].plot(target, label="target count")

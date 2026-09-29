@@ -17,7 +17,7 @@ def main():
     args = parser.parse_args()
     project = project_root()
     output = (project / args.root).resolve()
-    env = dict(os.environ, MUJOCO_GL="egl", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    env = dict(os.environ, MUJOCO_GL="egl")
 
     def run(script, *args):
         subprocess.run(
@@ -110,19 +110,19 @@ def main():
                 json.loads(p.read_text()) for p in (directory / "candidate").glob("seed_*.json")
             ]
             selection.append((rank(rows, candidate), step, ckpt, rows))
-        selected = sorted(selection, key=lambda x: (x[0], x[1]))[0]
+        selected = min(selection, key=lambda x: (x[0], x[1]))
         checkpoint = selected[2]
         successes = sum(r["success"] for r in selected[3])
         if successes < 16:
             (output / "final_status.json").write_text(
                 json.dumps(
-                    dict(
-                        status="development_target_not_met",
-                        successes=successes,
-                        episodes=20,
-                        acceptance_started=False,
-                        checkpoint=str(checkpoint),
-                    ),
+                    {
+                        "status": "development_target_not_met",
+                        "successes": successes,
+                        "episodes": 20,
+                        "acceptance_started": False,
+                        "checkpoint": str(checkpoint),
+                    },
                     indent=2,
                 )
             )
@@ -146,11 +146,11 @@ def main():
     summary = json.loads((output / "acceptance/summary.json").read_text())
     (output / "final_status.json").write_text(
         json.dumps(
-            dict(
-                status="acceptance_complete",
-                target_met=summary["candidate"]["successes"] >= 16,
-                summary=summary,
-            ),
+            {
+                "status": "acceptance_complete",
+                "target_met": summary["candidate"]["successes"] >= 16,
+                "summary": summary,
+            },
             indent=2,
         )
     )

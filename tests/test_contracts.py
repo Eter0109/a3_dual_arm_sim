@@ -17,4 +17,3 @@ def test_action_contract_shapes_and_cartesian_range() -> None:
         validate_action(action, "cartesian_delta")
     with pytest.raises(ContractError, match=r"\[-1, 1\]"):
         validate_action(np.full(14, 1.1), "cartesian_delta")
-

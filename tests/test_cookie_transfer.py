@@ -68,8 +68,7 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         assert first["source_initially_filled"]
         assert second["source_initially_filled"]
         assert np.all(
-            env.cookie_positions[:, 2] - env.COOKIE_HALF_SIZE[2]
-            >= env.SOURCE_FLOOR_TOP_Z - 0.002
+            env.cookie_positions[:, 2] - env.COOKIE_HALF_SIZE[2] >= env.SOURCE_FLOOR_TOP_Z - 0.002
         )
         assert all(
             abs(float(env.data.xmat[env._cookie_bodies[index]].reshape(3, 3)[2, 2]))
@@ -78,8 +77,6 @@ def test_cookie_reset_is_deterministic_and_starts_outside_target() -> None:
         )
     finally:
         env.close()
-
-
 
 
 def test_dense_dimensions_capacity_walls_and_mirrored_home() -> None:

@@ -7,12 +7,6 @@ from typing import Any
 import numpy as np
 
 from a3_dual_arm_sim.contracts import ActionMode, EpisodeContext
-from a3_dual_arm_sim.paths import project_root
-
-_RUNTIME = project_root() / ".runtime"
-os.environ.setdefault("HF_HOME", str(_RUNTIME / "huggingface"))
-os.environ.setdefault("HF_DATASETS_CACHE", str(_RUNTIME / "datasets"))
-
 
 DEPLOYMENT_HOME_RIGHT = np.array(
     [-1.294467, -0.986556, 1.192891, 1.005229, 0.336042, -0.367167, 1.506819, 1.0],
@@ -22,7 +16,7 @@ DEPLOYMENT_HOME_RIGHT = np.array(
 
 def validate_execution_horizon(n_action_steps: int, chunk_size: int) -> None:
     if isinstance(n_action_steps, bool) or not isinstance(n_action_steps, int):
-        raise ValueError("n_action_steps must be an integer")
+        raise ValueError("n_action_steps must be an integer")  # noqa: TRY004 - public API
     if not 1 <= n_action_steps <= chunk_size:
         raise ValueError("n_action_steps must be between 1 and chunk_size")
 
@@ -136,26 +130,35 @@ class SmolVLAPolicyPlugin:
         self.last_raw_action = None
         self._right_hold = None
 
-    def act(self, observation: dict[str, Any], task: str) -> np.ndarray:
+    def predict_action(self, observation: dict[str, Any], task: str) -> np.ndarray:
+        """Predict in the checkpoint's action space, without deployment rules or arm padding."""
         policy_observation = {key: observation[key] for key in self._input_keys}
-        if getattr(self, "_action_dim", 16) == 8:
-            state = np.asarray(observation["observation.state"])
-            if state.shape != (16,):
-                raise ValueError("Left-only deployment requires the environment's 16-D state")
-            if self._right_hold is None:
-                self._right_hold = state[8:16].copy()
+        dimension = getattr(self, "_action_dim", 16)
+        state = np.asarray(policy_observation["observation.state"])
+        if dimension == 8:
+            if state.shape not in ((8,), (16,)):
+                raise ValueError("Left-only inference requires 8-D or 16-D state")
             policy_observation["observation.state"] = state[:8].copy()
         batch = self._prepare_observation(policy_observation, self._device, task, "A3_dual_arm")
         batch = self._preprocessor(batch)
         with self._torch.inference_mode():
             action = self._policy.select_action(batch)
             action = self._postprocessor(action)
-        action_np = action.detach().float().cpu().numpy().reshape(getattr(self, "_action_dim", 16))
+        return action.detach().float().cpu().numpy().reshape(dimension)
+
+    def act(self, observation: dict[str, Any], task: str) -> np.ndarray:
+        if getattr(self, "_action_dim", 16) == 8:
+            state = np.asarray(observation["observation.state"])
+            if state.shape != (16,):
+                raise ValueError("Left-only deployment requires the environment's 16-D state")
+            if self._right_hold is None:
+                self._right_hold = state[8:16].copy()
+        action_np = self.predict_action(observation, task)
         if getattr(self, "_action_dim", 16) == 8:
             action_np = np.concatenate((action_np, self._right_hold))
         self.last_raw_action = action_np.copy()
 
-        # 1. Stationary Right Arm Joint Anchoring (Pillar 3)
+        # 1. Stationary Right Arm Joint Anchoring
         if self.anchor_right_arm and getattr(self, "_action_dim", 16) == 16:
             action_np[8:16] = DEPLOYMENT_HOME_RIGHT
 
@@ -193,17 +196,19 @@ class SmolVLAPolicyPlugin:
                     )
                     if np.all(np.isfinite(q_corrected)):
                         action_np[:7] = q_corrected
-            except Exception:
-                pass
+            except (ValueError, RuntimeError, np.linalg.LinAlgError) as exc:
+                import warnings
 
-        # 3. Gripper Sharpening & Hysteresis (Pillar 3)
+                warnings.warn(f"Optional action geometry correction failed: {exc}", RuntimeWarning)
+
+        # 3. Gripper Sharpening & Hysteresis
         if self.gripper_sharpening:
             if action_np[7] < 0.45:
                 action_np[7] = 0.2804
             elif action_np[7] > 0.60:
                 action_np[7] = 1.0
 
-        # 4. Action EMA Smoothing for left arm joints 0..6 (Pillar 3)
+        # 4. Action EMA Smoothing for left arm joints 0..6
         if self.ema_alpha > 0 and self._prev_action is not None:
             action_np[:7] = (
                 self.ema_alpha * action_np[:7] + (1.0 - self.ema_alpha) * self._prev_action[:7]
@@ -227,6 +232,6 @@ def make_policy() -> SmolVLAPolicyPlugin:
     return SmolVLAPolicyPlugin(
         Path(checkpoint),
         Path(dataset_root),
-        os.environ.get("A3_SMOLVLA_REPO_ID", "local/a3-grasp"),
+        os.environ.get("A3_SMOLVLA_REPO_ID", "Eter0109/a3-front-close-left-100"),
         os.environ.get("A3_SMOLVLA_DEVICE", "cuda"),
     )

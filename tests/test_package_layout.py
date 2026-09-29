@@ -47,20 +47,12 @@ def test_root_import_keeps_training_optional():
 
 def test_paths_after_move():
     from a3_dual_arm_sim.learning.training import default_base_model
-    from a3_dual_arm_sim.paths import project_root
+    from a3_dual_arm_sim.paths import resource_root
     from a3_dual_arm_sim.workflows.benchmark import DEFAULT_CONFIG_PATH
 
-    assert DEFAULT_CONFIG_PATH == project_root() / "configs" / "cookie_batch.yaml"
+    assert DEFAULT_CONFIG_PATH == resource_root() / "configs" / "cookie_batch.yaml"
     assert DEFAULT_CONFIG_PATH.is_file()
-    assert (
-        default_base_model()
-        == project_root().parent
-        / "vla_ur5e_sim"
-        / "assets"
-        / "policy"
-        / "base"
-        / "pretrained_model"
-    )
+    assert default_base_model() == "lerobot/smolvla_base"
 
 
 @pytest.mark.parametrize(
@@ -73,10 +65,11 @@ def test_paths_after_move():
     ],
 )
 def test_example_help(entry):
-    from a3_dual_arm_sim.paths import project_root
+    from pathlib import Path
 
+    root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, str(project_root() / "examples" / entry), "--help"],
+        [sys.executable, str(root / "examples" / entry), "--help"],
         check=False,
         capture_output=True,
         text=True,

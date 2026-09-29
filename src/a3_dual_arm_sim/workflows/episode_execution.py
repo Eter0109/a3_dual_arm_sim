@@ -13,7 +13,7 @@ from typing import Any
 
 from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import EpisodeContext
-from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.paths import resource_root
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 from .benchmark_results import EpisodeScore
@@ -21,7 +21,7 @@ from .policy_adapters import (
     make_policy_adapter,
 )
 
-DEFAULT_CONFIG_PATH = project_root() / "configs" / "cookie_batch.yaml"
+DEFAULT_CONFIG_PATH = resource_root() / "configs" / "cookie_batch.yaml"
 
 
 class EpisodeExecution:

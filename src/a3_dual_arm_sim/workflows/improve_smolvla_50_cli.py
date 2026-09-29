@@ -51,7 +51,7 @@ def main():
             subprocess.run(
                 [sys.executable, "-u", *command],
                 cwd=project,
-                env=dict(os.environ, MUJOCO_GL="egl", HF_HUB_OFFLINE="1"),
+                env=dict(os.environ, MUJOCO_GL="egl"),
                 stdout=stream,
                 stderr=subprocess.STDOUT,
                 check=True,
