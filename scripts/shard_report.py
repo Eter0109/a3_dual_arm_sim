@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -34,6 +35,36 @@ def read_jsonl(path: Path) -> list[dict]:
     if not path.is_file():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+#: Failure messages embed measured values -- "position error 2.43 mm", a cookie
+#: index list, a force reading -- so grouping them verbatim yields one line per
+#: failure and hides which failure actually dominates. Each pattern collapses a
+#: family onto a stable label.
+_FAILURE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # "target column N" here is a placement column *inside the target box*, not a
+    # source column: the expert rejects randomised layouts whose second slot it
+    # cannot reach with a vertical grasp. The cross-tab prints source columns, so
+    # the label spells this out to keep the two from being read as one thing.
+    (re.compile(r"column (\d+) unreachable with vertical grasp"), "target-box slot {0} unreachable (layout rejected)"),
+    (re.compile(r"only \d+/10 cookies in target box"), "fewer than 10 cookies placed in two batches"),
+    (re.compile(r"Cookie slipped out of batch during transport"), "a cookie slipped out of the batch in transport"),
+    (re.compile(r"batch phase timeout"), "batch phase timeout"),
+    (re.compile(r"released Cookies not upright"), "a released cookie was not upright or contained"),
+    (re.compile(r"Cookie dropped during lift"), "a cookie was dropped during lift"),
+    (re.compile(r"insertion blocked"), "insertion blocked"),
+    (re.compile(r"environment_safety_terminated"), "environment safety stop"),
+    (re.compile(r"max_steps_exceeded"), "max steps exceeded"),
+)
+
+
+def summarise_failure(message: str) -> str:
+    """Collapse a free-text failure into a stable category."""
+    for pattern, label in _FAILURE_PATTERNS:
+        match = pattern.search(message)
+        if match:
+            return label.format(*match.groups()) if match.groups() else label
+    return message[:80]
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,14 +138,26 @@ def main() -> int:
     print()
 
     reasons = Counter(
-        (row.get("failure_reason") or row.get("phase") or "unknown")
+        summarise_failure(str(row.get("failure_reason") or row.get("phase") or "unknown"))
         for row in all_attempts
         if not row.get("success")
     )
     if reasons:
-        print("failure reasons:")
+        failures = sum(reasons.values())
+        print(f"failure categories ({failures} failed attempts):")
+        columns = sorted(attempts_by_column, key=lambda c: (c is None, c))
         for reason, count in reasons.most_common():
-            print(f"  {count:>5}  {reason}")
+            per_column = Counter(
+                row.get("source_column")
+                for row in all_attempts
+                if not row.get("success")
+                and summarise_failure(str(row.get("failure_reason") or row.get("phase") or "unknown"))
+                == reason
+            )
+            spread = " ".join(f"c{c}={per_column.get(c, 0)}" for c in columns)
+            print(f"  {count:>5}  {count / failures * 100:5.1f}%  {reason:<44} {spread}")
+        print("  (cN = source column N; a failure concentrated in one column points at" \
+              " the expert rather than the harness)")
         print()
 
     colours = Counter((row.get("randomization") or {}).get("cookie_color") for _, row in saved)
