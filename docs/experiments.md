@@ -1,5 +1,9 @@
 # 入口索引与实验管理
 
+新增仓库内 `python -m autovla` 研究入口：API Agent 提出单参数改动，调用现有
+SmolVLA 训练和固定 MuJoCo 评测，自动 KEEP/DISCARD 并保存最佳配置。
+服务器配置、预算和最终验收见 [AutoVLA 手册](autovla.md)。
+
 正式实现位于 `src/a3_dual_arm_sim/`，`examples/` 仅转发对应模块。源码用户运行脚本，wheel 用户使用 `python -m a3_dual_arm_sim.<实现模块>`。所有入口支持 `--help`。
 
 ## 主流程

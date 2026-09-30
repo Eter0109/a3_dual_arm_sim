@@ -41,6 +41,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
 - [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
+- [AutoVLA Agent 迭代](docs/autovla.md)：接入自选 API，配置研究、固定评测和自动保留/丢弃。
 - [发布检查与限制](docs/release_checklist.md)：验证记录与待解决的发布阻碍。
 
 ## 分级随机化采集

@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hypothesis", "change", "expected_effect", "finding", "stop"],
+  "properties": {
+    "hypothesis": {"type": "string"},
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parameter", "value"],
+      "properties": {
+        "parameter": {"type": "string", "enum": ["lr", "decay_lr", "warmup_steps", "batch_size", "n_action_steps"]},
+        "value": {"type": "number"}
+      }
+    },
+    "expected_effect": {"type": "string"},
+    "finding": {"type": "string"},
+    "stop": {"type": "boolean"}
+  }
+}

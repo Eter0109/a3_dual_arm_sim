@@ -1,0 +1,26 @@
+{
+  "dataset_root": "datasets/a3_front_close_left_100",
+  "repo_id": "Eter0109/a3-front-close-left-100",
+  "base_model": "models/smolvla_base",
+  "device": "cuda",
+  "train_seed": 1000,
+  "steps": 2000,
+  "save_freq": 2000,
+  "num_workers": 2,
+  "offline": true,
+  "scene_config": "configs/cookie_batch.yaml",
+  "randomization_config": "configs/randomization.yaml",
+  "cases": [
+    {"profile": "basic", "source_column": "1"},
+    {"profile": "medium", "source_column": "1"},
+    {"profile": "advanced", "source_column": "1"}
+  ],
+  "development": {"seed_start": 10000, "episodes": 8},
+  "acceptance": {"seed_start": 30000, "episodes": 20},
+  "max_steps": 6000,
+  "trace_episodes": 1,
+  "max_experiments": 11,
+  "max_hours": 48,
+  "experiment_timeout_seconds": 14400,
+  "agent_timeout_seconds": 180
+}

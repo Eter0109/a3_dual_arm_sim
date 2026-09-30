@@ -1,0 +1,7 @@
+{
+  "lr": 0.00005,
+  "decay_lr": 0.000005,
+  "warmup_steps": 500,
+  "batch_size": 8,
+  "n_action_steps": 8
+}
