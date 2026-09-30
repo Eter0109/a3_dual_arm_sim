@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -208,8 +209,33 @@ class LeRobotV3Recorder:
 
     def discard_episode(self) -> None:
         self.dataset.clear_episode_buffer()
+        self._discard_staged_images()
         self._context = None
         self._frames = 0
+
+    def _discard_staged_images(self) -> None:
+        """Remove the PNG frames a discarded episode left behind.
+
+        Frames are staged as PNG files and only deleted once an episode is
+        encoded, so a discarded episode has to clean them up itself. LeRobot's
+        ``clear_episode_buffer`` looks for them via ``meta.image_keys``, which
+        is empty whenever the cameras are declared as ``video`` -- so it removes
+        nothing and the staging files stay on disk to accumulate.
+
+        Only the last discarded episode of a run is at risk: the staging
+        directory is named after the episode index, which does not advance on
+        discard, so a later attempt reuses and overwrites it, and a successful
+        save deletes it.
+        """
+        writer = getattr(self.dataset, "writer", None)
+        meta = getattr(self.dataset, "meta", None)
+        get_dir = getattr(writer, "_get_image_file_dir", None)
+        if get_dir is None or meta is None:
+            return
+        for key in meta.camera_keys:
+            directory = get_dir(self._episode_index, key)
+            if directory.is_dir():
+                shutil.rmtree(directory, ignore_errors=True)
 
     def close(self) -> None:
         if self._context is not None:
