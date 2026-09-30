@@ -1,0 +1,60 @@
+# Template: a model that is already serving, reached over a socket.
+#
+# openpi-based projects (AtomicVLA, OptimusVLA) ship a policy server of their own,
+# so the A3 side needs no adapter at all -- only the observation and action wiring.
+# Start the model's server first, then:
+#
+#   a3-sim run --scene sandbox --policy-manifest configs/policies/openpi_server.yaml
+#
+# Note: the socket transport speaks the A3 wire protocol over TCP or a unix socket.
+# A project serving websockets needs a 30-line shim translating to this framing,
+# and the shim belongs on the model's side; see docs/external-policy-bridge.md.
+
+name: openpi-server
+
+transport:
+  kind: socket
+  # tcp://host:port or unix:///path/to.sock
+  url: tcp://127.0.0.1:8000
+  startup_timeout_s: 60
+  request_timeout_s: 30
+
+observation:
+  images:
+    front:
+      source: observation.images.front
+      # openpi's ALOHA configs expect 224x224 and their own camera names; keep the
+      # A3 key on the left and let the model side rename, or rename here and make
+      # the shim aware of the A3 names.
+      resize: [224, 224]
+  vectors:
+    state:
+      source: observation.state
+
+action:
+  # ALOHA-style policies emit 14-dimensional joint actions: 6 joints plus a gripper
+  # per arm.  A3 has 7 joints per arm, so a joint index map cannot express this --
+  # the joint counts differ.  Two honest options:
+  #
+  #   1. have the model's shim emit the 16-dimensional A3 vector, and declare
+  #      space: joint_position, dim: 16 here;
+  #   2. drive the environment in cartesian_delta instead, where the 14-dimensional
+  #      space is shared and the A3 side already owns the IK (CartesianDeltaAdapter).
+  #
+  # Option 2 is why cartesian_delta exists in the protocol.  It is a configuration
+  # change here, not new code.
+  space: joint_position
+  dim: 16
+  chunk: 50
+  execute: 25
+  normalize:
+    mode: mean_std
+    stats: openpi_norm_stats.npz
+
+success:
+  probe: env
+
+notes: >
+  Point this at whichever host is serving the model. Fill in action.dim and
+  action.space from what the server actually returns -- a3-sim policy check will
+  refuse a mismatch rather than execute it.

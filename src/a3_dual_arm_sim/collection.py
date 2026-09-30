@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .batch_expert import A3CookieBatchExpert
+from .config import load_config
 from .contracts import ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 from .env import A3DualArmEnv
@@ -199,6 +200,7 @@ def collect_dataset(
     fast_render: bool = False,
     use_videos: bool = True,
     save_failed_episodes: bool = False,
+    rollover_mb: float | None = None,
 ) -> dict[str, Any]:
     """Collect accepted episodes of one scene, and write ``collection_summary.json``.
 
@@ -272,6 +274,7 @@ def collect_dataset(
         image_height=env.config.image_height,
         image_width=env.config.image_width,
         use_videos=use_videos,
+        rollover_mb=rollover_mb,
     )
     runner = EpisodeRunner(
         env,
@@ -302,13 +305,55 @@ def collect_dataset(
     try:
         for attempt in range(attempt_limit):
             seed = start_seed + shard_index + attempt * shard_count
-            result = runner.run(seed=seed)
+            # An expert may refuse a layout outright rather than run it and fail.
+            # The five-Cookie insertion checks its target column's reachability when
+            # it plans, and raises when a randomised layout puts the column outside
+            # the window it can place into.  That is a legitimate rejected attempt --
+            # the same information a failed rollout carries, arrived at by planning
+            # instead of by trying -- so it is recorded and the sweep moves on.
+            #
+            # Letting it escape is what this guard exists to prevent, and the cost
+            # was measured: on a 20-shard overnight run, 6 shards died this way
+            # within their first dozen attempts and took the rest of their 170-episode
+            # quota with them.  Roughly 30% of the collection capacity was lost to an
+            # exception that simply meant "this seed is not usable".
+            #
+            # ``EpisodeRunner.run`` already discards the episode buffer on any
+            # exception, so the recorder is left clean and the next seed starts fresh.
+            try:
+                result = runner.run(seed=seed)
+            except Exception as exc:  # noqa: BLE001 - see above: any refusal is a skip
+                reason = f"{type(exc).__name__}: {exc}"
+                row = {
+                    "seed": seed,
+                    "success": False,
+                    "steps": 0,
+                    "discarded": True,
+                    "safety_reason": None,
+                    "failure_reason": reason,
+                }
+                for key in scene.metric_keys:
+                    row[key] = None
+                results.append(row)
+                print(
+                    f"{scene.task.name} shard={shard_index}/{shard_count} "
+                    f"attempt={attempt + 1}/{attempt_limit} seed={seed} "
+                    f"success=False accepted={accepted}/{episodes} steps=0 "
+                    f"reason={reason}",
+                    flush=True,
+                )
+                continue
             row: dict[str, Any] = {
                 "seed": seed,
                 "success": result.success,
                 "steps": result.steps,
                 "discarded": result.discarded,
                 "safety_reason": result.safety_reason,
+                # Read from the episode, not from the metric keys: an expert that
+                # fails explains itself here, and without this line the reason was
+                # never in the row the progress line reads, so every rejection
+                # printed as a bare ``success=False``.
+                "failure_reason": result.final_info.get("failure_reason"),
             }
             for key in scene.metric_keys:
                 row[key] = result.final_info.get(key)
@@ -389,7 +434,7 @@ def collect_dataset(
 # can see every registered scene at once, and so adding one is obviously additive.
 
 
-def grasp_scene() -> CollectionScene:
+def grasp_scene(*, visual_style: str = "plain") -> CollectionScene:
     """The single-cube grasp, at a fixed object pose plus its own jitter.
 
     This scene owns its placement noise: ``GraspTaskConfig`` jitters the cube by
@@ -403,7 +448,9 @@ def grasp_scene() -> CollectionScene:
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
         del position_noise_m, yaw_noise_rad
-        return A3GraspEnv(render_cameras=False)
+        return A3GraspEnv(
+            _styled_config(None, visual_style), render_cameras=False
+        )
 
     def build_policy(env: A3DualArmEnv) -> Policy:
         return A3GraspExpert(env)  # type: ignore[arg-type]
@@ -418,7 +465,7 @@ def grasp_scene() -> CollectionScene:
 
 
 def cookie_transfer_scene(
-    config: str | Path | None = None, *, hold_steps: int = 40
+    config: str | Path | None = None, *, hold_steps: int = 40, visual_style: str = "plain"
 ) -> CollectionScene:
     """One Cookie at a time, moved by the grip that also holds the target box.
 
@@ -451,6 +498,19 @@ def cookie_transfer_scene(
     )
 
 
+def _styled_config(config: str | Path | None, visual_style: str) -> Any:
+    """Load ``config`` and take on ``visual_style`` if it differs.
+
+    The appearance is compiled into the model XML, so a scene that wants a
+    different one has to hand the constructor a ``SimConfig`` rather than a path.
+    """
+
+    loaded = load_config(config)
+    if visual_style == loaded.visual_style:
+        return loaded
+    return replace(loaded, visual_style=visual_style)
+
+
 def _batch_scene(
     task_name: str,
     config: str,
@@ -458,6 +518,7 @@ def _batch_scene(
     *,
     hold_steps: int,
     details: dict[str, Any] | None = None,
+    visual_style: str = "plain",
 ) -> CollectionScene:
     """Shared body of the two five-at-a-time scenes.
 
@@ -468,6 +529,11 @@ def _batch_scene(
     recording runs to the expert's own stopping rule instead of the environment
     cutting it off mid-retract.  ``success`` still comes from the environment, so
     the accepted-episode rule stays in one place.
+
+    ``visual_style`` reaches the model builder, so it has to arrive as a
+    ``SimConfig`` rather than a path: the appearance is compiled into the XML, not
+    applied to a live scene.  It changes no physical parameter -- see
+    :func:`a3_dual_arm_sim.model._add_detailed_visuals` for the measurements.
     """
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
@@ -478,8 +544,10 @@ def _batch_scene(
             require_released=True,
             terminate_on_success=False,
         )
-        return A3CookieTransferEnv(config, task_config=task_config, render_cameras=True)
-
+        loaded = load_config(config)
+        if visual_style != loaded.visual_style:
+            loaded = replace(loaded, visual_style=visual_style)
+        return A3CookieTransferEnv(loaded, task_config=task_config, render_cameras=True)
     def build_policy(env: A3DualArmEnv) -> Policy:
         return CookieCollectionPolicy(expert=make_expert(env), hold_steps=hold_steps)
 
@@ -504,7 +572,7 @@ def _batch_scene(
     )
 
 
-def cookie_batch_scene(*, hold_steps: int = 40) -> CollectionScene:
+def cookie_batch_scene(*, hold_steps: int = 40, visual_style: str = "plain") -> CollectionScene:
     """Five at a time, both batches from opposite ends of two columns (0-4, 20-24)."""
 
     return _batch_scene(
@@ -513,10 +581,13 @@ def cookie_batch_scene(*, hold_steps: int = 40) -> CollectionScene:
         A3CookieBatchExpert,
         hold_steps=hold_steps,
         details={"source_columns": "one exposed end of each of two columns"},
+        visual_style=visual_style,
     )
 
 
-def cookie_same_column_scene(*, hold_steps: int = 40) -> CollectionScene:
+def cookie_same_column_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
     """Five at a time, both batches from one column (0-4, then 5-9).
 
     This is the variant that succeeds on the second batch without moving to
@@ -530,10 +601,13 @@ def cookie_same_column_scene(*, hold_steps: int = 40) -> CollectionScene:
         A3SameColumnBatchExpert,
         hold_steps=hold_steps,
         details={"source_columns": "both batches from one column, front end first"},
+        visual_style=visual_style,
     )
 
 
-def cookie_two_box_scene(*, hold_steps: int = 40) -> CollectionScene:
+def cookie_two_box_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
     """Two boxes filled by relay: A is filled, pushed clear, B takes its place.
 
     Twice the work of a single-box scene, so an episode is roughly twice as long

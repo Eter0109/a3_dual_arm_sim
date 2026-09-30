@@ -30,6 +30,11 @@
 # `episodes`.
 #
 # Site facts, all overridable:
+#   A3_PYTHON   interpreter to run with, for a machine that uses a venv rather than
+#               conda.  Setting it skips the conda activation below entirely.
+#   A3_OUTPUT_ROOT  where the shards are written.  The default is inside the
+#               repository, which is on the system disk here; a long run needs the
+#               data disk, so point this at one (`df -h` shows which is which).
 #   CONDA_SH    path to conda's profile script   (default: the dev machine's)
 #   A3_ENV      environment name to activate     (default: a3_sim)
 #   A3_EXTRA    extra `a3-sim collect` arguments (default: --fast-render)
@@ -43,13 +48,25 @@ EPISODES="${4:-6}"
 SEED_BASE="${5:-1000}"
 
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT_ROOT="${PROJECT}/outputs/datasets/${OUTPUT_NAME}"
+OUTPUT_ROOT="${A3_OUTPUT_ROOT:-${PROJECT}/outputs/datasets}/${OUTPUT_NAME}"
 LOG_DIR="${PROJECT}/logs/${OUTPUT_NAME}"
 
-# Both the interpreter path and the environment name are site facts.  The defaults
-# are the machine this was developed on; set CONDA_SH and A3_ENV elsewhere.
-source "${CONDA_SH:-/lab/haoq_lab/cse12311731/miniconda3/etc/profile.d/conda.sh}"
-conda activate "${A3_ENV:-a3_sim}"
+# The interpreter is a site fact.  Either an explicit python (a venv, where the
+# package is installed alongside whatever dataset writer it needs) or conda's
+# profile script plus environment name.  A venv is named directly instead of
+# activated: with the interpreter given, there is no activation step to go wrong.
+#
+# Both the conda path and the environment name are the machine this was developed
+# on; set A3_PYTHON, or CONDA_SH and A3_ENV, elsewhere.
+if [ -n "${A3_PYTHON:-}" ]; then
+    RUN=("${A3_PYTHON}" -m a3_dual_arm_sim.cli)
+    PYTHON="${A3_PYTHON}"
+else
+    source "${CONDA_SH:-/lab/haoq_lab/cse12311731/miniconda3/etc/profile.d/conda.sh}"
+    conda activate "${A3_ENV:-a3_sim}"
+    RUN=(a3-sim)
+    PYTHON=python
+fi
 
 # `--fast-render` halves frame time.  It must match however the dataset is later
 # evaluated, or a checkpoint sees pixels it was not trained on; every other script
@@ -75,7 +92,7 @@ for ((shard = 0; shard < SHARDS; shard++)); do
         continue
     fi
 
-    setsid a3-sim collect \
+    setsid "${RUN[@]}" collect \
         --scene "${SCENE}" \
         --root "${root}" \
         --repo-id "local/${OUTPUT_NAME}-shard-$(printf '%02d' "${shard}")" \
@@ -107,8 +124,8 @@ total=0
 for ((shard = 0; shard < SHARDS; shard++)); do
     summary="${OUTPUT_ROOT}/shard_$(printf '%02d' "${shard}")/collection_summary.json"
     if [ -f "${summary}" ]; then
-        accepted=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['accepted_episodes'])" "${summary}")
-        attempts=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['attempts'])" "${summary}")
+        accepted=$("${PYTHON}" -c "import json,sys; print(json.load(open(sys.argv[1]))['accepted_episodes'])" "${summary}")
+        attempts=$("${PYTHON}" -c "import json,sys; print(json.load(open(sys.argv[1]))['attempts'])" "${summary}")
         echo "  shard $(printf '%02d' "${shard}"): ${accepted} accepted in ${attempts} attempts"
         total=$((total + accepted))
     else

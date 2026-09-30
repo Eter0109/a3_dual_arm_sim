@@ -37,7 +37,39 @@ class TaskSpec:
     success_contract: str
 
 
-COOKIE_PROMPT = "transfer exactly ten upright square cookie blocks into the 2x5 box"
+COOKIE_PROMPT = (
+    "grasp five yellow blocks together from the source bin, insert them upright "
+    "into the marked slots of the 2 by 5 box, then return to the source bin, grasp "
+    "five more, and fill all ten slots"
+)
+"""The instruction every Cookie variant is conditioned on.
+
+Every phrase here is meant to be something the cameras can actually show, because a
+word that names nothing visible is not an instruction, it is a guess.  The render
+was changed alongside this wording, so the two agree:
+
+- *"yellow blocks"*.  The ``detailed`` style renders two tones of yellow alternating
+  down the stack.  A colour word only helps if the picture agrees with it; under the
+  older ``plain`` style the blocks are amber, and the word is then an approximation
+  rather than a description.
+- *"upright"*.  The blocks stand on edge in the source bin and have to end that way
+  -- the success contract is ``upright`` too -- but nothing about a rectangle on a
+  table says which axis is meant.  The word is the only place that is stated.
+- *"the marked slots of the 2 by 5 box"*.  The box interior (126 mm by 70 mm) is much
+  larger than the ten-slot lattice inside it (106 mm by 31.7 mm), so "the 2 by 5 box"
+  used to name a region the box's own outline did not mark.  The ``detailed`` style
+  draws the ten slots on the floor, so "marked slots" now has a referent.  This is
+  the phrase that gained the most from the closer camera: at the old pose the lattice
+  was 339 pixels and effectively invisible.
+- *"five ... then five more ... all ten slots"*.  The bin holds eighty blocks and the
+  box needs ten, so "transfer ten" leaves the first grasp undetermined -- ten at once
+  is not graspable, and one at a time is not what the scripted experts do.  The
+  prompt states the split they actually perform.
+
+"square" was dropped from the older wording: the blocks are 50 mm by 25 mm by 6.3 mm,
+so their silhouette is about 2:1, not square.  No camera shows a square face.
+"""
+
 GRASP_PROMPT = "pick up the red cube"
 
 #: Ten Cookies released by the pad contact chain, then upright, settled and

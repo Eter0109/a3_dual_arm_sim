@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
@@ -110,6 +111,7 @@ class LeRobotV3Recorder:
         image_height: int,
         image_width: int,
         use_videos: bool = False,
+        rollover_mb: float | None = None,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -130,11 +132,54 @@ class LeRobotV3Recorder:
             use_videos=use_videos,
             image_writer_threads=3,
         )
+        if rollover_mb is not None:
+            self._set_rollover(rollover_mb)
         self._context: EpisodeContext | None = None
         self._controller_type = "unknown"
         self._frames = 0
         self._episode_index = 0
         self._metadata_path = self.root / "a3_episode_metadata.jsonl"
+
+    def _set_rollover(self, rollover_mb: float) -> None:
+        """Cap how much one parquet file may hold before the writer seals it.
+
+        A dataset written in one long run is only *readable* when the writer is
+        closed: ``ParquetWriter`` appends row groups and writes the footer -- which
+        holds the schema and the row-group offsets -- on ``close()`` alone.  LeRobot
+        closes it when a file reaches ``data_files_size_in_mb``, and the default is
+        100 MB, so a long collection produces files that stay sealed for the whole
+        run.  Anything that wants to read the data part-way through -- training on
+        episodes collected so far, or simply checking that the writer is producing
+        sound data -- gets "Parquet magic bytes not found in footer" instead, which
+        reads like corruption and is not.
+
+        Lowering the threshold makes the writer seal each file as it fills, so
+        completed files are readable while the run continues.  It is a threshold on
+        one file, not on the dataset: every episode still lands in exactly one
+        sealed file, and readers iterate the files in order.
+
+        Both limits are set because they govern different writers -- the parquet
+        file and the per-camera video files -- and both are stored in ``info.json``.
+        The in-memory copy is what the writer consults on every episode, so it is
+        patched first; ``info.json`` is rewritten so the dataset keeps declaring the
+        setting it was actually written with.
+        """
+
+        meta = self.dataset.meta
+        meta.info["data_files_size_in_mb"] = rollover_mb
+        meta.info["video_files_size_in_mb"] = rollover_mb
+        try:
+            from lerobot.datasets.utils import write_info
+        except ImportError as exc:  # pragma: no cover - a LeRobot without it
+            warnings.warn(
+                f"cannot persist the rollover setting to info.json ({exc}); the "
+                "in-memory value still governs this writer, so the run is unaffected "
+                "but the dataset will not record the threshold it was written with",
+                stacklevel=2,
+            )
+        else:
+            write_info(meta.info, meta.root)
+        self.rollover_mb = rollover_mb
 
     def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
         self._context = context

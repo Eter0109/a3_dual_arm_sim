@@ -1,0 +1,88 @@
+# Template: an external project running in its own conda environment.
+#
+# Copy this next to the model, fill in the four paths, and check it with:
+#
+#   a3-sim policy check configs/policies/my_model.yaml
+#
+# The audit answers "is this wiring coherent" without importing the model, so a
+# typo costs a second rather than a checkpoint download.
+#
+# Nothing here is model-specific, which is the point: adding a model adds a file
+# like this one, not a Python module in the A3 repository.
+
+name: my-model
+
+transport:
+  kind: subprocess
+  runtime:
+    # "conda" is the common case, because the GPU sizing guide's version matrix
+    # spans torch 2.1.0 to 2.9.1 and Python 3.10 to 3.13 -- no single interpreter
+    # holds both this environment and the model's.  Other options: local, docker.
+    kind: conda
+    env: vla27
+  # Working directory of the model's checkout.  Relative paths resolve against
+  # this manifest's own directory, so the file stays portable.
+  cwd: ~/models/my-model
+  # A list, never a shell line: a string would make the manifest a script and lose
+  # argument boundaries.
+  command:
+    - python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/my_model.py
+    - --config
+    - ckpt=checkpoints/my-model
+  # Loading a 14B world model off a cold page cache is not fast.  This is the
+  # budget for the model's "ready" frame, not for a request.
+  startup_timeout_s: 600
+  # Per-request deadline.  A 3 Hz model needs this raised; retrying would not help.
+  request_timeout_s: 60
+  env:
+    # Anything the model needs in its own process.  Secrets do not belong here --
+    # a manifest is committed.
+    HF_HOME: /root/autodl-tmp/hf
+
+observation:
+  # Keys are the names the adapter sees in ``request.image(name)``; ``source`` is
+  # the A3 key that feeds it.  Extra A3 keys are ignored rather than sent.
+  images:
+    front:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+  vectors:
+    state:
+      source: observation.state
+    # Proprioception extras are available if the model wants them:
+    # velocity: { source: observation.velocity }
+    # force:    { source: observation.force }
+
+action:
+  # The space the model emits.  Anything else needs an adapter on the model's side,
+  # because the A3 side can only translate between spaces it has semantics for.
+  space: joint_position
+  dim: 16
+  chunk: 50
+  # Steps executed before the next inference.  Equal to chunk is open loop;
+  # docs/policy-interface.md finding 12 suggests starting there and sweeping.
+  execute: 50
+  # Uncomment when the model's training rate differs from the environment's 20 Hz.
+  # dt: 0.05
+  # Uncomment to rearrange a narrower output onto the native vector, e.g. a model
+  # that drives one arm: joint_map: [0, 1, 2, 3, 4, 5, 6]
+  # normalize:
+  #   mode: mean_std            # or min_max, q01_q99
+  #   stats: norm_stats.npz     # the file the guide's issue list keeps warning about
+
+success:
+  # env keeps every model on the environment's ruler.  "policy" lets a model report
+  # its own verdict in its returned info; both end up in the episode result, so a
+  # disagreement stays visible instead of being averaged away.
+  probe: env
+
+notes: >
+  What this model is, which paper it came from, and which of the guide's known
+  issues apply to it.  This line is copied into the rollout report, so an episode
+  can be read later without this file.

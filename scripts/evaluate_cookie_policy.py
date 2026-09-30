@@ -29,9 +29,14 @@ from pathlib import Path
 
 import numpy as np
 
+from a3_dual_arm_sim.tasks import COOKIE_PROMPT
+
 PROJECT = Path(__file__).resolve().parents[1]
 
-TASK = "transfer exactly ten upright square cookie blocks into the 2x5 box"
+# Taken from the task vocabulary rather than repeated here: this script once carried
+# its own copy of the string, so editing the prompt in ``tasks.py`` silently left the
+# evaluation conditioning a model on a sentence no dataset was recorded with.
+TASK = COOKIE_PROMPT
 
 
 def parse_args() -> argparse.Namespace:

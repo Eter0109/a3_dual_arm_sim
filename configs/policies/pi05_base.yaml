@@ -1,0 +1,157 @@
+# π0.5 (lerobot/pi05_base) behind the A3 bridge.
+#
+# Read this before the zero-shot numbers, because they mean something different here
+# than they did for Cosmos Policy and GR00T.
+#
+# `pi05_base` is a fine-tuning base, and its own model card says so: "Intended use: Base
+# model to fine tune on your specific use case".  Its action space is 32 dimensions with
+# `action_names: null` -- a padded template with nothing published about which index
+# means what.  Every released π0.5 checkpoint in the lerobot org is either a LIBERO
+# single arm or a RoboCasa mobile manipulator:
+#
+#   lerobot/pi05_base        state 32  action 32   padded template, no task
+#   lerobot/pi05_droid       state 32  action 32   DROID, 8 real dims
+#   lerobot/pi05_robocasa    state 16  action 12   RoboCasa, single arm
+#
+# So this run is a **wiring test, not a capability test**.  It answers: does the π0.5
+# path through this bridge produce coherent, in-range joint targets, and how fast.  It
+# cannot answer "does π0.5 know this task", because no released π0.5 weight was trained
+# on a bimanual cookie task or on anything resembling it.  The number bearing on
+# capability is the fine-tune that follows.
+#
+# Its zero-shot counterpart for comparison is gr00t_bimanual.yaml, which *is* a deployed
+# policy (ACG's DexMimicGen post-train) -- a fairer zero-shot number, and the reason the
+# two reports should not be read as "π0.5 vs GR00T".
+#
+# The model side lives in the a3-collect environment, which is the one holding lerobot:
+#   /root/autodl-tmp/a3-collect/adapters/pi05_a3.py
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_base.yaml
+#
+# Then run it:
+#   a3-sim compare --scene a3_cookie_same_column \
+#       --manifest configs/policies/pi05_base.yaml --seeds 0,1,2 \
+#       --steps 400 --visual-style plain
+
+name: pi05-base
+notes: >
+  π0.5, as released by Physical Intelligence and ported to LeRobot: a PaliGemma-2B
+  vision-language backbone with a 300M flow-matching action expert.  This is the
+  fine-tuning base, not a task policy -- no released π0.5 checkpoint was trained on a
+  bimanual 16-dimension joint layout, so the zero-shot figures measure whether the
+  integration is correct and how fast inference is, and say nothing about task ability.
+  Its proprioception is worth noting: π0.5 has no state projector, so the joint state
+  reaches the model only as 256-bin-discretized text inside the language prompt, which
+  is why the normalization statistics below are load-bearing.
+
+transport:
+  kind: subprocess
+  runtime:
+    # "local" because the command names the interpreter directly; the isolation is the
+    # same as conda's -- a separate process with a separate environment.  This one holds
+    # Python 3.12.3, torch 2.8.0+cu128, lerobot 0.5.1, transformers 5.3.0.
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    # The adapter reads its statistics from here -- see the observation block.
+    - --config
+    - stats=/root/autodl-tmp/gr00t-runs/b1/merged
+    - --config
+    - ckpt=lerobot/pi05_base
+  # 14.5 GB of weights plus a 2B VLM; measured cold load is 115 s, and this budget is
+  # generous because the page cache is shared with other work on the data disk.
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+
+observation:
+  # The checkpoint declares exactly these three views.  They are paired by what they see,
+  # not by name order: `base_0_rgb` is the third-person view, so it takes A3's front
+  # camera, and the two wrists take the two wrist cameras.  Getting this backwards would
+  # feed the model a wrist view where it expects the scene, which is the kind of swap that
+  # produces plausible motion rather than an error.
+  #
+  # Resized here rather than in the adapter so the bytes on the wire match what the model
+  # consumes: the checkpoint's image_resolution is 224x224 and A3 renders 256x256, so
+  # without this every request would ship 31% more pixels for the adapter to discard.
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    # One vector, not eight slices: π0.5's preprocessor consumes the state as a single
+    # tensor and discretizes it into the prompt, so splitting it here and rejoining it in
+    # the adapter would add a place for the order to drift.
+    #
+    # A3's state is [L0..L6, L_grip, R0..R6, R_grip] and the model's width is 32, so the
+    # adapter pads at the end -- which is where lerobot's own `pad_vector` pads, and
+    # therefore where a 16-dimension embodiment sits under the checkpoint's convention.
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  # Joint positions, matching how the dataset records them.
+  space: joint_position
+  dim: 16
+  # Identity: the adapter already selects the model's indices 0..15 and returns them in
+  # A3's order.  Any rearrangement here would be a second, silent copy of that decision.
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  # The model predicts 50 steps because its config says chunk_size 50 and n_action_steps
+  # 50.  Those 50 are *available*; how many are executed is the line below.
+  chunk: 50
+  # Execute 16 of the 50.  Two reasons, and neither is a tuning guess:
+  #
+  #   * 50 steps is 2.5 s of open-loop motion at 20 Hz, committed on the word of a model
+  #     whose action layout is undocumented.  GR00T's fine-tune showed that a policy can
+  #     lock into a hover and never leave it; committing 2.5 s to that is 500 ms longer
+  #     than the episode needs to be ruined.
+  #   * 16 steps is A3's own quarter-second beat and the value the GR00T manifests used,
+  #     so a future comparison across models does not also vary the replan horizon.
+  #
+  # This is deliberately *not* the model's own n_action_steps.  A fine-tuned π0.5 should
+  # be re-run at 50 to see whether the longer horizon helps once the layout is known.
+  execute: 16
+  # Both robots run at 20 Hz, and π0.5's chunk is a sequence of steps rather than a
+  # duration, so the time bases agree and no resampling is applied in either direction.
+  dt: 0.05
+  normalize:
+    # A statement, not an omission.  The model's own postprocessor has already inverted
+    # the QUANTILES transform, so what crosses the wire is physical.  Declaring "none"
+    # makes the gateway refuse the chunk if a future adapter ever forgets to unnormalize.
+    #
+    # Which statistics did the inverting is the caveat: the checkpoint ships
+    # `features: {}` -- no statistics at all, because it is a base model and the stats
+    # belong to whoever fine-tunes it.  So A3's own q01/q99 are installed instead, which
+    # is the only interpretation available and is why the zero-shot numbers are reported
+    # as a wiring check.
+    mode: none
+
+success:
+  # The environment decides, so π0.5 lands on the same ruler as everything else.
+  probe: env
+
+evaluation:
+  # No released π0.5 checkpoint was trained on this robot or this task family; the base
+  # weights are explicitly a starting point for fine-tuning.
+  regime: zero_shot
+  # Behaviour, because the task metric is expected to be zero and a table led by it would
+  # say nothing.  What is worth reading is whether the arm moves at all, whether the
+  # commands are in range, and the latency.
+  primary_metric: behavior
+  # The task string is a real input: π0.5 folds it into the prompt alongside the
+  # discretized state, so a free-text prompt is what the model is designed to take.
+  prompt_kind: free_text

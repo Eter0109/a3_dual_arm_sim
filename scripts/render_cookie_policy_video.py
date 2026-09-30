@@ -31,9 +31,11 @@ from typing import Any
 
 import numpy as np
 
+from a3_dual_arm_sim.tasks import COOKIE_PROMPT
+
 PROJECT = Path(__file__).resolve().parents[1]
 
-TASK = "transfer exactly ten upright square cookie blocks into the 2x5 box"
+TASK = COOKIE_PROMPT
 POLICY_CAMERAS = ("front", "left_wrist", "right_wrist")
 
 

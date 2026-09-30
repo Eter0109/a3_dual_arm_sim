@@ -1,0 +1,188 @@
+# GR00T-N1, the bimanual DexMimicGen tune that ACG releases checkpoints for.
+#
+# Why this model: it is the closest structural match to A3 on the whole list.  Its
+# bimanual Panda embodiment has two 7-joint arms with grippers under a third-person
+# view plus two wrist views, all at 256x256 -- the same arrangement, and the same
+# resolution, as A3 renders.  It also runs on torch 2.7.1+cu128, which has sm_120
+# kernels, so it executes on this card without compiling anything.
+#
+# Its actions are cartesian, which exercises the one bridge path Cosmos Policy did
+# not: the 14-dimensional `cartesian_delta` space and A3's own inverse kinematics.
+#
+# The model side lives in the ACG checkout:
+#   /root/autodl-tmp/ACG/adapters/gr00t_bimanual.py
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/gr00t_bimanual.yaml
+#
+# Then run it:
+#   a3-sim run --scene sandbox --policy-manifest configs/policies/gr00t_bimanual.yaml \
+#       --steps 32 --no-camera-render
+
+name: gr00t-n1-bimanual
+notes: >
+  NVIDIA Isaac-GR00T-N1 2B, post-trained by DAVIAN Robotics for DexMimicGen's
+  bimanual Panda embodiment.  Trained on simulated bimanual manipulation (stacking,
+  threading, handovers), not on the A3 cookie task, so as with Cosmos Policy the
+  expected result is coherent motion rather than task success.  What this manifest
+  verifies is the cartesian action path: 14 normalized end-effector deltas becoming
+  joint targets through A3's inverse kinematics.
+
+transport:
+  kind: subprocess
+  runtime:
+    # "local" because the command names the interpreter directly; the isolation is
+    # the same as conda's -- a separate process with a separate environment.  This
+    # one holds Python 3.10, torch 2.7.1+cu128, and numpy 1.x (GR00T pins numpy<2).
+    kind: local
+  cwd: /root/autodl-tmp/ACG
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/gr00t_bimanual.py
+    - --config
+    # The local directory, not the Hub id: the weights are 8.9 GB and already on
+    # disk.  ACG's own instructions pass the Hub id because their workflow predates
+    # having them locally; Gr00tPolicy accepts either.
+    - ckpt=/root/autodl-tmp/models/GR00T-N1-2B-tuned-DexMG-MG100-CrossEmbodiments
+  # A 2B model plus a VLM backbone from a cold cache.  Generous for the same reason
+  # as the Cosmos manifest: this budget covers weight download and load, not a
+  # request.
+  startup_timeout_s: 1800
+  # One chunk is 16 actions at 20 Hz, so a quarter of a second of work per request
+  # on a datacenter GPU.  The allowance is for this card and for the first call's
+  # kernel selection.
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # The checkpoint declares 35 embodiment slots, but the vendored GR00T overrides
+    # that from the environment with a default of 32.  DexMimicGen's embodiment ids
+    # reach 34, so the default would index out of range.  The adapter sets this too;
+    # it is repeated here because the value belongs to the checkpoint, not to the
+    # adapter, and a reader of this file should be able to see it.
+    MAX_NUM_EMBODIMENTS: "35"
+
+observation:
+  # A3 renders 256x256 and GR00T's metadata pins exactly that, so no resize is
+  # declared: resampling here would only lose detail.
+  images:
+    # GR00T's wrist-view names follow the same viewer-side convention as its arms,
+    # so the images are swapped along with the state.
+    front_view:
+      source: observation.images.front
+    left_wrist_view:
+      source: observation.images.right_wrist
+    right_wrist_view:
+      source: observation.images.left_wrist
+  vectors:
+    # A3's eef_pose is fourteen values: each arm contributes a position and a
+    # quaternion, in that order.  GR00T wants the same decomposition as four
+    # separate vectors, so each is a slice of the one A3 key.  This is the
+    # coincidence that makes the integration cheap -- but it is a coincidence, and
+    # the slices are stated rather than assumed.
+    #
+    # Arms are paired by side, so GR00T's right arm (+y) reads A3's left arm and
+    # vice versa; see the action block for why.
+    left_arm_eef_pos:
+      source: observation.eef_pose
+      slice: [7, 10]
+    left_arm_eef_quat:
+      source: observation.eef_pose
+      slice: [10, 14]
+    right_arm_eef_pos:
+      source: observation.eef_pose
+      slice: [0, 3]
+    right_arm_eef_quat:
+      source: observation.eef_pose
+      slice: [3, 7]
+    # Grippers come from the state vector instead: A3 stores one opening scalar per
+    # gripper at the end of each arm's block.  Panda has two mirrored finger joints,
+    # so the adapter expands one into two using the checkpoint's own statistics.
+    #
+    # Swapped for the same reason as the arms above: GR00T's "left" is the -y side.
+    left_gripper:
+      source: observation.state
+      slice: [15, 16]
+    right_gripper:
+      source: observation.state
+      slice: [7, 8]
+
+action:
+  # GR00T emits end-effector deltas, not joint angles, so this is the cartesian
+  # path: A3 solves the inverse kinematics itself via CartesianDeltaAdapter.
+  space: cartesian_delta
+  dim: 14
+  # The two robots name their arms oppositely.
+  #
+  # DexMimicGen's bimanual scenes mount two Pandas at y = -0.25 and y = +0.25
+  # (robosuite's "parallel" branch) and label them from the viewer's side, so the
+  # metadata's ``left_arm`` is the one on -y: its statistics give y mean -0.235.
+  # A3 names anatomically, and for a robot facing +x the anatomical left is +y --
+  # measured at +0.25 while the right arm works between -0.25 and +0.10.
+  #
+  # Both robots face +x (robosuite places bases at -x looking towards the table),
+  # so this is a naming difference, not a frame difference: nothing needs mirroring
+  # or rotating.  The arms simply have to be paired by which side of the workspace
+  # they occupy, which is what makes GR00T's right arm input land at +0.23 in its
+  # own statistics instead of at -0.1, outside them.
+  #
+  # Hence the identity map: GR00T dimensions 0-6 (its right arm, +y) drive A3's
+  # left arm (dimensions 0-6), and 7-13 drive A3's right.
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  # Unit conversion.  GR00T's values are robosuite OSC-normalized deltas: 1.0 means
+  # 0.05 m and 0.5 rad per control step.  A3 normalizes its cartesian_delta against
+  # cartesian_translation_scale_m = 0.025 and cartesian_rotation_scale_rad = 0.10.
+  # So one A3 unit is twice GR00T's translation and five times its rotation:
+  #   scale = [0.05/0.025 x3, 0.5/0.10 x3, -1, ...] = [2,2,2,5,5,5,-1, ...]
+  # The gripper is negated and not rescaled.  The metadata's gripper channel spans
+  # [-1, 1] with +1 meaning CLOSED, while A3's cartesian gripper maps its own
+  # [-1, 1] onto a joint opening of (value + 1) / 2, so +1 means OPEN.  The two
+  # conventions are opposite over the whole range, which is a sign flip:
+  #   GR00T -1 -> A3 +1 (open),  GR00T 0 -> A3 0 (half),  GR00T +1 -> A3 -1 (shut).
+  # A scale of -2 with an offset of +1 would also land the two extremes correctly
+  # while putting 0 at fully-open, so the arithmetic is done from the conventions
+  # rather than fitted to the endpoints.
+  affine:
+    scale: [2.0, 2.0, 2.0, 5.0, 5.0, 5.0, -1.0, 2.0, 2.0, 2.0, 5.0, 5.0, 5.0, -1.0]
+    offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  # Both robots control at 20 Hz, so a chunk of 16 spans 0.8 s on either side and no
+  # resampling is needed.  Recorded because the agreement is a fact worth checking,
+  # not an assumption every model satisfies.
+  dt: 0.05
+  # The checkpoint's action_horizon is 16.
+  chunk: 16
+  # Execute the whole predicted chunk before re-asking, which is what ACG's own
+  # rollout does by default (its replan_steps defaults to the horizon).  Re-planning
+  # more often is a sweep to run later, not a guess to make now.
+  execute: 16
+  # The policy's own unapply_transforms already undid its min/max scaling, so what
+  # crosses the wire is controller-normalized.  Declaring "none" states that; the
+  # unit difference is the affine above, which is a separate concern.
+  normalize:
+    mode: none
+  # A3 requires cartesian_delta values in [-1, 1].  After the affine the position
+  # and rotation terms can exceed it -- GR00T's statistics top out slightly above
+  # 1.0 on some rotation axes -- so the range is enforced here rather than left to
+  # the contract check, which would abort an otherwise usable chunk.
+  clip: [-1.0, 1.0]
+
+success:
+  # The environment decides, as for every other model, so the comparison stays on
+  # one ruler.
+  probe: env
+
+evaluation:
+  # Released weights, post-trained by ACG on DexMimicGen -- a different robot and a
+  # different task family.
+  regime: zero_shot
+  # Lead with behaviour.  GR00T is the more interesting of the two working
+  # integrations: it is bimanual with three cameras matching A3's, so the input
+  # distribution matches even though the task does not.
+  primary_metric: behavior
+  # Free text: the task description goes through the model's own text encoder rather
+  # than a lookup table, so an arbitrary instruction is a real input for this one.
+  # Recorded explicitly because the contrast with Cosmos Policy's six fixed labels
+  # is exactly the kind of difference a comparison must not average away.
+  prompt_kind: free_text

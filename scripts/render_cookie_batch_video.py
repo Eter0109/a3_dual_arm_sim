@@ -19,17 +19,19 @@ from __future__ import annotations
 
 import argparse
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from a3_dual_arm_sim.batch_expert import A3CookieBatchExpert
-from a3_dual_arm_sim.config import load_config
+from a3_dual_arm_sim.config import VISUAL_STYLES, load_config
 from a3_dual_arm_sim.cookie_transfer import A3CookieTransferEnv
+from a3_dual_arm_sim.tasks import COOKIE_PROMPT
 
 PROJECT = Path(__file__).resolve().parents[1]
-TASK = "transfer exactly ten upright square cookie blocks into the 2x5 box"
+TASK = COOKIE_PROMPT
 PANEL_CAMERAS = ("left_wrist", "right_wrist")
 
 
@@ -130,9 +132,27 @@ def main() -> int:
     parser.add_argument("--fps", type=int, default=0, help="0 derives fps from --every")
     parser.add_argument("--crf", type=int, default=23)
     parser.add_argument("--no-fast-render", action="store_true")
+    parser.add_argument(
+        "--visual-style",
+        default="plain",
+        choices=VISUAL_STYLES,
+        help=(
+            "'plain' is the original look and stays the default because the rendered "
+            "pixels are a dataset contract. 'detailed' gives the Cookies their own "
+            "materials and draws the target box's ten placement slots on its floor, "
+            "so a viewer can see the 2x5 layout the task prompt names. It changes no "
+            "physical parameter. This script is the one where it matters most: the "
+            "batch expert actually fills those ten slots, and the fill is the thing "
+            "worth watching."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+    if args.visual_style != config.visual_style:
+        # The appearance is compiled into the model XML, so the style has to reach the
+        # constructor as a SimConfig rather than as a path.
+        config = replace(config, visual_style=args.visual_style)
     env = A3CookieTransferEnv(config=config, render_cameras=False)
     if not args.no_fast_render:
         env.use_fast_render()

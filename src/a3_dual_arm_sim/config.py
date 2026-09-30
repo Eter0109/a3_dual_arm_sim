@@ -9,6 +9,9 @@ import yaml
 
 from .paths import default_config_path
 
+#: Renderer appearance presets.  See ``SimConfig.visual_style``.
+VISUAL_STYLES = ("plain", "detailed")
+
 # Upright pieces: 50 mm wide, 19/3 mm thick, 25 mm high. A 0.4 mm
 # clearance avoids initial interpenetration while keeping the rows dense.
 COOKIE_HALF_SIZE = (0.025, 0.0095 / 3, 0.0125)
@@ -28,12 +31,38 @@ TARGET_SLOTS_LOCAL = tuple(
 
 @dataclass(frozen=True)
 class CameraConfig:
-    """Prototype camera geometry; replace it with calibrated poses later."""
+    """Prototype camera geometry; replace it with calibrated poses later.
+
+    The front camera's pose is a measurement, not a taste.  At the previous pose
+    (21.9 degrees above the table, 1.29 m out) the target bin's own 26 mm wall hid
+    almost its whole floor: of the ten placement slots, 339 pixels survived the
+    wall and the lattice read as a grey void.  Pulling in to 41.7 degrees and
+    1.15 m takes that to 839 pixels, which is enough to count five rows and to see
+    the 6 mm channel between the two columns.  Measured by differential rendering at
+    640x640, moving one slot tile at a time and counting the pixels that change:
+
+    ===============  =========  =========  =============  ===============
+    pose             elevation  distance   slot pixels    arms in frame
+    ===============  =========  =========  =============  ===============
+    previous          21.9 deg   1.289 m          339      both, fully
+    this one          41.7 deg   1.150 m          839      both, fully
+    main branch       41.7 deg   0.722 m         2740      none
+    ===============  =========  =========  =============  ===============
+
+    The last row is ``origin/main``'s pose, reproduced here because it is the
+    closer one this was chosen against: it reads the lattice best but leaves the
+    arms out of frame, and a recording whose subject is what the arms do should not
+    crop them.  The view direction is main's; only the distance differs.
+
+    ``front`` is a policy camera -- it is fed to models as
+    ``observation.images.front`` -- so this is a change to model input, not only to
+    a video.  Any comparison run under the previous pose has to be re-run.
+    """
 
     calibration_status: str = "prototype_estimate"
-    workspace_target_m: tuple[float, ...] = (0.15, 0.34, 0.80)
-    front_position_m: tuple[float, ...] = (1.30, -0.80, 1.55)
-    front_fovy_deg: float = 58.0
+    workspace_target_m: tuple[float, ...] = (0.15, 0.23, 0.81)
+    front_position_m: tuple[float, ...] = (0.7076, -0.4232, 1.5748)
+    front_fovy_deg: float = 54.0
     left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
     left_wrist_target_m: tuple[float, ...] = (0.0, 0.245, 0.085)
     right_wrist_position_m: tuple[float, ...] = (0.0, -0.045, -0.085)
@@ -280,6 +309,17 @@ class SimConfig:
     # turns both off; see the `--fast-render` CLI flag.
     render_shadows: bool = True
     render_reflections: bool = True
+    # How much work the renderer does on lighting and materials.
+    #
+    # ``"plain"`` is the original appearance and stays the default, because the
+    # rendered pixels are a dataset contract: every collected image and every
+    # comparison run so far was produced with it, and silently restyling the scene
+    # would make earlier numbers unreproducible.  ``"detailed"`` leaves the
+    # geometry and every physical parameter untouched -- only the visual-only geoms,
+    # the headlight and the materials change -- and makes the packed Cookie blades
+    # read as separate objects rather than as one striped block.  It is opt-in per
+    # run, so a comparison can state which style it used.
+    visual_style: str = "plain"
     max_joint_step_rad: float = 0.05
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025
@@ -318,6 +358,11 @@ class SimConfig:
             raise ValueError("physics_hz must be an integer multiple of control_hz")
         if self.horizon < 1 or self.image_width < 1 or self.image_height < 1:
             raise ValueError("horizon and image dimensions must be positive")
+        if self.visual_style not in VISUAL_STYLES:
+            raise ValueError(
+                f"visual_style must be one of {', '.join(VISUAL_STYLES)}, "
+                f"got {self.visual_style!r}"
+            )
         if len(self.home.left) != 7 or len(self.home.right) != 7:
             raise ValueError("each arm home pose must contain seven joints")
         if len(self.home.grippers) != 2:
@@ -376,9 +421,20 @@ def load_config(path: str | Path | None = None) -> SimConfig:
     )
     cameras = CameraConfig(
         calibration_status=str(camera_raw.get("calibration_status", "prototype_estimate")),
-        workspace_target_m=_float_tuple(camera_raw, "workspace_target_m", (0.15, 0.34, 0.80)),
-        front_position_m=_float_tuple(camera_raw, "front_position_m", (0.95, -0.55, 1.28)),
-        front_fovy_deg=float(camera_raw.get("front_fovy_deg", 52.0)),
+        # The dataclass holds the only copy of these.  They used to be repeated here
+        # as literals, which silently shadowed the dataclass: a caller reading
+        # ``CameraConfig().front_position_m`` and one loading a config that omitted
+        # the ``cameras`` block got different cameras, and the front camera is a
+        # policy input, so the two callers fed models different pictures.
+        workspace_target_m=_float_tuple(
+            camera_raw, "workspace_target_m", CameraConfig().workspace_target_m
+        ),
+        front_position_m=_float_tuple(
+            camera_raw, "front_position_m", CameraConfig().front_position_m
+        ),
+        front_fovy_deg=float(
+            camera_raw.get("front_fovy_deg", CameraConfig().front_fovy_deg)
+        ),
         left_wrist_position_m=_float_tuple(
             camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
         ),

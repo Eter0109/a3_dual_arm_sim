@@ -1,0 +1,213 @@
+# GR00T-N1-2B fine-tuned on A3's own cookie task.
+#
+# This is the first manifest whose weights were trained on this robot and this scene,
+# so it is the first one where task success is a meaningful number rather than a
+# fluke.  Its zero-shot counterpart is configs/policies/gr00t_bimanual.yaml, and the
+# two are meant to be read as a pair: the same backbone, the same scene, the same
+# camera, the same execution regime, so the difference between their reports is
+# attributable to the 200 episodes of fine-tuning and to nothing else.
+#
+# That comparison is the reason several fields below copy the zero-shot manifest
+# exactly rather than choosing the better option.  ``execute: 16`` is the clearest
+# case: re-planning more often would probably help, and it would also confound the
+# pair, so it is left where the baseline put it.
+#
+# The model side lives in the ACG checkout:
+#   /root/autodl-tmp/ACG/adapters/gr00t_a3_finetuned.py
+#
+# What makes this manifest short is what the fine-tuning bought.  The zero-shot
+# manifest needs an arm swap, four unit conversions, a gripper sign flip and a clip,
+# because DexMimicGen names and scales its arms differently.  Training on A3's own
+# vocabulary removed the need for all of it: the model's action vector is A3's
+# ``[L0..L6, L_grip, R0..R6, R_grip]`` in radians, so the mapping below is the
+# identity and the only conversion left is the absence of one.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/gr00t_a3_finetuned.yaml
+#
+# Then run it:
+#   a3-sim compare --scene a3_cookie_same_column \
+#       --manifest configs/policies/gr00t_a3_finetuned.yaml --seeds 0,1,2 \
+#       --steps 400 --visual-style detailed
+
+name: gr00t-n1-a3-finetuned
+notes: >
+  NVIDIA Isaac-GR00T-N1 2B, fine-tuned here on 200 episodes collected from
+  a3_cookie_same_column with the code-expert policy and randomised layouts.  One
+  epoch, 14,000 steps, 54 minutes, final training loss 0.0123.  Because the
+  training data is this scene rendered by this camera, the language prompt and the
+  visual distribution are in-distribution in a way no released checkpoint on the
+  list can match -- which cuts both ways, and is why the report is read against
+  the zero-shot manifest above rather than on its own.
+
+transport:
+  kind: subprocess
+  runtime:
+    # "local" because the command names the interpreter directly; the isolation is
+    # the same as conda's -- a separate process with a separate environment.  This
+    # one holds Python 3.10, torch 2.7.1+cu128, and numpy 1.x (GR00T pins numpy<2).
+    kind: local
+  cwd: /root/autodl-tmp/ACG
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/gr00t_a3_finetuned.py
+    # The adapter inserts /root/autodl-tmp/ACG/a3_gr00t on sys.path itself, because
+    # the data config has to be importable by name to register in DATA_CONFIG_MAP.
+    - --config
+    # checkpoint-14000, the last one written.  The loss was still falling at the
+    # end (0.052 averaged over the epoch, 0.0123 over the final steps), so this is
+    # the least-trained of the three checkpoints on disk -- which is the honest
+    # one to evaluate, since picking an intermediate checkpoint by its training
+    # loss would be selecting on the training set.
+    - ckpt=/root/autodl-tmp/gr00t-runs/b1/checkpoints/checkpoint-14000
+    - --config
+    - platform=aloha
+  # Three 15 GB checkpoints are on disk and the data disk is at 85%, so the load
+  # competes with the page cache.  The budget is generous for that reason, not
+  # because 2B parameters take half an hour.
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # The checkpoint's action head carries 35 embodiment slots; the vendored GR00T
+    # overrides that from the environment with a default of 32.  The mismatch is not
+    # a clean error -- the model constructs and then `from_pretrained` reports
+    # fourteen shape mismatches inside the action head, which reads like a corrupt
+    # checkpoint.  The adapter sets this at import as well; it is repeated here
+    # because the value is a property of these weights, not of the adapter, and this
+    # file is where a reader looks to find that out.
+    MAX_NUM_EMBODIMENTS: "35"
+    # Uncomment to record every request and response to a JSONL file, which is
+    # how a closed-loop run is reconstructed step by step.  Left commented because
+    # a trace of a full evaluation is ~10 MB and only matters when something is
+    # wrong -- the summary metrics cannot distinguish a model that tracks the
+    # demonstration from one that moved early and then stopped.
+    # A3_GR00T_TRACE: /tmp/gr00t_trace.jsonl
+
+observation:
+  # No resize: A3 renders 256x256 and the checkpoint's metadata pins exactly that.
+  # No swap: unlike the DexMimicGen adapter, the camera names here are A3's own
+  # because the model was trained on A3's own data layout.  The swap in
+  # gr00t_bimanual.yaml exists to fix a naming difference between robosuite and A3,
+  # and there is no such difference between a model and the dataset it was trained
+  # on.  Copying the swap here would be the single most damaging thing a reader
+  # could do to this file.
+  images:
+    front_view:
+      source: observation.images.front
+    left_wrist_view:
+      source: observation.images.left_wrist
+    right_wrist_view:
+      source: observation.images.right_wrist
+  vectors:
+    # A3's state is [L0..L6, L_grip, R0..R6, R_grip], and the training config
+    # declares the same eight keys, so each is one contiguous slice of the one A3
+    # key.  The slices are stated rather than assumed because the failure mode is
+    # quiet: a one-off shift would feed the model a plausible pose that is not the
+    # one the cameras are showing.
+    left_arm_joint_pos:
+      source: observation.state
+      slice: [0, 7]
+    left_gripper_qpos:
+      source: observation.state
+      slice: [7, 8]
+    right_arm_joint_pos:
+      source: observation.state
+      slice: [8, 15]
+    right_gripper_qpos:
+      source: observation.state
+      slice: [15, 16]
+    # A3's eef_pose is fourteen values: position then quaternion per arm, left
+    # first.  The training config declares all four, and the transforms turn the
+    # quaternions into 6D rotations, so the model does see them -- it is not a
+    # joint-only model.
+    left_arm_eef_pos:
+      source: observation.eef_pose
+      slice: [0, 3]
+    left_arm_eef_quat:
+      source: observation.eef_pose
+      slice: [3, 7]
+    right_arm_eef_pos:
+      source: observation.eef_pose
+      slice: [7, 10]
+    right_arm_eef_quat:
+      source: observation.eef_pose
+      slice: [10, 14]
+
+action:
+  # The fine-tuning changed the action space as well as the domain: the zero-shot
+  # DexMimicGen checkpoint emits end-effector deltas and needs A3's inverse
+  # kinematics, while this one emits the joint targets A3 itself records.  That is
+  # a strictly shorter path to the robot -- one less place for a silent error.
+  space: joint_position
+  dim: 16
+  # Identity, and it means the identity: model dimension i is A3 dimension i.
+  # Because A3's layout is the dataset's layout, there is no arm pairing to get
+  # right, no gripper convention to reconcile, and no affine to apply.  Compare
+  # the fourteen-element scale/offset table in gr00t_bimanual.yaml.
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  # No `default` is needed: every A3 dimension is covered, so nothing is held.
+  # The zero-shot manifest leaves two wrist joints to `hold` because ALOHA-style
+  # checkpoints have no weights for them; this one was trained on all sixteen.
+  #
+  # GR00T predicts a 16-step horizon at 20 Hz, which is A3's own control rate --
+  # the training data was collected at exactly this rate, so the chunk spans 0.8 s
+  # of motion the model has actually seen, and no resampling is needed in either
+  # direction.
+  chunk: 16
+  execute: 16
+  dt: 0.05
+  normalize:
+    # `Gr00tPolicy.get_action` applies the checkpoint's own transforms on the way in
+    # and undoes them on the way out, so what crosses the wire is already in A3's
+    # units.  Declaring "none" states that.  Applying an affine here as well would
+    # scale twice, and the result would still be joint-shaped and still plausible.
+    mode: none
+
+success:
+  # The environment's verdict decides, so this model is measured on the same ruler
+  # as the zero-shot baseline.  If the bridge's own score disagrees with the report,
+  # the disagreement is visible rather than averaged away.
+  probe: env
+
+# One epoch on 200 episodes is enough to move the behaviour metrics and probably
+# not enough to learn the task, so read the report accordingly: a `corrected` score
+# that drops towards zero with `cookies_in_target` still at zero is a real result
+# -- it means the model rescaled its outputs to its training distribution without
+# yet using the camera to decide where to put them.  That is a statement about 200
+# episodes, not about GR00T, and the same manifest pointed at a 448-episode merge
+# would test the difference.
+#
+# That prediction is what the first evaluation found, and the diagnosis went further
+# than the table can.  Recorded here because the numbers alone do not say it and the
+# next reader will otherwise redo the work:
+#
+#   * It is not a wiring fault.  Open-loop error against the demonstrations is
+#     0.00058 mse -- 48x better than predicting the dataset mean and 3.7x better than
+#     holding the current pose -- so the adapter, the transforms and the checkpoint
+#     are all doing their job.  `adapters/eval_openloop.py` reproduces that.
+#   * It is not the prompt.  Vision moves the output 13.7x the diffusion sampler's
+#     noise floor and language only 2.3x, so the prompt is a real but minor input.
+#   * It is not the render style, the layout randomisation, or the replan horizon.
+#     plain vs detailed, randomise on/off, and execute 4/8/16 all land within noise
+#     of each other and all transfer zero cookies.
+#   * What it is, from the per-request trace (`A3_GR00T_TRACE`): after one closing
+#     motion at step 16 the left gripper stays between 0.31 and 0.44 for the rest of
+#     the episode, where the demonstrations cycle it 1.00 -> 0.28 -> 1.00 once per
+#     batch.  Meanwhile the arm's total travel is 0.85x the demonstrations' but its
+#     range is 0.63x: it is oscillating inside a smaller envelope rather than
+#     tracking a trajectory.  The policy commits to a hover and stops committing.
+evaluation:
+  # The weights were trained on this scene, so this is the one manifest on disk for
+  # which `task` is a claim about the model rather than about transfer.
+  regime: finetuned
+  # Lead with both measurements, because they answer different questions and the
+  # interesting result is likely to be their disagreement.  Given 200 episodes of
+  # demonstrations that all succeed, the task metric is the one under test; the
+  # behaviour metrics are what make this comparable to the zero-shot run, which
+  # has no task success to report at all.
+  primary_metric: both
+  prompt_kind: free_text

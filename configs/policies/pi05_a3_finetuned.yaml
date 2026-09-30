@@ -1,0 +1,144 @@
+# π0.5 fine-tuned on A3's own cookie task.
+#
+# Its zero-shot counterpart is configs/policies/pi05_base.yaml, and the two are meant to
+# be read as a pair: same camera, same prompt, same execution rhythm, same scene -- the
+# only difference is 20,000 steps of training on this robot's own demonstrations, so the
+# difference between their reports is attributable to the fine-tune and to nothing else.
+#
+# Repointing it at a different checkpoint
+# ---------------------------------------
+# Checkpoints are named by step, zero-padded to six digits, with a `last` symlink beside
+# them -- so the finished run is `checkpoints/last/pretrained_model` and an intermediate
+# one is `checkpoints/006000/pretrained_model`.  (Note the absence of a `checkpoint-`
+# prefix: the name is bare, which is also what `scripts/prune_checkpoints.sh` has to
+# match.  A glob written for the prefixed form matches nothing and prunes nothing, while
+# reporting success on every pass -- worth knowing if the disk ever fills during a run.)
+#
+# `scripts/prune_checkpoints.sh` keeps the newest three, so 006000 will not survive a
+# 20,000-step run; the ones on disk at the end are the interesting ones to sweep.
+# `lerobot_train.py` has no `save_total_limit`, and each checkpoint is ~11 GB, so the
+# pruner runs alongside training rather than the disk filling silently partway through.
+#
+# What is different from the base manifest, and why
+# ------------------------------------------------
+# Nothing structural.  That is the point of how the adapter is written: it reads the
+# checkpoint's `policy_preprocessor.json`, finds the normalization statistics the training
+# installed, and uses those instead of the dataset's.  So this manifest does not pass
+# `--config stats=...` and the adapter does not need it -- the numbers that describe this
+# model's action range travel with the weights.
+#
+# The checkpoints on the robot side are the same too, which is deliberate: the model was
+# trained on A3's own `[L0..L6, L_grip, R0..R6, R_grip]` joint layout, so there is no arm
+# pairing, no affine and no inverse kinematics between the model and the robot.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_finetuned.yaml
+#
+# Then run it:
+#   a3-sim compare --scene a3_cookie_same_column \
+#       --manifest configs/policies/pi05_a3_finetuned.yaml --seeds 0,1,2 \
+#       --steps 400 --visual-style plain
+
+name: pi05-a3-finetuned
+notes: >
+  π0.5 (PaliGemma-2B plus a 300M flow-matching action expert) fine-tuned here on 200
+  episodes collected from a3_cookie_same_column, 20,000 steps at batch 8.  Only the
+  action expert and the projections were trained -- all of PaliGemma was frozen, which is
+  what makes a 4.1B-parameter model fit on one 32 GB card (693M trainable, 15.7 GB peak).
+  Because the training data is this scene rendered by this camera with this prompt, the
+  language and visual inputs are in distribution in a way no released π0.5 checkpoint can
+  match, which cuts both ways: a good score here is a statement about 200 episodes of one
+  task, not about π0.5.
+
+transport:
+  kind: subprocess
+  runtime:
+    # "local" because the command names the interpreter directly; the isolation is the
+    # same as conda's -- a separate process with a separate environment.  This one holds
+    # Python 3.12.3, torch 2.8.0+cu128, lerobot 0.5.1, transformers 5.3.0.
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b1_20k/checkpoints/last/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # Offline, so the tokenizer resolves through the cache entry that
+    # `scripts/setup_paligemma_tokenizer_cache.py` populates rather than reaching for the
+    # gated `google/paligemma-3b-pt-224` and asking for `chat_template.jinja`, a file the
+    # ungated mirror does not carry.  Online that request 403s and takes the run with it.
+    #
+    # The adapter passes the local tokenizer directory directly, which avoids the gated
+    # name altogether -- but the checkpoint's own preprocessor is loaded from disk too, and
+    # being explicit about offline costs nothing.
+    HF_HUB_OFFLINE: "1"
+    # Uncomment to record every request and response to a JSONL file, which is how a
+    # closed-loop run is reconstructed step by step.  Same role as the GR00T manifests'
+    # A3_GR00T_TRACE: the summary metrics cannot distinguish a model that tracks the
+    # demonstration from one that moved early and then stopped, and the video is 20 frames
+    # per second of 400 steps.  Left commented because a trace only matters when something
+    # is wrong.
+    #
+    # Worth knowing before reading one: pi0.5's flow-matching head samples from random
+    # noise, so the policy is **stochastic**.  Two runs of the same seed give different
+    # actions -- measured, as a seed whose `cookies_in_source` differed between a
+    # comparison run and a video render of that same seed.
+    # A3_PI05_TRACE: /tmp/pi05_trace.jsonl
+
+observation:
+  # Identical to the base manifest's: three cameras paired by what they look at (the
+  # third-person view is the model's `base_0_rgb`, the two wrists are the wrists), resized
+  # here to the 224x224 the checkpoint consumes.
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    # One vector, because π0.5's preprocessor consumes the state as a single tensor and
+    # discretizes it into the language prompt -- there is no state projector.
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  # The same 16-of-50 as the base manifest, so the pair differs only in its weights.  See
+  # that file for why: 50 steps is 2.5 s of open-loop motion, and 16 is A3's own
+  # quarter-second beat.
+  execute: 16
+  dt: 0.05
+  normalize:
+    # The checkpoint's own postprocessor inverted the QUANTILES transform before the
+    # adapter saw these numbers, using the statistics saved at training time.  That is the
+    # difference from the base manifest, where the statistics had to be supplied from the
+    # dataset -- and the reason this field is still "none" rather than naming a scale.
+    mode: none
+
+success:
+  # The environment decides, so this model is measured on the same ruler as every other.
+  probe: env
+
+evaluation:
+  # Trained on this scene, with this prompt, on this robot.
+  regime: finetuned
+  # Both, because the two answers differ and their agreement is the interesting part.
+  # Behaviour is what makes this comparable to the zero-shot base run; task success is the
+  # claim the fine-tune is actually making.
+  primary_metric: both
+  prompt_kind: free_text

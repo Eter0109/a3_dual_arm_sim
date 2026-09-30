@@ -354,6 +354,7 @@ def _add_open_bin(
     friction: tuple[float, ...],
     floor_z: float = 0.753,
     wall_z: float | None = None,
+    material: str | None = None,
 ) -> None:
     """Create a collision-enabled, open-topped box on the work surface."""
     x, y = center
@@ -367,12 +368,17 @@ def _add_open_bin(
         "friction": _vec(friction),
         "group": "3",
     }
+    # ``rgba`` on a geom overrides the material's own colour, so only one of the
+    # two is ever set: passing both would silently discard the material.
     visual_common = {
-        "rgba": rgba,
         "contype": "0",
         "conaffinity": "0",
         "group": "2",
     }
+    if material is None:
+        visual_common["rgba"] = rgba
+    else:
+        visual_common["material"] = material
     ET.SubElement(
         parent,
         "geom",
@@ -430,6 +436,79 @@ def _add_open_bin(
         )
 
 
+def _add_slot_grid(
+    parent: ET.Element,
+    *,
+    name: str,
+    slots: tuple[tuple[float, ...], ...],
+    slot_half_size: tuple[float, ...],
+    surface_z: float,
+    materials: tuple[str, ...],
+    height_m: float = 0.0004,
+    sink_m: float = 0.0005,
+) -> None:
+    """Tile a bin floor with one flat tile per placement slot.
+
+    The scene asks for ten upright Cookies in a 2x5 box, but nothing in the render
+    said so: at this camera the bin is a plain rectangle about 90 by 60 pixels, and
+    the ten slots inside it are an empty region.  Neither a policy reading "the 2x5
+    box" nor a person watching the video had anything to ground the phrase in.
+
+    The tiles are drawn from the same slot centres the success criterion uses
+    (``target_slots_local_m``) and are exactly one Cookie's footprint, so the drawn
+    grid cannot disagree with what the environment checks.  The 6 mm space between
+    the two columns is not invented: it is the real gap between Cookie columns, and
+    leaving it bare is what makes the box read as two columns rather than one wide
+    field.
+
+    Tiles alternate tone by *row*, not by row and column.  This is a resolution
+    decision, not a taste one.  The five rows occupy 31.7 mm, which the video's front
+    camera renders as roughly ten pixels: each row is about two pixels tall, so any
+    drawn line between rows -- even a 2 mm one -- is sub-pixel and disappears.  Whole
+    tiles in alternating tones survive at that size because the signal is carried by
+    a two-pixel block of colour rather than by an edge, and the eye counts five bands
+    where a lattice would have shown nothing.  The column split does not need the
+    same treatment: its gap is six millimetres across, and it is a vertical edge
+    running the full height of the region.
+
+    Visual only.  ``contype``/``conaffinity`` are zero, so a tile cannot be touched
+    and Cookie placement is unaffected, and the 0.4 mm the tiles stand proud of the
+    floor is below the 1 mm clearance the expert keeps.
+
+    Each tile is sunk 0.5 mm into the floor rather than rested on it.  A face exactly
+    coplanar with the floor z-fights, and the artefact reads as a bright outline
+    around the whole lattice; sinking costs nothing because the tiles are visual, and
+    it leaves only the intended 0.4 mm of relief.
+    """
+
+    if not slots:
+        raise ValueError(f"{name} slot grid needs at least one slot")
+    if len(materials) < 2:
+        raise ValueError(f"{name} slot grid needs two tones to alternate between")
+    half_x, half_y = slot_half_size[0], slot_half_size[1]
+    if half_x <= 0 or half_y <= 0:
+        raise ValueError(f"{name} slot grid needs a positive slot footprint")
+    half_height = (height_m + sink_m) / 2
+    z = surface_z + height_m - half_height
+    rows = sorted({slot[1] for slot in slots})
+    columns = sorted({slot[0] for slot in slots})
+    for slot in slots:
+        row = rows.index(slot[1])
+        column = columns.index(slot[0])
+        ET.SubElement(
+            parent,
+            "geom",
+            name=f"{name}_r{row}c{column}",
+            type="box",
+            pos=f"{slot[0]} {slot[1]} {z}",
+            size=f"{half_x} {half_y} {half_height}",
+            material=materials[row % len(materials)],
+            contype="0",
+            conaffinity="0",
+            group="2",
+        )
+
+
 def _add_beveled_cookie_mesh(
     assets: ET.Element,
     name: str,
@@ -478,6 +557,40 @@ def _add_beveled_cookie_mesh(
         name=name,
         vertex=_vec(tuple(value for vertex in vertices for value in vertex)),
         face=" ".join(str(value) for triangle in faces for value in triangle),
+    )
+
+
+def _add_detailed_visuals(visual: ET.Element) -> None:
+    """Tune lighting for shape readability, without touching geometry.
+
+    The scene carries two directional lights, but MuJoCo also adds a headlight that
+    follows the camera with a default diffuse of 0.4 -- stronger than the scene's own
+    fill light.  A camera-locked light casts no visible shadow and shades every face
+    it sees equally, so the two real lights end up contributing mostly a flat wash and
+    a packed row of Cookie blades reads as one solid block.  Dimming the headlight
+    restores directional shading, which is what makes edges visible.
+
+    Only rendering changes: no geom, joint, actuator, contact parameter or mass is
+    touched, and the visual-only Cookie mesh already carries
+    ``contype="0" conaffinity="0"``.
+
+    Measured, so the ineffective knobs are not carried as decoration:
+
+    - headlight ``0.4`` -> ``0.16``: mean pixel change **6.80**, the whole point.
+    - ``quality/shadowsize`` ``4096`` -> ``8192``: mean change **0.03**.  The default
+      is already finer than the scene needs, so raising it buys nothing.
+    - ``map/shadowclip`` ``1.0`` -> ``3.0``: mean change **0.00**.  No effect here.
+    - There is no soft-shadow option: MuJoCo 3.3.7's ``mjtRndFlag`` has no
+      ``mjRND_SOFTSHADOW``, so the hard shadow edge on the table cannot be smoothed
+      from here.  It is visible in the videos and is not fixable by configuration.
+    """
+
+    ET.SubElement(
+        visual,
+        "headlight",
+        ambient="0.08 0.08 0.09",
+        diffuse="0.16 0.16 0.18",
+        specular="0.12 0.12 0.12",
     )
 
 
@@ -541,6 +654,33 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         mocap="true",
         pos=_vec((source_center[0], source_center[1], 0.0)),
     )
+    # With a material the bin picks up a highlight along its rim; without one it
+    # falls back to the flat inline colour the original renders used.
+    bin_material = "bin" if config.visual_style == "detailed" else None
+
+    def add_slot_grid(parent: ET.Element, bin_name: str) -> None:
+        """Draw the 2x5 placement lattice on a target-style bin.
+
+        Only the target bins get it.  The source bin holds eighty Cookies in a
+        4x20 layout and is covered by them, so a lattice there would be invisible
+        under the stack and would add eighty more geoms to every render for nothing.
+        The source's count is carried by the task prompt instead.
+        """
+
+        if config.visual_style != "detailed":
+            return
+        _add_slot_grid(
+            parent,
+            name=bin_name,
+            slots=scene.target_slots_local_m,
+            slot_half_size=scene.cookie_half_size_m,
+            # The floor geom is centred on ``floor_z`` with half the wall thickness,
+            # so its top surface -- where a Cookie actually rests -- is that much
+            # higher.  The tiles sit on it rather than inside it.
+            surface_z=scene.target_floor_z_m + scene.bin_wall_thickness_m / 2,
+            materials=("slot_even", "slot_odd"),
+        )
+
     _add_open_bin(
         source_bin,
         name="source_bin",
@@ -552,6 +692,7 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         friction=scene.bin_friction,
         floor_z=scene.source_floor_z_m,
         wall_z=scene.source_wall_base_z_m + scene.source_bin_wall_height_m / 2,
+        material=bin_material,
     )
 
     # A free rigid box can only follow the gripper through physical contact.
@@ -576,7 +717,9 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         friction=scene.bin_friction,
         floor_z=scene.target_floor_z_m,
         wall_z=scene.target_bin_wall_height_m / 2,
+        material=bin_material,
     )
+    add_slot_grid(target_bin, "target_slot")
     if scene.spare_target_bin_world_position_m is not None:
         spare_bin = ET.SubElement(
             world,
@@ -603,7 +746,9 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             friction=scene.bin_friction,
             floor_z=scene.target_floor_z_m,
             wall_z=scene.target_bin_wall_height_m / 2,
+            material=bin_material,
         )
+        add_slot_grid(spare_bin, "spare_slot")
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})
     rows = sorted({p[1] for p in scene.cookie_source_positions_m})
@@ -667,18 +812,26 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 ET.SubElement(cookie, "geom", **attributes)
         column, row = columns.index(x), rows.index(y)
         cookie_rgba = "1.0 0.78 0.20 1" if (column + row) % 2 == 0 else "0.88 0.50 0.04 1"
-        ET.SubElement(
-            cookie,
-            "geom",
-            name=f"cookie_{index}_visual",
-            type="mesh",
-            mesh="cookie_visual_mesh",
-            mass="0.0001",
-            rgba=cookie_rgba,
-            contype="0",
-            conaffinity="0",
-            group="2",
-        )
+        # In the detailed style the colour comes from a material rather than an
+        # inline rgba, because a material is what carries specular and shininess;
+        # pairs of adjacent Cookies are given opposite materials so the alternation
+        # survives at grazing angles where a flat colour washes out.
+        visual_attributes: dict[str, str] = {
+            "name": f"cookie_{index}_visual",
+            "type": "mesh",
+            "mesh": "cookie_visual_mesh",
+            "mass": "0.0001",
+            "contype": "0",
+            "conaffinity": "0",
+            "group": "2",
+        }
+        if config.visual_style == "detailed":
+            visual_attributes["material"] = (
+                "cookie_light" if (column + row) % 2 == 0 else "cookie_dark"
+            )
+        else:
+            visual_attributes["rgba"] = cookie_rgba
+        ET.SubElement(cookie, "geom", **visual_attributes)
 
 
 def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
@@ -715,6 +868,8 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         offwidth=str(config.image_width),
         offheight=str(config.image_height),
     )
+    if config.visual_style == "detailed":
+        _add_detailed_visuals(visual)
     default = ET.SubElement(root, "default")
     ET.SubElement(
         default,
@@ -742,6 +897,67 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     )
     ET.SubElement(assets, "material", name="floor", rgba="0.22 0.24 0.27 1", reflectance="0.05")
     ET.SubElement(assets, "material", name="table", rgba="0.52 0.34 0.18 1")
+    if config.visual_style == "detailed":
+        # A dedicated material per role instead of the renderer's defaults, which
+        # give every geom the same specular and shininess and therefore the same
+        # flat highlight.  Blades packed 0.4 mm apart separate when their edges catch
+        # light at different angles, so the specification that matters here is a
+        # narrow, bright highlight rather than a broad matte one.
+        #
+        # Both Cookie tones are yellow, as the task prompt names them, and differ in
+        # luminance by about 1.5:1.  Alternating two tones of one hue is what makes
+        # the packing countable: twenty rows at a 6.3 mm pitch render to roughly two
+        # pixels each, and a *colour* difference between neighbours survives that
+        # where any drawn edge does not.  A hue difference was rejected for the same
+        # reason -- at two pixels a viewer reads tone, not hue.
+        ET.SubElement(
+            assets,
+            "material",
+            name="cookie_light",
+            rgba="1.00 0.87 0.12 1",
+            specular="0.55",
+            shininess="0.75",
+            reflectance="0.02",
+        )
+        ET.SubElement(
+            assets,
+            "material",
+            name="cookie_dark",
+            rgba="0.76 0.56 0.00 1",
+            specular="0.55",
+            shininess="0.75",
+            reflectance="0.02",
+        )
+        # The bin was given a material before any geom referenced it; it is now
+        # actually bound through ``_add_open_bin``.  Bare metal: a light body makes
+        # the dark slot tiles read as a recess rather than as paint on the floor.
+        ET.SubElement(
+            assets,
+            "material",
+            name="bin",
+            rgba="0.72 0.74 0.78 1",
+            specular="0.35",
+            shininess="0.45",
+        )
+        # Slot tones are neutral and both far darker than the bin, so a filled slot
+        # changes the pixel by a large step: yellow on near-black is a much easier
+        # thing to read a progress count from than yellow on light grey.
+        ET.SubElement(
+            assets,
+            "material",
+            name="slot_even",
+            rgba="0.36 0.41 0.50 1",
+            specular="0.10",
+            shininess="0.20",
+        )
+        ET.SubElement(
+            assets,
+            "material",
+            name="slot_odd",
+            rgba="0.13 0.16 0.21 1",
+            specular="0.10",
+            shininess="0.20",
+        )
     for link_name in ("base_link", *(joint.child for joint in source_joints.values())):
         ET.SubElement(assets, "mesh", name=f"mesh_{link_name}", file=f"{link_name}.STL")
     ET.SubElement(

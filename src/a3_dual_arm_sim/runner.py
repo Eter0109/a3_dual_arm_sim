@@ -89,6 +89,16 @@ class EpisodeRunner:
                     self.env.emergency_stop("teleoperation emergency stop")
                 action = self.policy.act(observation, self.task)
                 next_observation, _, terminated, truncated, info = self.env.step(action)
+                # Optional per-step hook, read the same duck-typed way as
+                # ``metrics`` and ``success_override`` below, so a caller that needs
+                # the trajectory rather than just its outcome does not have to
+                # reimplement the loop to get it.  Comparison is the caller that
+                # needs it: whether a model's output could drive the robot at all is
+                # a question about how far the environment had to correct each
+                # command, and only the environment knows that.
+                observe_step = getattr(self.policy, "observe_step", None)
+                if observe_step is not None:
+                    observe_step(requested=action, applied=info["applied_action"], info=info)
                 recording_enabled = bool(getattr(self.policy, "recording", True))
                 if self.recorder is not None and recording_enabled:
                     self.recorder.add_frame(observation, info["applied_action"])

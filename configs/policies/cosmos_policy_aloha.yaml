@@ -1,0 +1,226 @@
+# Cosmos Policy, ALOHA fine-tune, driven through the external-policy bridge.
+#
+# Why this model first: it is the lightest on the list (the guide measures 6.0 GB
+# VRAM for ALOHA tasks against this machine's 32 GB), it is explicitly bimanual,
+# and it exposes three cameras -- a third-person view plus two wrist views --
+# which is exactly A3's camera set.  It also runs torch 2.7.0+cu128, one of the
+# few pinned versions with sm_120 kernels, so the RTX 5090 can execute it.
+#
+# The model side lives in the Cosmos Policy checkout, not here:
+#   /root/autodl-tmp/cosmos-policy/adapters/cosmos_policy_aloha.py
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/cosmos_policy_aloha.yaml
+#
+# Then run it:
+#   a3-sim run --scene sandbox --policy-manifest configs/policies/cosmos_policy_aloha.yaml \
+#       --steps 200 --no-camera-render
+
+name: cosmos-policy-aloha
+notes: >
+  NVIDIA Cosmos Policy, ALOHA 2B fine-tune (nvidia/Cosmos-Policy-ALOHA-Predict2-2B).
+  Trained on 185 real-world ALOHA demonstrations over four tasks (folding a shirt,
+  putting candies in a bowl, putting candy in a bag, putting eggplant and chicken
+  on a plate) -- none of which is the A3 cookie task.  Expect task-appropriate
+  motion, not task success: this manifest exists to measure whether the bridge
+  drives a real 2B checkpoint correctly, not to solve the cookie scene.
+
+transport:
+  kind: subprocess
+  runtime:
+    # The venv has its own interpreter (3.10) and its own torch (2.7.0+cu128).
+    # "local" rather than "conda" because Cosmos Policy is managed by uv; the
+    # command names the interpreter directly, so no activation step exists to go
+    # wrong.  The isolation is identical either way -- a separate process with a
+    # separate environment.
+    kind: local
+  cwd: /root/autodl-tmp/cosmos-policy
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/cosmos_policy_aloha.py
+    - --config
+    # The .pt FILE, not its directory.  Cosmos Policy decides the checkpoint format
+    # with ``"pt" if path.endswith(".pt") else "dcp"``, so a directory is read as a
+    # DCP checkpoint and ``easy_io.load`` is handed a directory, which fails with
+    # "Unsupported format".  The same code then looks for ``<dir>/model`` when the
+    # path really is DCP, so both forms are meaningful -- this one is a single-file
+    # checkpoint.
+    - ckpt=/root/autodl-tmp/models/Cosmos-Policy-ALOHA-Predict2-2B/Cosmos-Policy-ALOHA-Predict2-2B.pt
+    # Which of the checkpoint's own task labels to drive it with.
+    #
+    # The cache is not a closed table.  It is a dict from instruction string to
+    # precomputed T5 embedding, and ``get_t5_embedding_from_cache`` computes and
+    # writes back on a miss -- verified on the running model, which logged
+    # "Computing T5 embedding for new instruction: ..." for a string it had never
+    # seen.  So the six labels below are what the released cache happens to hold,
+    # not what the interface allows.  What stops us using an arbitrary instruction
+    # is the cost: encoding one needs T5-11B, 45.23 GB, and this machine has 8.4 GB
+    # free on the data disk and 28 GB on the system disk.
+    #
+    # This entry therefore selects among the six rather than restricting anything.
+    # The choice was measured, not guessed -- 3 seeds x 400 steps each, in this
+    # scene, with the current camera:
+    #
+    #   label                                 mean corrected   per-seed range
+    #   put brown chicken wing on plate                 0.388   0.325 .. 0.507
+    #   put candy in bag                                0.404   0.398 .. 0.417
+    #   put purple eggplant on plate                    0.412   0.403 .. 0.422
+    #   pick up the cube and place it in the bowl       0.413   0.400 .. 0.422
+    #   fold shirt                                      0.438   0.432 .. 0.445
+    #   put candies in bowl                             0.611   0.605 .. 0.615
+    #
+    # Read the ranges, not the means.  "brown chicken wing" has the lowest mean and
+    # is not a candidate: its spread is 0.182, nine times any other label's, and its
+    # best seed is better than its worst by more than the whole field.  It is the
+    # noisiest label, not the best one.  The reliable statements are the two the
+    # ranges support: "put candies in bowl" is the worst (its range overlaps
+    # nothing else), and "fold shirt" is worse than the top group.  The top three --
+    # candy in bag, eggplant, and the pick-up-and-place this entry uses -- are
+    # indistinguishable, so the current choice stands on evidence rather than on the
+    # semantic guess it started as.  That guess was tested and was wrong: "put
+    # candies in bowl" reads like the closest match to moving small objects into a
+    # container, and it is the worst of the six.
+    #
+    # One thing to know about this particular label, found after the ranking: it is
+    # not a training label of this checkpoint.  The ALOHA dataset's own command
+    # whitelist (cosmos_policy/datasets/aloha_dataset.py) lists fold_shirt,
+    # put_candies_in_bowl, put_candy_in_bag, flatten_shirt,
+    # put_brown_chicken_wing_on_plate and put_purple_eggplant_on_plate; the released
+    # pkl carries five of those plus this string, which appears nowhere in the repo,
+    # the model card or the paper.  Its behaviour is fine -- 0.413, in the top group,
+    # and its value clusters with "put candy in bag" -- so it is a usable input, not
+    # a broken one.  But it is not a task the model was taught, and a future reader
+    # should not take the ranking above as evidence that it was.
+    - --config
+    - task=pick up the cube and place it in the bowl
+    # Cosmos Policy picks its action and proprio widths by searching sys.argv for
+    # "libero", "robocasa" or "aloha", and FALLS BACK TO LIBERO -- which is
+    # 7-dimensional -- when none appears.  A missing platform name would therefore
+    # load the ALOHA checkpoint against LIBERO constants and produce wrong-shaped
+    # actions rather than an error.  platform=aloha makes that explicit, and the
+    # adapter re-checks it after import, so the failure is a startup error either
+    # way.  The name also appears in the adapter path, which is luck, not a
+    # guarantee.
+    - --config
+    - platform=aloha
+  # A 2B diffusion model loading from a cold page cache is not fast; this budget
+  # covers weight download and load, not a request.
+  startup_timeout_s: 1800
+  # One action chunk at 10 denoising steps.  Cosmos Policy's ALOHA deployment uses
+  # 10 steps and reports sub-second chunks on datacenter GPUs, but the FIRST call
+  # also pays for kernel selection and any lazy compilation, and this card is not a
+  # datacenter part.  The budget is generous for that reason; a persistently slow
+  # model should be diagnosed by watching the bridge's log, not by widening this.
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    # Cosmos Policy's loader reaches for the base video2world checkpoint
+    # (nvidia/Cosmos-Predict2-2B-Video2World) even when the fine-tuned policy
+    # weights are present, and huggingface_hub defaults to huggingface.co, which is
+    # unreachable here.  Without this the load stalls on retries and fails after
+    # five attempts.  Set here rather than in the adapter because it is a
+    # deployment fact about this machine, not a property of the model -- the same
+    # adapter on a host with Hub access needs no change.
+    HF_ENDPOINT: https://hf-mirror.com
+
+observation:
+  # ALOHA's observation dict is {primary_image, left_wrist_image,
+  # right_wrist_image, proprio}, and A3 supplies exactly three cameras plus a
+  # state vector.  Nothing is dropped here -- which is the reason to try this
+  # model before the two-camera ones on the list.
+  images:
+    primary_image:
+      source: observation.images.front
+      # Cosmos Policy resizes to 224 for the "cosmos" model family
+      # (MODEL_IMAGE_SIZES in robot_utils.py).  Resizing here rather than in the
+      # adapter keeps the bytes on the wire small: A3 captures 256x256, so a
+      # mismatched size would ship 30% more data for nothing.
+      resize: [224, 224]
+    left_wrist_image:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_image:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    proprio:
+      source: observation.state
+      # The robots disagree about joint count, and this is the whole mismatch:
+      # A3 has seven joints plus a gripper per arm (16 values), ALOHA has six
+      # plus a gripper (14).  A3's layout is
+      #   [L0..L6, L_grip, R0..R6, R_grip]
+      # so indices 6 and 14 are the seventh wrist joints (L_WRIST_Y, R_WRIST_Y)
+      # that ALOHA has no counterpart for.  Dropping them is not a limitation to
+      # work around -- the ALOHA checkpoint has no weights for those inputs, and
+      # feeding it sixteen values would shift every joint after the sixth.
+      indices: [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 15]
+
+action:
+  space: joint_position
+  dim: 14
+  # The inverse of the proprio mapping: ALOHA dimension i drives A3's native
+  # dimension joint_map[i].  ALOHA's grippers land on A3's gripper slots (7 and
+  # 15), and A3's two extra wrist joints are left to `default`.
+  joint_map: [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 15]
+  # "hold" rather than a constant.  A3's home pose happens to have zero wrist
+  # roll, so 0.0 would work by coincidence -- but only until either robot's zero
+  # moved, and the failure would look like the policy commanding a wrist, which
+  # is exactly the kind of misattribution this field exists to prevent.
+  default: hold
+  # Cosmos Policy predicts 50 (ALOHA_CONSTANTS["NUM_ACTIONS_CHUNK"]).
+  chunk: 50
+  # Predicted 50, execute 16.  Two reasons, both honest: re-observing more often
+  # keeps the A3 arm from committing to a long open-loop rollout of a policy
+  # trained on a different robot and a different task, and the time bases differ
+  # (see dt below), so a 50-step chunk would be 2.5 s of A3 steps standing in for
+  # the 1.0 s ALOHA intended.  16 steps is 0.8 s at A3's control rate.
+  execute: 16
+  # ALOHA demonstrations run at 50 Hz; this environment controls at 20 Hz.  The
+  # field records the model's own rate so a reader can see the mismatch rather
+  # than infer it.  No resampling is applied -- actions are absolute joint
+  # positions, so applying them more slowly stretches the motion instead of
+  # corrupting it, which is the safer of the two failure modes.
+  dt: 0.02
+  normalize:
+    # The adapter passes unnormalize_actions=True to Cosmos Policy, which returns
+    # physical joint angles.  Declaring "none" here is therefore a statement, not
+    # an omission: if the model ever reported normalised values instead, the
+    # gateway would refuse the chunk rather than execute it.
+    mode: none
+
+success:
+  # The environment's verdict decides, so Cosmos Policy is measured on the same
+  # ruler as every other model on the list.  Its own value estimate still arrives
+  # in the episode info as cosmos_value, which makes a disagreement between the
+  # two visible instead of hidden.
+  probe: env
+
+evaluation:
+  # Released weights, trained on 185 real ALOHA demonstrations.  Nothing about A3.
+  regime: zero_shot
+  # Behaviour is the informative axis here: the task metric is expected to be
+  # near zero because no cookie task was ever demonstrated to this model.
+  primary_metric: behavior
+  # Not free_text, and this is the single most important thing to know about
+  # driving this checkpoint.  Its language conditioning is a precomputed T5
+  # embedding looked up by label; the released cache carries six of them.  A string
+  # outside that set does not raise -- it makes the model build a T5-11B encoder on
+  # the spot, which is a 45 GB download.
+  #
+  # Say plainly what this flag means, because it is easy to read as a limit on the
+  # model and it is not one.  It records *our* configuration: this manifest picks a
+  # label from the six the cache holds, so the task string in the request is
+  # replaced before it is sent.  The interface itself accepts any string, and
+  # accepts a raw embedding array as well -- passing an array and passing the string
+  # it came from produce bit-identical actions, verified on the running model.  The
+  # constraint is disk, not architecture.
+  prompt_kind: fixed_label
+  prompt_labels:
+    - fold shirt
+    - put candy in bag
+    - put candies in bowl
+    - put purple eggplant on plate
+    - put brown chicken wing on plate
+    - pick up the cube and place it in the bowl

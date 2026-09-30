@@ -109,6 +109,98 @@ Same commands, no pipeline position -- each answers one question.
 | `plot_rollout_trace.py` | Is the policy following the demonstration, or cycling through it?  Charts the phase trace against step index, Pillow only |
 | `measure_render_consistency.py` | Does `--fast-render` change the pixels?  Renders one state twice, with and without the shadow and reflection passes |
 
+## External models
+
+The bridge lets a model from another project drive this environment without sharing
+its interpreter -- see `docs/external-policy-bridge.md`.  Two scripts belong to it,
+and the second is meant to be copied *out* of this repository.
+
+| Script | What it does |
+| --- | --- |
+| `make_replay_recording.py` | Records an action sequence (`--source hold` or `--source dataset`) for the bridge's replay transport, so the whole pipeline can be exercised with no model installed |
+| `a3_bridge_server.py` | The model side of the wire protocol.  Imports nothing from `a3_dual_arm_sim` and nothing beyond numpy, because it runs in the model's environment, not this one |
+| `render_bridge_policy_video.py` | Records an external model's rollout to an mp4, with the behaviour metrics the comparison uses drawn onto the frame |
+
+```bash
+# A recording, then a rollout that uses it
+a3-py scripts/make_replay_recording.py --source hold --steps 200 \
+    --output configs/policies/replay_hold.json
+a3-sim run --scene sandbox --policy-manifest configs/policies/replay_hold.yaml --steps 100
+
+# Audit a manifest for a model that is not installed anywhere
+a3-sim policy check configs/policies/subprocess_template.yaml
+
+# Watch what a model actually does, with its numbers on the frame
+python scripts/render_bridge_policy_video.py \
+    --manifest configs/policies/gr00t_bimanual.yaml \
+    --output outputs/videos/gr00t_sandbox.mp4 --steps 200
+
+# The cookie task: one source box, one target box
+python scripts/render_bridge_policy_video.py \
+    --manifest configs/policies/gr00t_bimanual.yaml --scene a3_cookie_same_column \
+    --output outputs/videos/gr00t_cookie.mp4 --steps 400
+
+# Put several models on one ruler
+a3-sim compare --scene sandbox \
+    --manifest configs/policies/cosmos_policy_aloha.yaml \
+    --manifest configs/policies/gr00t_bimanual.yaml \
+    --steps 200 --output report.json
+```
+
+`--scene` takes `sandbox` or any registered collection scene
+(`a3_cookie_same_column`, `a3_cookie_batch`, `a3_cookie_two_box`,
+`a3_cookie_transfer`, `a3_grasp`).  A registered scene is built through its own
+builder rather than by repeating its task config here, because that config decides
+what counts as success -- a copy would drift from the one the datasets were
+collected with.
+
+`--visual-style detailed` gives the Cookies their own materials and dims the
+camera-locked headlight, so the packed blades read as separate objects instead of
+one striped block.  It changes no physical parameter and is **not** the default:
+the rendered pixels are a dataset contract, and every collected image so far was
+produced with `plain`.  Measured on `a3_cookie_same_column`, the two styles differ
+by 6.80 mean pixel value while every mass, geom size, contact bit and joint range is
+identical.
+
+```bash
+python scripts/render_bridge_policy_video.py \
+    --manifest configs/policies/gr00t_bimanual.yaml \
+    --scene a3_cookie_same_column --visual-style detailed \
+    --output outputs/videos/gr00t_cookie_detailed.mp4 --steps 200
+```
+
+The layout is left unrandomised by default (`--randomize` opts in): two models
+recorded on different arrangements could not be compared, and a video is usually
+watched to see what a model does with a known scene.
+
+The adapter a model needs is one file with two functions, `load(config)` and
+`infer(model, request)`; the replay recording's format and the adapter's contract
+are both documented in the scripts themselves.
+
+### What a model was asked is not the same as what the scene asked for
+
+A model with `prompt_kind: fixed_label` ignores the scene's task string: Cosmos
+Policy looks its prompt up in a precomputed table, and the released ALOHA
+checkpoint carries six labels, none about cookies.  Rendered on
+`a3_cookie_same_column`, GR00T is driven with the cookie instruction while Cosmos
+Policy is still driven with "pick up the cube and place it in the bowl".
+
+The frame shows each model's own `*_task` self-report for exactly this reason, so
+the difference is visible in the video rather than only in a manifest.
+
+### Episode length is not a detail
+
+Behaviour metrics taken over a short episode are dominated by the initial transient:
+the arm starts from its home pose, so a model's first commands are necessarily far
+from anything useful, and the first inference also carries kernel selection and
+warmup.  Measured on the same two models, going from 32 to 200 steps changed
+Cosmos Policy's correction rate from 0.66 to 0.17 and GR00T's reported inference
+latency from 422 ms to 196 ms.
+
+A comparison therefore has to state its episode length, and a short one answers a
+different question -- "how does the model behave the moment it takes over" -- than a
+long one.
+
 `render_collection_video.py` is worth reaching for before trusting a summary:
 collection writes the three policy cameras because that is what a policy trains on,
 but they are 256x256 and stored per camera with every episode concatenated into one
@@ -133,3 +225,17 @@ than assumed.
   not trained on and simply performs worse.
 * Every script here sets its flags unconditionally rather than exposing both
   options, so the mismatch above cannot be introduced by forgetting an argument.
+
+## Rebuilding an external model
+
+Scripts that exist to put a model back on a machine that does not have it live next
+to the model they belong to, under `integrations/<model>/`, together with the
+adapter that runs in the model's own interpreter and a README recording what each
+step costs and which shortcuts turned out to be wrong.  See
+`integrations/cosmos_policy/` for the worked example: a parallel resumable download
+for a 45 GB file, and the Hugging Face cache layout that
+`from_pretrained("google-t5/t5-11b")` actually resolves against.
+
+They are not in `scripts/` because they import nothing from `a3_dual_arm_sim` and are
+run by hand, on the machine that needs the model -- the same reason
+`a3_bridge_server.py` is written to be copied out of this repository.

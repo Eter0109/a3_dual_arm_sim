@@ -10,14 +10,15 @@ from typing import Any
 import numpy as np
 
 from .collection import collect_cookie_dataset, collect_grasp_dataset
-from .config import load_config
+from .config import VISUAL_STYLES, load_config
 from .cookie_transfer import A3CookieTransferEnv
 from .env import A3DualArmEnv
 from .grasp import A3GraspEnv
-from .model import SceneName, build_model, write_generated_xml
+from .model import build_model, write_generated_xml
 from .policy import HoldPolicy, load_policy, policy_requires_env
 from .recording import LeRobotV3Recorder
 from .runner import EpisodeRunner
+from .tasks import COOKIE_PROMPT
 from .teleop import KeyboardTeleopPolicy
 from .teleop_panel import run_teleop_control_panel
 from .training import default_base_model, train_smolvla
@@ -77,11 +78,7 @@ def _smoke(args: argparse.Namespace) -> int:
         action_mode="joint_position",
         render_cameras=False,
     )
-    task = (
-        "transfer exactly ten upright square cookie blocks into the 2x5 box"
-        if args.scene == "cookie_transfer"
-        else "hold the A3 home pose"
-    )
+    task = COOKIE_PROMPT if args.scene == "cookie_transfer" else "hold the A3 home pose"
     runner = EpisodeRunner(env, HoldPolicy(), task=task)
     try:
         result = runner.run(seed=args.seed, max_steps=args.steps)
@@ -99,6 +96,12 @@ def _smoke(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.policy_manifest is not None:
+        os.environ["A3_POLICY_MANIFEST"] = str(args.policy_manifest)
+    if args.policy is None:
+        if args.policy_manifest is None:
+            raise ValueError("either --policy or --policy-manifest is required")
+        args.policy = "a3_dual_arm_sim.bridge.gateway:make_policy"
     render_mode = "human" if args.render else None
     if policy_requires_env(args.policy):
         # Privileged experts plan against live simulator state, so the
@@ -110,6 +113,7 @@ def _run(args: argparse.Namespace) -> int:
             render_mode=render_mode,
             render_cameras=args.camera_render,
             fast_render=args.fast_render,
+            visual_style=args.visual_style,
         )
         policy = load_policy(args.policy, env=env)
     else:
@@ -121,6 +125,7 @@ def _run(args: argparse.Namespace) -> int:
             render_mode=render_mode,
             render_cameras=args.camera_render,
             fast_render=args.fast_render,
+            visual_style=args.visual_style,
         )
     recorder = _recorder(args, env)
     runner = EpisodeRunner(
@@ -151,6 +156,7 @@ def _teleop(args: argparse.Namespace) -> int:
         render_mode="human",
         render_cameras=args.camera_render,
         fast_render=args.fast_render,
+        visual_style=args.visual_style,
     )
     env.set_key_callback(policy.handle_key)
     recorder = _recorder(args, env)
@@ -182,27 +188,213 @@ def _teleop(args: argparse.Namespace) -> int:
         runner.close()
 
 
+def _policy_check(args: argparse.Namespace) -> int:
+    """Audit one or more manifests without loading any model.
+
+    Every failure this reports would otherwise surface mid-rollout, after the
+    weights were downloaded and the model had loaded.
+    """
+
+    from .bridge.manifest import describe_manifest, load_manifest
+
+    reports: list[dict[str, Any]] = []
+    failed = False
+    for path in args.manifests:
+        try:
+            manifest = load_manifest(path)
+        except ValueError as exc:
+            reports.append({"path": str(path), "usable": False, "problems": [str(exc)]})
+            failed = True
+            continue
+        report = describe_manifest(manifest)
+        problems = list(report["derived"]["problems"])
+        reports.append({"path": str(path), "usable": not problems, **report})
+        failed = failed or bool(problems)
+    print(json.dumps(reports if len(reports) > 1 else reports[0], ensure_ascii=False, indent=2))
+    return 1 if failed else 0
+
+
+#: Reset options that pin a scene to its canonical layout.  Spelled out rather than
+#: defaulted because the three names belong to different scenes -- the plain sandbox
+#: reads ``randomize_objects``, the cookie scenes read ``randomize_scene`` and
+#: ``randomize_cookies`` -- and each environment ignores the ones it does not use.
+DETERMINISTIC_RESET_OPTIONS = {
+    "randomize_objects": False,
+    "randomize_scene": False,
+    "randomize_cookies": False,
+}
+
+
+def _policy_compare(args: argparse.Namespace) -> int:
+    """Run several manifests on one scene and report them side by side.
+
+    Every manifest is driven through the same environment, the same seeds and the
+    same task string, because the point is to make the models comparable rather
+    than to give each its best case.
+    """
+
+    from .bridge.compare import compare, format_table
+    from .bridge.gateway import ExternalPolicyGateway
+    from .bridge.manifest import ManifestError, load_manifest, validate_manifest
+
+    manifests = []
+    for path in args.manifests:
+        manifest = load_manifest(path)
+        problems = validate_manifest(manifest)
+        if problems:
+            raise ManifestError(f"{path} is not usable:\n  - " + "\n  - ".join(problems))
+        manifests.append(manifest)
+
+    def env_factory() -> A3DualArmEnv:
+        return _make_env(
+            args.scene,
+            args.config,
+            action_mode="joint_position",
+            render_cameras=True,
+            fast_render=args.fast_render,
+            visual_style=args.visual_style,
+        )
+
+    def policy_factory(manifest: object, env: object) -> object:
+        return ExternalPolicyGateway(manifest, env=env)  # type: ignore[arg-type]
+
+    seeds = _parse_seeds(args.seeds)
+    report = compare(
+        manifests,
+        env_factory=env_factory,
+        policy_factory=policy_factory,
+        seeds=seeds,
+        steps=args.steps,
+        # The scene's own prompt unless overridden.  ``compare`` falls back to a
+        # hardcoded sandbox string otherwise, which on a cookie scene would ask every
+        # model to "move the A3 dual-arm robot" while the frames fill with cookies --
+        # a silent mismatch between the task the scene implements and the task the
+        # model was told.
+        task=args.task or _default_task(args.scene),
+        scene=args.scene,
+        # The canonical layout unless asked otherwise, which is what the render
+        # script uses too -- a table and a video of "the same" configuration have to
+        # be the same configuration, or a reader who checks will find them disagreeing.
+        reset_options=None if args.randomize else DETERMINISTIC_RESET_OPTIONS,
+    )
+    table = format_table(report)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    print(table)
+    if args.output is not None:
+        print(f"\nJSON report: {args.output}")
+    return 0
+
+
+def _parse_seeds(raw: str) -> list[int]:
+    """Read ``--seeds`` as ``0,1,2`` or ``0-4``."""
+
+    seeds: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, _, stop = part.partition("-")
+            seeds.extend(range(int(start), int(stop) + 1))
+        else:
+            seeds.append(int(part))
+    if not seeds:
+        raise ValueError("--seeds produced no seeds")
+    return seeds
+
+
+def _scene_choices() -> tuple[str, ...]:
+    """Scene names a policy-driving command accepts.
+
+    Two different things share the word "scene" here, and conflating them produces
+    confusing errors.  ``SceneName`` in :mod:`a3_dual_arm_sim.model` names a MuJoCo
+    *layout* (``sandbox`` or the cookie table).  A registered collection scene names
+    a *task contract* plus the config file that lays it out, and several of them
+    share the cookie layout.  Only the collection registry knows which config goes
+    with which task, so the choices come from it rather than from a hand-kept list.
+    """
+
+    from .collection import registered_scenes
+
+    return ("sandbox", "cookie_transfer", *sorted(registered_scenes()))
+
+
+def _styled_config(config: Path | None, visual_style: str) -> Any:
+    """A ``SimConfig`` carrying the requested appearance.
+
+    The appearance is compiled into the model XML, so it cannot be applied to a live
+    scene the way the render flags can -- it has to reach the constructor.  All three
+    environments accept a ``SimConfig`` in place of a path, so the config is loaded
+    here, restyled, and handed over.
+    """
+
+    from dataclasses import replace
+
+    loaded = load_config(config)
+    return loaded if visual_style == loaded.visual_style else replace(
+        loaded, visual_style=visual_style
+    )
+
+
 def _make_env(
-    scene: SceneName,
+    scene: str,
     config: Path | None,
     *,
     fast_render: bool = False,
+    visual_style: str = "plain",
     **kwargs: Any,
 ) -> A3DualArmEnv:
-    if scene == "cookie_transfer":
-        env: A3DualArmEnv = A3CookieTransferEnv(config, **kwargs)
+    from .collection import registered_scenes, scene_by_name
+
+    if scene in registered_scenes():
+        if config is not None:
+            raise ValueError(
+                f"--config cannot be combined with the registered scene {scene!r}: "
+                "that scene owns its config file, and honouring both would silently "
+                "pick one.  Point --config at a copy of the scene's own YAML instead."
+            )
+        # Built through the scene's own builder so the task config -- which decides
+        # what counts as success (``require_exact_slots``, ``require_released``,
+        # ``terminate_on_success``) -- is the one the datasets were collected with.
+        # Repeating it here would drift.
+        #
+        # Zero noise for the canonical layout: a comparison table and a rendered
+        # video of "the same" configuration have to be the same configuration.
+        env: A3DualArmEnv = scene_by_name(scene, visual_style=visual_style).build_env(0.0, 0.0)
+        # The builder has no parameters for the constructor flags, but the
+        # environment reads all three at step time, so setting them afterwards is
+        # equivalent to passing them in.
+        env.render_cameras = bool(kwargs.get("render_cameras", True))
+        if kwargs.get("render_mode") is not None:
+            env.render_mode = kwargs["render_mode"]
+        action_mode = kwargs.get("action_mode")
+        if action_mode is not None and action_mode != env.action_mode:
+            raise ValueError(
+                f"the registered scene {scene!r} drives the robot in "
+                f"{env.action_mode!r}, but {action_mode!r} was requested.  The scene's "
+                "task config is written for its own action space."
+            )
+    elif scene == "cookie_transfer":
+        env = A3CookieTransferEnv(_styled_config(config, visual_style), **kwargs)
     else:
-        env = A3DualArmEnv(config, scene=scene, **kwargs)
+        env = A3DualArmEnv(_styled_config(config, visual_style), scene=scene, **kwargs)  # type: ignore[arg-type]
     if fast_render:
         # Applied after construction so every scene keeps its own defaults;
         # cookie_transfer, for example, supplies its own horizon.
         env.use_fast_render()
     return env
 
+def _default_task(scene: str) -> str:
+    from .collection import registered_scenes, scene_by_name
 
-def _default_task(scene: SceneName) -> str:
+    if scene in registered_scenes():
+        # The scene's own prompt, so the string a model is conditioned on is the one
+        # its datasets were recorded with.
+        return scene_by_name(scene).task.prompt
     if scene == "cookie_transfer":
-        return "transfer exactly ten upright square cookie blocks into the 2x5 box"
+        return COOKIE_PROMPT
     return "move the A3 dual-arm robot"
 
 
@@ -318,7 +510,7 @@ def _collect_scene(args: argparse.Namespace) -> int:
 
     from .collection import collect_dataset, scene_by_name
 
-    scene = scene_by_name(args.scene)
+    scene = scene_by_name(args.scene, visual_style=args.visual_style)
     summary = collect_dataset(
         args.root,
         scene,
@@ -333,6 +525,7 @@ def _collect_scene(args: argparse.Namespace) -> int:
         shard_count=args.shard_count,
         fast_render=args.fast_render,
         save_failed_episodes=args.keep_failures,
+        rollover_mb=getattr(args, "rollover_mb", None),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -420,6 +613,36 @@ def _add_fast_render(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_visual_style(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--visual-style",
+        choices=VISUAL_STYLES,
+        default="plain",
+        help=(
+            "Renderer appearance. 'plain' is the original look and stays the "
+            "default because the rendered pixels are a dataset contract; "
+            "'detailed' gives the Cookies their own materials so packed blades "
+            "read as separate objects. It changes no physical parameter."
+        ),
+    )
+
+
+def _add_rollover(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--rollover-mb",
+        type=float,
+        default=None,
+        help=(
+            "Seal each parquet and video file once it reaches this many megabytes "
+            "(default: LeRobot's 100 MB). A dataset is only readable once its "
+            "writer is closed, so with the default a long collection stays sealed "
+            "until the process exits; a smaller value makes completed files "
+            "readable while the run continues. Use it when something must train on "
+            "episodes collected so far."
+        ),
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="a3-sim", description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -434,7 +657,7 @@ def parser() -> argparse.ArgumentParser:
     smoke = commands.add_parser("smoke", help="Run a deterministic headless hold episode")
     _add_common(smoke)
     smoke.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
+        "--scene", choices=_scene_choices(), default="sandbox"
     )
     smoke.add_argument("--steps", type=int, default=1000)
     smoke.set_defaults(function=_smoke)
@@ -444,22 +667,84 @@ def parser() -> argparse.ArgumentParser:
     _add_recording(run)
     _add_camera_rendering(run)
     _add_fast_render(run)
+    _add_visual_style(run)
     run.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
+        "--scene", choices=_scene_choices(), default="sandbox"
     )
-    run.add_argument("--policy", required=True, help="Python module:factory")
+    run.add_argument(
+        "--policy",
+        default=None,
+        help="Python module:factory; defaults to the bridge gateway when "
+        "--policy-manifest is given",
+    )
+    run.add_argument(
+        "--policy-manifest",
+        type=Path,
+        default=None,
+        help="External-policy manifest; see docs/external-policy-bridge.md",
+    )
     run.add_argument("--task", default=None)
     run.add_argument("--steps", type=int, default=None)
     run.add_argument("--render", action="store_true")
     run.set_defaults(function=_run)
+
+    policy = commands.add_parser(
+        "policy", help="Inspect external-policy manifests"
+    )
+    policy_commands = policy.add_subparsers(dest="policy_command", required=True)
+    policy_check = policy_commands.add_parser(
+        "check", help="Audit manifests without loading a model"
+    )
+    policy_check.add_argument("manifests", type=Path, nargs="+")
+    policy_check.set_defaults(function=_policy_check)
+
+    compare = commands.add_parser(
+        "compare",
+        help="Run several external policies on one scene and report them together",
+    )
+    _add_common(compare)
+    _add_fast_render(compare)
+    _add_visual_style(compare)
+    compare.add_argument(
+        "--scene", choices=_scene_choices(), default="sandbox"
+    )
+    compare.add_argument(
+        "--manifest",
+        dest="manifests",
+        type=Path,
+        action="append",
+        required=True,
+        help="A policy manifest; repeatable",
+    )
+    compare.add_argument(
+        "--seeds",
+        default="0",
+        help="Seeds to run each model on, e.g. '0,1,2' or '0-4'",
+    )
+    compare.add_argument("--steps", type=int, default=None)
+    compare.add_argument("--task", default=None)
+    compare.add_argument(
+        "--randomize",
+        action="store_true",
+        help=(
+            "Let the scene randomise its layout per episode.  Off by default so a "
+            "reported number can be reproduced and so the table agrees with a "
+            "rendered video of the same configuration."
+        ),
+    )
+    compare.add_argument(
+        "--output", type=Path, default=None, help="Write the full report as JSON"
+    )
+    compare.set_defaults(function=_policy_compare)
 
     teleop = commands.add_parser("teleop", help="Control both arms with the keyboard")
     _add_common(teleop)
     _add_recording(teleop)
     _add_camera_rendering(teleop)
     _add_fast_render(teleop)
+    _add_visual_style(teleop)
     teleop.add_argument(
-        "--scene", choices=("sandbox", "cookie_transfer"), default="sandbox"
+        "--scene", choices=_scene_choices(), default="sandbox"
     )
     teleop.add_argument("--task", default=None)
     teleop.add_argument("--steps", type=int, default=None)
@@ -577,6 +862,14 @@ def parser() -> argparse.ArgumentParser:
         "not for training",
     )
     _add_fast_render(collect)
+    # Collection was the one command without this, on the grounds that pixels are a
+    # dataset contract and the default should not drift.  That reasoning still holds
+    # for the *default*, which stays plain; what it missed is that a dataset is
+    # allowed to choose its own appearance deliberately, and for a fine-tune it must
+    # -- a model conditioned on "yellow blocks" and "marked slots" has to be trained
+    # on frames that show them.
+    _add_visual_style(collect)
+    _add_rollover(collect)
     collect.set_defaults(function=_collect_scene)
 
     train = commands.add_parser(

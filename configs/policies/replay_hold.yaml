@@ -1,0 +1,58 @@
+# Exercise the whole bridge with no model installed.
+#
+# Everything except the model is real: the observation is projected from a live
+# environment, the actions cross a real transport, the chunk queue paces them, and
+# the runner records them.  Generate the recording first:
+#
+#   python scripts/make_replay_recording.py --source hold --steps 200 \
+#       --output configs/policies/replay_hold.json
+#
+# Then:
+#
+#   a3-sim run --scene sandbox --policy-manifest configs/policies/replay_hold.yaml \
+#       --steps 100
+
+name: replay-hold
+notes: >
+  Holds the A3 reset pose. Recorded, not predicted: this manifest exists to prove
+  the bridge wiring end to end without downloading anything.
+
+transport:
+  kind: replay
+  replay_path: replay_hold.json
+
+observation:
+  # One camera, resized to what a typical VLA tower expects.  The two wrist views
+  # are dropped, and the drop is recorded in the episode info -- a model seeing one
+  # camera is not the same as one seeing three, and a comparison has to say so.
+  images:
+    front:
+      source: observation.images.front
+      resize: [224, 224]
+  vectors:
+    state:
+      source: observation.state
+
+action:
+  space: joint_position
+  dim: 16
+  # 8-prediction horizon executed in full: one inference per 8 control steps.
+  # docs/policy-interface.md finding 12 measured this as both cheaper and no worse
+  # than re-planning every step.
+  chunk: 8
+  execute: 8
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  # A recording cannot be "trained" or "not trained" -- it is an artefact of the
+  # pipeline.  Its regime is declared zero_shot so a comparison never mixes it with
+  # a model's numbers, and its role is a control: it shows what the harness itself
+  # contributes to a rollout's behaviour metrics.
+  regime: zero_shot
+  primary_metric: behavior
+  # No language input at all, which is what a control should have.
+  prompt_kind: none
