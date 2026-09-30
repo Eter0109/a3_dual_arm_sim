@@ -41,3 +41,11 @@ Recorder 保存动作前观测与环境返回的 `info["applied_action"]`，并�
 ## ACT 执行契约
 
 ACT 与 SmolVLA 共享三相机和 8D 左臂/16D 执行接口。ACT 使用自身检查点的 MEAN_STD processor；默认 chunk_size=50、n_action_steps=8，20 Hz 下执行 0.4 秒后重预测。每个 episode reset 清空队列和时间集成，重新捕获右臂初始保持目标。时间集成只允许 n_action_steps=1。任务文本不参与 ACT 推理。
+
+## Benchmark 成功阈值
+
+benchmark 默认保留目标 10 块、源盒 70 块、完整槽位占用和四侧边界覆盖条件，连续保持 5 个控制步（20 Hz 下 0.25 秒仿真时间）。槽位中心容差为 x±15 mm、y±5 mm；整组边界覆盖容差为 30 mm。盒内范围、姿态和速度的计数检查照常执行。重叠容差使用一对一槽位分配，避免同一块饼干占据多个槽位或因同时匹配两个槽位而被排除。
+
+CLI 可用 `--success-hold-steps`、`--slot-tolerance-x`、`--slot-tolerance-y`、`--wall-contact-tolerance` 调整，长度单位为米。复现旧 benchmark 协议使用 `--success-hold-steps 20 --slot-tolerance-x 0.010 --slot-tolerance-y 0.0025 --wall-contact-tolerance 0.026`。评估报告记录 `run.success_conditions`，不同阈值的成功率须注明协议。通用任务及采集的默认成功配置仍按其自身契约执行。
+
+增加 `--diagnostic-dir outputs/<新目录>` 后，每步 `trace.jsonl` 的 `after` 包含计数、槽位占用、边界覆盖、完整排布、保持计数及 `unmet_success_conditions`；`success_diagnostics.json` 汇总首次满足计数/排布的步骤、最大保持计数和最终未满足项。步骤索引从 0 开始，诊断只观察环境，不影响判定。

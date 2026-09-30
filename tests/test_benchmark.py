@@ -155,3 +155,49 @@ def test_benchmark_recorder_stores_applied_joint_action():
     assert score.success
     assert len(recorder.episodes) == 1
     np.testing.assert_array_equal(recorder.episodes[0][0]["action"], np.arange(16))
+
+
+def test_benchmark_terminates_after_five_consecutive_filled_steps():
+    import mujoco
+
+    benchmark = CookieBatchBenchmark()
+    env = benchmark.create_env(render_cameras=False)
+    try:
+        env.reset(seed=0, options={"randomize_cookies": False})
+        for index, (x, y) in enumerate(env.TARGET_SLOT_CENTERS):
+            env.set_cookie_pose(index, (float(x), float(y), 0.791))
+        for _ in range(60):
+            mujoco.mj_step(env.model, env.data)
+        for expected in range(1, 6):
+            _, _, terminated, _, info = env.step(env.DEPLOYMENT_HOME)
+            assert info["success_hold_count"] == expected
+            assert terminated == (expected == 5)
+            assert info["success"] == (expected == 5)
+    finally:
+        env.close()
+
+
+def test_benchmark_accepts_four_mm_slot_offset_with_strict_override_available():
+    from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
+
+    benchmark = CookieBatchBenchmark()
+    env = benchmark.create_env(render_cameras=False)
+    strict = A3CookieTransferEnv(render_cameras=False)
+    try:
+        for current in (env, strict):
+            current.reset(seed=0, options={"randomize_cookies": False})
+            for cookie_index in range(10):
+                position = current.privileged_target_slot_world(
+                    cookie_index, current._target_cookie_center_z
+                )
+                rotation = current.data.xmat[current._target_bin_body].reshape(3, 3)
+                position += rotation @ np.array([0.0, 0.004, 0.0])
+                current.set_cookie_pose(cookie_index, tuple(position))
+            mask = (True,) * 10 + (False,) * 70
+            slots = current._target_slot_occupancy(mask)
+            assert all(index >= 0 for index in slots) == (current is env)
+            if current is env:
+                assert len(set(slots)) == 10
+    finally:
+        env.close()
+        strict.close()
