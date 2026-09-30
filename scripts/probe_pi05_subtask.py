@@ -10,11 +10,12 @@ The released ``pi05_base`` weights, though, do carry a text head, and a first pr
 saw ``Subtask:`` come out of it.  This script goes after the two things that probe
 left open:
 
-*Is the prompt format what decides it?*  The earlier run produced private-use
-garbage with the full lerobot prompt (state included, ``Action: `` suffix) and
-readable English once the state and suffix were dropped.  One variable was changed
-at a time there, so this sweeps the formats systematically and reports what each
-one generates.
+*Is the prompt format what decides it?*  Yes, and the format that works is not a
+variation on lerobot's.  openpi's tokenizer has two branches, and the one for
+pi0-style prompts is a bare instruction followed by a newline -- no ``Task:``
+prefix, no state, no ``Action:`` suffix.  lerobot can only build the other branch,
+so every earlier attempt here prompted in a shape the model was never asked to
+continue, which is why they all produced private-use noise.
 
 *Is the state encoding sound?*  The prompt lerobot builds contains a ``-1``, and
 ``np.digitize(..., linspace(-1, 1, 257)[:-1]) - 1`` can only return 0..255.  A -1
@@ -50,6 +51,9 @@ TOKENIZER_SNAPSHOT = Path("/root/autodl-tmp/hf/hub/models--google--paligemma-3b-
 #: low-level format, a bare task line, and a high-level format that names the field
 #: being asked for.
 PROMPT_FORMS = (
+    # A sentinel rather than a template: openpi's pi0 branch is two separate
+    # encodes, so it cannot be expressed as one `format()` call.
+    ("pi0 format (openpi): instruction + newline", None),
     ("lerobot low-level (Task+State+Action)", "Task: {task}, State: {state};\nAction: "),
     ("task only + Action", "Task: {task};\nAction: "),
     ("task only (no suffix)", "Task: {task};\n"),
@@ -59,6 +63,17 @@ PROMPT_FORMS = (
     ("bare subtask question", "What subtask should the robot do next? "),
     ("task + subtask given, then Action", "Task: {task}, Subtask: {subtask};\nAction: "),
 )
+
+
+def pi0_prompt_ids(tokenizer, task: str) -> list[int]:
+    """The pi0 branch of openpi's ``PaligemmaTokenizer``, reproduced exactly.
+
+    A bare instruction followed by a newline: no ``Task:`` prefix, no state, no
+    ``Action:`` suffix.  Every format lerobot can build differs from this one, and
+    that difference is what decides whether the model answers or emits noise.
+    """
+    cleaned = task.strip().replace("_", " ").replace("\n", " ")
+    return tokenizer.encode(cleaned, add_bos=True) + tokenizer.encode("\n")
 
 #: Instructions to try.  The first is this project's own; the rest are the
 #: high-level commands the paper's figures use ("clean the bedroom", "put the
@@ -283,8 +298,12 @@ def main() -> int:
         batch = model["preprocess"](batch)
 
         for label, template in PROMPT_FORMS:
-            prompt = template.format(task=task, state=state_str, subtask=SUBTASK)
-            ids = tokenizer.encode(prompt, add_bos=True)
+            if template is None:
+                ids = pi0_prompt_ids(tokenizer, task)
+                prompt = task.strip() + "\n"
+            else:
+                prompt = template.format(task=task, state=state_str, subtask=SUBTASK)
+                ids = tokenizer.encode(prompt, add_bos=True)
             generated = generate(policy, batch, ids, args.tokens)
             text = tokenizer.decode(generated, skip_special_tokens=True)
             score = readable(text)
