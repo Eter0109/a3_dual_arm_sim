@@ -50,6 +50,15 @@ def main() -> int:
         default=None,
         help="Randomization YAML; defaults to configs/randomization.yaml",
     )
+    parser.add_argument(
+        "--no-videos",
+        action="store_true",
+        help=(
+            "Store camera frames inline in parquet instead of as AV1 video. "
+            "Inlining costs roughly ten times the disk (about 45 MB per episode "
+            "versus 4 MB), so it is opt-in rather than the default."
+        ),
+    )
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -86,6 +95,7 @@ def main() -> int:
         "source_column": source_column,
         "randomization_version": 1,
         "max_steps": 1600,
+        "use_videos": not args.no_videos,
     }
     if args.resume:
         if not summary_path.is_file():
@@ -105,6 +115,7 @@ def main() -> int:
             "source_column",
             "randomization_version",
             "max_steps",
+            "use_videos",
         ):
             if previous.get(key) != json.loads(json.dumps(summary[key])):
                 raise RuntimeError(f"collection setting {key!r} changed since the initial run")
@@ -115,6 +126,7 @@ def main() -> int:
         fps=benchmark.config.control_hz,
         image_height=benchmark.config.image_height,
         image_width=benchmark.config.image_width,
+        use_videos=not args.no_videos,
         resume=args.resume,
     )
     if not args.resume:

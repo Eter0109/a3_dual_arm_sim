@@ -53,14 +53,22 @@ class MemoryRecorder:
         return None
 
 
-def lerobot_features(height: int, width: int) -> dict[str, Any]:
+def lerobot_features(height: int, width: int, *, use_videos: bool = False) -> dict[str, Any]:
+    """Describe one canonical A3 frame to LeRobot.
+
+    LeRobot selects video storage from the feature ``dtype`` rather than from the
+    ``use_videos`` writer flag, so the camera keys must be declared as ``video``
+    for episodes to be encoded into mp4 files instead of PNG rows.  Declaring
+    them as ``image`` while asking the writer for video silently produces an
+    inline-image dataset at roughly ten times the disk cost.
+    """
     image = {
-        "dtype": "image",
+        "dtype": "video" if use_videos else "image",
         "shape": (height, width, 3),
         "names": ["height", "width", "channels"],
     }
     return {
-        FRONT_IMAGE: image,
+        FRONT_IMAGE: image.copy(),
         LEFT_WRIST_IMAGE: image.copy(),
         RIGHT_WRIST_IMAGE: image.copy(),
         STATE: {"dtype": "float32", "shape": (16,), "names": [f"state_{i}" for i in range(16)]},
@@ -131,7 +139,11 @@ class LeRobotV3Recorder:
                 fps=fps,
                 root=self.root,
                 robot_type="A3_dual_arm",
-                features=lerobot_features(image_height, image_width),
+                # The feature schema and the writer flag must agree: LeRobot
+                # decides from the declared dtype whether a camera is stored as
+                # video, so passing `use_videos` alone leaves the dataset
+                # declaring `image` and writing frames inline in the parquet.
+                features=lerobot_features(image_height, image_width, use_videos=use_videos),
                 use_videos=use_videos,
                 image_writer_threads=3,
             )

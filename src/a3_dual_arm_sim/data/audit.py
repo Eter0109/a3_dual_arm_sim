@@ -57,6 +57,22 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
         if actual != shape:
             raise ValueError(f"Feature {key!r} has shape {actual}, expected {shape}")
 
+    # The summary records the storage format the collection *intended*.  LeRobot
+    # decides the format from the declared feature dtype, and the two can drift
+    # apart -- a recorder that passes `use_videos` without threading it into
+    # `lerobot_features` writes PNG frames inline while the summary claims video.
+    # The cost is about ten times the disk, which is worth catching here rather
+    # than when a disk fills at episode 900.
+    if "use_videos" in collection_summary:
+        declared = {features.get(key, {}).get("dtype") for key in CAMERA_KEYS}
+        expected_dtype = "video" if collection_summary["use_videos"] else "image"
+        if declared != {expected_dtype}:
+            raise ValueError(
+                f"Collection summary says use_videos={collection_summary['use_videos']} "
+                f"but the dataset declares camera dtypes {sorted(declared)}; "
+                f"expected {{{expected_dtype!r}}}"
+            )
+
     episodes = [
         json.loads(line)
         for line in metadata_path.read_text(encoding="utf-8").splitlines()
