@@ -83,6 +83,36 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     if info.get("total_episodes") != len(episodes):
         raise ValueError("LeRobot and A3 episode metadata counts do not match")
 
+    if collection_summary.get("target_layout") == "2x10":
+        from a3_dual_arm_sim.tasks.cookie_2x10_plan import Cookie2x10Plan
+
+        for episode in episodes:
+            metadata = episode.get("randomization", {})
+            plan = Cookie2x10Plan.from_seed(collection_summary["first_grasp_mode"], episode["seed"])
+            if (
+                metadata.get("grasp_counts") != list(plan.batch_sizes)
+                or metadata.get("first_grasp_count") != plan.first_grasp
+                or metadata.get("cookies_in_target") != 20
+                or metadata.get("cookies_in_source") != 60
+                or metadata.get("target_column_counts") != [10, 10]
+                or episode.get("task") != plan.prompt(metadata.get("source_column"))
+            ):
+                raise ValueError("2x10 episode counts or task instruction disagree with its plan")
+            reports = metadata.get("grasp_reports", [])
+            if len(reports) != 4 or any(
+                report.get("planned_count") != planned
+                or report.get("lifted") != planned
+                or len(report.get("cookies", [])) != planned
+                or not report.get("released")
+                for report, planned in zip(reports, plan.batch_sizes, strict=True)
+            ):
+                raise ValueError(
+                    "2x10 dataset requires four confirmed grasp reports, including zero skips"
+                )
+            transferred = [cookie for report in reports for cookie in report["cookies"]]
+            if len(set(transferred)) != 20:
+                raise ValueError("2x10 grasp reports must describe twenty distinct cookies")
+
     return {
         "root": str(root),
         "repo_id": repo_id,

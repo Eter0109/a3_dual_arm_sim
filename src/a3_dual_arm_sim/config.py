@@ -104,6 +104,11 @@ class CookieSceneConfig:
         1.0,
     )
 
+    @property
+    def target_rows(self) -> int:
+        # Derived, so the serialized legacy configuration stays unchanged.
+        return len(self.target_slots_local_m) // 2
+
 
 @dataclass(frozen=True)
 class HomeConfig:
@@ -154,8 +159,11 @@ class SimConfig:
             raise ValueError("camera positions must contain three values")
         if len(self.cookie_transfer.cookie_source_positions_m) < 10:
             raise ValueError("cookie_transfer must contain at least 10 source positions")
-        if len(self.cookie_transfer.target_slots_local_m) != 10:
-            raise ValueError("cookie_transfer must contain exactly 10 target slots")
+        rows = self.cookie_transfer.target_rows
+        if rows not in (5, 10):
+            raise ValueError("cookie_transfer.target_rows must be 5 or 10")
+        if len(self.cookie_transfer.target_slots_local_m) not in (10, 20):
+            raise ValueError("cookie_transfer must contain exactly 10 or 20 target slots")
         spare_position = self.cookie_transfer.spare_target_bin_world_position_m
         if spare_position is not None and len(spare_position) != 3:
             raise ValueError("spare_target_bin_world_position_m must contain three values")
@@ -297,6 +305,8 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         ),
         deployment_home=_float_tuple(cookie_raw, "deployment_home", defaults.deployment_home),
     )
+    if cookie_raw.get("target_rows", cookie_transfer.target_rows) != cookie_transfer.target_rows:
+        raise ValueError("target_rows must match the configured target slot count")
     return SimConfig(home=home, cameras=cameras, cookie_transfer=cookie_transfer, **raw)
 
 

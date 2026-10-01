@@ -1,9 +1,11 @@
 """A3 dual-arm MuJoCo simulation package."""
 
 from a3_dual_arm_sim.controllers.batch_expert import A3CookieBatchExpert
+from a3_dual_arm_sim.controllers.cookie_2x10_expert import A3Cookie2x10Expert
 from a3_dual_arm_sim.controllers.expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3SameColumnBatchExpert
 from a3_dual_arm_sim.sim.env import A3DualArmEnv
+from a3_dual_arm_sim.tasks.cookie_2x10 import A3Cookie2x10Env
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
 from a3_dual_arm_sim.tasks.grasp import A3GraspEnv
 from a3_dual_arm_sim.workflows.benchmark import (
@@ -20,6 +22,8 @@ from a3_dual_arm_sim.workflows.evaluation import (
 )
 
 __all__ = [
+    "A3Cookie2x10Env",
+    "A3Cookie2x10Expert",
     "A3CookieBatchExpert",
     "A3CookieTransferEnv",
     "A3CookieTransferExpert",

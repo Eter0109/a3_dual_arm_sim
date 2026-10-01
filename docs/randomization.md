@@ -1,7 +1,8 @@
-# 分级随机化与整任务采集 / Randomization profiles
+# 2×5 分级随机化与专家采集
 
-随机化强度和抓取列是两个独立选项。保持单盒、同列两次各五块、共十块的
-整任务 LeRobot v3 数据格式；不使用 Planner/Verifier，不切技能片段。
+2×5 任务从选定来源列分两批各搬五个，共搬十个，使用整任务 LeRobot v3 数据格式。
+随机化强度和来源列是两个独立选项；`source_column: random` 只随机选列，
+每批数量固定为五个。2×10 用法见 [2×10 专家演示与数据采集](cookie_2x10.md)。
 
 | 参数 / Parameter | basic | medium | advanced |
 |---|---:|---:|---:|

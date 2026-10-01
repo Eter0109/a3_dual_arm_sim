@@ -8,11 +8,16 @@
 | --- | --- |
 | `configs/default.yaml` | 基础 sandbox 与通用配置 |
 | `configs/cookie_batch.yaml` | 单盒 5+5 批次装盒 |
+| `configs/cookie_2x10.yaml` | 2×10 四次抓取装盒，共二十个 |
+| `configs/randomization.yaml` | 2×5 采集的随机化强度与选列 |
+| `configs/randomization_2x10.yaml` | 2×10 采集的随机化强度、选列与首夹数量 |
 | `configs/cookie_same_column.yaml` | 同列批次专家场景 |
 | `configs/cookie_cooperative.yaml` | 双臂协作实验场景 |
 | `configs/packed_elastic.yaml` | 接触/摩擦实验配置 |
 
-通过 `--config` 指定 YAML；省略时入口使用其内置默认。批次场景控制 20 Hz、物理 1000 Hz，源盒 80 块、目标盒容量 10 块；具体几何和初始位置由配置定义。配置中的参数没有真实硬件标定保证。
+通过 `--config` 指定场景 YAML，`--randomization-config` 指定采集 YAML；省略时入口使用其内置默认。
+装盒场景控制 20 Hz、物理 1000 Hz，源盒 80 块；2×5 目标盒容量十块，2×10 容量二十块。
+具体几何和初始位置由配置定义。配置中的参数没有真实硬件标定保证。
 
 ```bash
 a3-sim inspect --scene cookie_transfer
@@ -29,6 +34,8 @@ env -u MUJOCO_GL python examples/run_cookie_batch.py --expert cross_column --ren
 # 固定布局无窗口演示；失败/超时退出码为 1
 python examples/run_cookie_same_column.py --seed 0 --max-steps 6000 \
   --output outputs/expert/fixed.json
+# 2×10：数量和来源列读取 randomization_2x10.yaml。
+env -u MUJOCO_GL python examples/run_cookie_2x10.py --render
 ```
 
 规则专家直接读取仿真真值。固定布局命令与随机 benchmark 不是同一协议。窗口鼠标拖动调整视角，滚轮缩放。`--snapshots` 输出阶段图片，属于诊断资料；专家演示和 benchmark 不自动录制训练数据。
@@ -53,6 +60,9 @@ env -u MUJOCO_GL a3-sim teleop --scene cookie_transfer \
 python examples/collect_cookie_benchmark.py --help
 MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
   --root datasets/expert16 --repo-id local/a3-expert16 --episodes 10
+# 2×10 专家采集。
+MUJOCO_GL=egl python examples/collect_cookie_2x10.py \
+  --root datasets/cookie_2x10 --repo-id local/cookie-2x10 --episodes 10
 # 如需左臂模型，转换原始 16D 数据；目标必须不存在
 python examples/prepare_left_arm_dataset.py \
   --source datasets/expert16 --output datasets/expert8
