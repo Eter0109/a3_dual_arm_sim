@@ -34,6 +34,8 @@ DEFAULT_CONFIG_PATH = resource_root() / "configs" / "cookie_batch.yaml"
 class EpisodeExecution:
     """Single-episode environment lifecycle and execution."""
 
+    required_cookies = 10
+
     def __init__(
         self,
         config_path: Path | str | None = None,
@@ -98,6 +100,30 @@ class EpisodeExecution:
             render_cameras=render_cameras,
         )
 
+    def _episode_task(self, column: int | None, seed: int) -> str:
+        return (
+            "transfer 10 cookies into target box"
+            if column is None
+            else f"Transfer 10 cookies from source column {column} into the target box in two batches of five."
+        )
+
+    def _episode_policy(self, policy: Any, column: int | None, seed: int):
+        if column is not None and column > 1 and policy == "same_column":
+
+            def expert_factory(environment):
+                expert = A3VariedColumnBatchExpert(environment)
+                expert.requested_source_column_index = column - 1
+                return expert
+
+            return ExpertPolicyAdapter(expert_factory, name="selected_column")
+        return make_policy_adapter(policy)
+
+    def _episode_metadata(self, column: int | None, seed: int) -> dict:
+        return {"profile": self.profile or "basic", "source_column": column, "seed": seed}
+
+    def _completed_episode_metadata(self, runner_policy: Any, info: dict) -> dict:
+        return {}
+
     def run_episode(
         self,
         policy: Any,
@@ -108,26 +134,9 @@ class EpisodeExecution:
         diagnostic: Any | None = None,
     ) -> EpisodeScore:
         column = choose_column(self.source_column, seed) if self.source_column is not None else None
-        task = (
-            "transfer 10 cookies into target box"
-            if column is None
-            else f"Transfer 10 cookies from source column {column} into the target box in two batches of five."
-        )
-        self.last_attempt_metadata = {
-            "profile": self.profile or "basic",
-            "source_column": column,
-            "seed": seed,
-        }
-        if column is not None and column > 1 and policy == "same_column":
-
-            def expert_factory(environment):
-                expert = A3VariedColumnBatchExpert(environment)
-                expert.requested_source_column_index = column - 1
-                return expert
-
-            runner_policy = ExpertPolicyAdapter(expert_factory, name="selected_column")
-        else:
-            runner_policy = make_policy_adapter(policy)
+        task = self._episode_task(column, seed)
+        self.last_attempt_metadata = self._episode_metadata(column, seed)
+        runner_policy = self._episode_policy(policy, column, seed)
         should_close_env = False
         if env is None:
             needs_cameras = (recorder is not None or diagnostic is not None) or (
@@ -228,14 +237,22 @@ class EpisodeExecution:
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
         env_success = bool(info.get("success", False))
+        expected_source = (
+            len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
+        )
         success = (
             env_success
-            and cookies_in_target == 10
-            and cookies_in_source == 70
+            and cookies_in_target == self.required_cookies
+            and cookies_in_source == expected_source
             and not info.get("safety_reason")
         )
+        self.last_attempt_metadata.update(self._completed_episode_metadata(runner_policy, info))
         if recorder is not None:
-            success = success and cookies_in_source == 70 and not info.get("safety_reason")
+            success = (
+                success and cookies_in_source == expected_source and not info.get("safety_reason")
+            )
+            if hasattr(recorder, "set_episode_metadata"):
+                recorder.set_episode_metadata(self.last_attempt_metadata)
             if success:
                 recorder.finish_episode(success=True)
             else:
@@ -264,7 +281,9 @@ class EpisodeExecution:
             ):
                 failure_reason = getattr(runner_policy.expert, "failure_reason", "expert_failed")
             else:
-                failure_reason = f"only {cookies_in_target}/10 cookies in target box"
+                failure_reason = (
+                    f"only {cookies_in_target}/{self.required_cookies} cookies in target box"
+                )
 
         if should_close_env:
             env.close()
@@ -273,7 +292,7 @@ class EpisodeExecution:
             episode=episode_idx,
             seed=seed,
             score=cookies_in_target,
-            max_score=10,
+            max_score=self.required_cookies,
             success=success,
             steps=steps,
             wall_seconds=round(wall_time, 2),

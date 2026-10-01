@@ -1,0 +1,56 @@
+# Collection settings for the 2x10 four-grasp task.
+# Symmetric uniform offsets: each sample is within [-value, +value].
+# Positions: metres. Box yaw: radians. Camera angles/FOV: degrees.
+# Zero disables a perturbation. Cookie yaw is not an initial leaning angle.
+# Appearance is sampled once per episode; column and grasp-count choices stay independent.
+version: 1
+# Select randomization strength, source column and first-grasp count independently.
+profile: basic
+source_column: 1  # 1, 2, 3, 4, or random
+first_grasp: random  # 0..9, or random (sample once per episode; plan [n,10-n,n,10-n])
+profiles:
+  basic:
+    source_bin_noise_m: 0.010
+    target_bin_noise_m: 0.010
+    target_bin_yaw_noise_rad: 0.030
+    camera_position_m: 0.0
+    wrist_position_m: 0.0
+    camera_rotation_deg: 0.0
+    wrist_rotation_deg: 0.0
+    cookie_noise_m: 0.0003
+    cookie_yaw_noise_rad: 0.015
+    fovy_deg: 0.0
+    light_fraction: 0.0
+    palette: false
+  medium:
+    source_bin_noise_m: 0.015
+    target_bin_noise_m: 0.015
+    target_bin_yaw_noise_rad: 0.050
+    camera_position_m: 0.004
+    wrist_position_m: 0.002
+    camera_rotation_deg: 0.0
+    wrist_rotation_deg: 0.0
+    cookie_noise_m: 0.0003
+    cookie_yaw_noise_rad: 0.015
+    fovy_deg: 1.0
+    light_fraction: 0.10
+    palette: false
+  advanced:
+    source_bin_noise_m: 0.020
+    target_bin_noise_m: 0.020
+    target_bin_yaw_noise_rad: 0.080
+    camera_position_m: 0.009
+    wrist_position_m: 0.003
+    camera_rotation_deg: 2.0
+    wrist_rotation_deg: 1.0
+    cookie_noise_m: 0.0003
+    cookie_yaw_noise_rad: 0.015
+    fovy_deg: 2.0
+    light_fraction: 0.20
+    palette: true
+# One color for all cookies in an episode; channels are RGBA in [0,1].
+colors:
+  golden: [0.90, 0.62, 0.12, 1.0]
+  cocoa: [0.38, 0.18, 0.08, 1.0]
+  matcha: [0.40, 0.60, 0.20, 1.0]
+  berry: [0.78, 0.30, 0.38, 1.0]

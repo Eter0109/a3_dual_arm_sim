@@ -17,6 +17,17 @@ from a3_dual_arm_sim.controllers.expert import CookiePhase
 class A3SameColumnBatchExpert(A3CookieBatchExpert):
     MAX_INSERTION_FORCE_N = 20.0
     MAX_RECOVERABLE_TILT_DEG = 65.0
+    batch_size = 5
+    num_batches = 2
+    min_grip_opening = 0.28
+    secure_grip_opening = 0.33
+    release_opening = 0.49
+    target_grip_force = 1.3
+    stable_grip_force = 1.0
+
+    @property
+    def _is_followup_batch(self):
+        return self.batch_index == 1
 
     def reset(self, context=None):
         super().reset(context)
@@ -59,9 +70,9 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 (i for i in indices.tolist() if i not in self.completed_cookie_indices),
                 key=lambda i: source[i, 1],
             )
-            if len(remaining) < 5:
+            if len(remaining) < self.batch_size:
                 continue
-            batch = remaining[:5]
+            batch = remaining[: self.batch_size]
             if all(self.env.privileged_cookie_in_source(i) for i in batch):
                 yield batch
 
@@ -80,8 +91,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
     def _select_batch(self):
         self._rim_contact_stop = False
         self.batch_indices = next(self._candidate_batches(), [])
-        if len(self.batch_indices) != 5:
-            raise RuntimeError("the next five Cookies in the source column are unavailable")
+        if len(self.batch_indices) != self.batch_size:
+            raise RuntimeError(
+                f"the next {self.batch_size} Cookies in the source column are unavailable"
+            )
         self.current_cookie_index = self.batch_indices[0]
         self.target_slot_index = self.batch_index
         positions = self._positions()
@@ -93,7 +106,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         neighbour_rotation = None
         next_index = self.batch_indices[-1] + 1
         if (
-            self.batch_index == 1
+            self._is_followup_batch
             and next_index < len(self.env.SOURCE_POSITIONS)
             and np.isclose(
                 self.env.SOURCE_POSITIONS[next_index][0],
@@ -117,7 +130,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             )
         self._grasp_rotation = self._canonical.copy()
         self._aligned_grasp = (
-            self.batch_index == 1
+            self._is_followup_batch
             and self._base_push_attempts >= 2
             and self._grasp_tilt_deg > 5
             and self._rear_clearance_m < 0.0025
@@ -183,7 +196,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         self._pick_center += ((lower + upper) / 2 - self._pick_center @ jaw_axis) * jaw_axis
         insertion_overlap = 0.0038
         if (
-            self.batch_index == 1
+            self._is_followup_batch
             and self._base_push_attempts >= 2
             and self._rear_clearance_m < 0.0025
             and not self._aligned_grasp
@@ -201,7 +214,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self._aligned_grasp:
             self._approach_eef = self._pick_eef + self._grasp_rotation[:, 1] * -0.082
 
-        if self.batch_index == 1 and self._grasp_tilt_deg > 10 and self._base_push_attempts < 2:
+        if self._is_followup_batch and self._grasp_tilt_deg > 10 and self._base_push_attempts < 2:
             base_y = positions[0, 1] - rotations[0, 1, 2] * self.env.COOKIE_HALF_SIZE[2]
             self._push_start = np.array(
                 [positions[0, 0], base_y - 0.012, self.env.SOURCE_FLOOR_TOP_Z + 0.004]
@@ -315,7 +328,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
 
         if self.phase is CookiePhase.DESCEND:
             if (
-                self.batch_index == 1
+                self._is_followup_batch
                 and self._base_push_attempts >= 2
                 and max(self._total_pad_forces) > 2.0
                 and any(
@@ -338,7 +351,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             )
             if (
                 not reached
-                and self.batch_index == 1
+                and self._is_followup_batch
                 and self.phase_steps >= 100
                 and np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site]) < 0.005
                 and max(self._total_pad_forces) > 0.1
@@ -355,22 +368,26 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 return self._hold_command(self._opening)
             chain, forces = self._contact_chain()
             close_rate = 0.0060 if (not chain or min(forces) < 0.5) else 0.0030
-            if (self.batch_index == 1 and self._opening > 0.33) or not chain or min(forces) < 1.3:
-                self._opening = max(0.28, self._opening - close_rate)
-            secure_width = self.batch_index == 0 or self._opening <= 0.33
+            if (
+                (self._is_followup_batch and self._opening > self.secure_grip_opening)
+                or not chain
+                or min(forces) < self.target_grip_force
+            ):
+                self._opening = max(self.min_grip_opening, self._opening - close_rate)
+            secure_width = not self._is_followup_batch or self._opening <= self.secure_grip_opening
             enough_depth = (
                 not self._rim_contact_stop
                 or self.data.site_xpos[self._l_site, 2] <= self._rim_target_eef[2] + 0.008
             )
             self._stable = (
                 self._stable + 1
-                if secure_width and chain and min(forces) >= 1.0 and enough_depth
+                if secure_width and chain and min(forces) >= self.stable_grip_force and enough_depth
                 else 0
             )
             if (
                 self._rim_contact_stop
                 and (not chain or not enough_depth)
-                and self._opening <= 0.28
+                and self._opening <= self.min_grip_opening
                 and max(self._total_pad_forces) < (18.0 if self._aligned_grasp else 12.0)
             ):
                 delta = self._rim_target_eef - self._pick_eef
@@ -392,8 +409,8 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
 
         if self.phase is CookiePhase.LIFT:
             _, forces = self._contact_chain()
-            if min(forces) < 1.0:
-                self._opening = max(0.28, self._opening - 0.001)
+            if min(forces) < self.stable_grip_force:
+                self._opening = max(self.min_grip_opening, self._opening - 0.001)
             dist_lifted = np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
             lift_speed = 0.0018 if dist_lifted < 0.015 else 0.0035
             lift_speed = min(lift_speed, getattr(self, "_max_lift_speed", lift_speed))
@@ -407,7 +424,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 return self._hold_command(self._opening)
             if reached:
                 if not np.all(lifted > 0.070):
-                    self._fail(f"not all five lifted: {lifted.tolist()}")
+                    self._fail(f"not all {self.batch_size} lifted: {lifted.tolist()}")
                 else:
                     r = self.data.site_xmat[self._l_site].reshape(3, 3)
                     self._group_offset = r.T @ (
@@ -417,7 +434,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     self.batch_reports.append(
                         {
                             "cookies": list(self.batch_indices),
-                            "lifted": 5,
+                            "lifted": self.batch_size,
                             "lift_heights_m": lifted.tolist(),
                             "released": False,
                         }
@@ -450,10 +467,10 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             return action
 
         if self.phase is CookiePhase.OPEN:
-            self._opening = min(0.49, self._opening + 0.015)
+            self._opening = min(self.release_opening, self._opening + 0.015)
             pos, rotation = self._place_pose()
             action, _ = self._servo(pos, rotation, self._opening, speed=0.0010)
-            if self._opening >= 0.49 and self.phase_steps >= 8:
+            if self._opening >= self.release_opening and self.phase_steps >= 8:
                 self._retract_pos = (
                     self.data.site_xpos[self._l_site].copy() + rotation[:, 1] * -0.085
                 )
@@ -487,14 +504,18 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
                 return self._hold_command(self._opening)
             required_stable = (
-                self.env.task_config.success_hold_steps if self.batch_index == 1 else 6
+                self.env.task_config.success_hold_steps
+                if self.batch_index == self.num_batches - 1
+                else 6
             )
             if self._stable >= required_stable:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1
                 self._advance(
-                    CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
+                    CookiePhase.DONE
+                    if self.batch_index == self.num_batches
+                    else CookiePhase.SELECT_COOKIE
                 )
             return self._hold_command(self._opening)
 
@@ -528,7 +549,9 @@ class A3VariedColumnBatchExpert(A3SameColumnBatchExpert):
             batch_key = tuple(self.batch_indices)
             if getattr(self, "_held_rotation_batch", None) != batch_key:
                 tool_rotation = self.data.site_xmat[self._l_site].reshape(3, 3)
-                middle_cookie = self.env._cookie_bodies[self.batch_indices[2]]
+                middle_cookie = self.env._cookie_bodies[
+                    self.batch_indices[len(self.batch_indices) // 2]
+                ]
                 cookie_rotation = self.data.xmat[middle_cookie].reshape(3, 3)
                 self._held_cookie_rotation_local = tool_rotation.T @ cookie_rotation
                 self._held_rotation_batch = batch_key

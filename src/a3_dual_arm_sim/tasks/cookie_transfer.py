@@ -47,6 +47,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
     CONTACT_CONTAINMENT_TOLERANCE_M = 0.004
     WALL_CONTACT_TOLERANCE_M = 0.026
     TARGET_FLOOR_TOP_Z = 0.775
+    TASK_CONFIG_CLASS = CookieTransferTaskConfig
 
     def __init__(
         self,
@@ -57,7 +58,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         render_mode: str | None = None,
         render_cameras: bool = True,
     ) -> None:
-        self.task_config = task_config or CookieTransferTaskConfig()
+        self.task_config = task_config or self.TASK_CONFIG_CLASS()
         if config is None:
             config = SimConfig(horizon=6000)
         super().__init__(
@@ -69,9 +70,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         scene_config = self.config.cookie_transfer
         if task_config is None:
-            self.task_config = CookieTransferTaskConfig(
+            self.task_config = self.TASK_CONFIG_CLASS(
                 cookie_count=len(scene_config.cookie_source_positions_m)
             )
+        if self.task_config.required_cookies != len(scene_config.target_slots_local_m):
+            raise ValueError("task required_cookies must match the scene's target slot count")
         if self.task_config.cookie_count != len(scene_config.cookie_source_positions_m):
             raise ValueError("task cookie_count must match configured cookie source positions")
         self.SOURCE_POSITIONS = scene_config.cookie_source_positions_m
@@ -530,6 +533,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
             and np.all(upper >= inner_upper - self.WALL_CONTACT_TOLERANCE_M)
         )
 
+    def _target_fill_is_valid(self, in_target: tuple[bool, ...]) -> bool:
+        return True
+
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         observation, _, safety_terminated, truncated, info = super().step(action)
         in_target = tuple(
@@ -558,6 +564,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
             and source_count == self.task_config.cookie_count - self.task_config.required_cookies
         )
         task_filled = exact_fill if self.task_config.require_exact_slots else count_fill
+        task_filled = task_filled and self._target_fill_is_valid(in_target)
         self._success_hold_count = self._success_hold_count + 1 if task_filled else 0
         success = self._success_hold_count >= self.task_config.success_hold_steps
         terminated = safety_terminated or (success and self.task_config.terminate_on_success)
@@ -572,7 +579,6 @@ class A3CookieTransferEnv(A3DualArmEnv):
             target_slot_occupancy=occupancy,
             target_touches_all_walls=target_touches_all_walls,
             source_initially_filled=self._source_initially_filled,
-            exact_2x5_fill=exact_fill,
             count_fill=count_fill,
             success_criterion="exact_slots"
             if self.task_config.require_exact_slots
@@ -581,4 +587,5 @@ class A3CookieTransferEnv(A3DualArmEnv):
             required_success_hold_steps=self.task_config.success_hold_steps,
             cookie_positions=self.cookie_positions,
         )
+        info[f"exact_2x{self.config.cookie_transfer.target_rows}_fill"] = exact_fill
         return observation, reward, terminated, truncated and not terminated, info
