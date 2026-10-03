@@ -362,10 +362,18 @@ def main() -> int:
 
             if step % 50 == 0:
                 elapsed = time.perf_counter() - started
+                # The scene's own counters, not just the correction statistics.  Behaviour
+                # metrics say how hard the environment had to work to obey; they cannot say
+                # whether the task moved forward, and a model that stalls while holding the
+                # piece and one that never touches it can share a `corrected_fraction`.  A
+                # sweep differing by one parameter needs the outcome on the same line as the
+                # cost.
+                outcome = progress_line(info)
                 print(
                     f"  step {step:>4}  corrected {summary.get('corrected_fraction', 0.0):.3f}"
                     f"  saturated {summary.get('saturated_fraction', 0.0):.3f}"
-                    f"  ({step / max(elapsed, 1e-6):.1f} steps/s)",
+                    + (f"  {outcome}" if outcome else "")
+                    + f"  ({step / max(elapsed, 1e-6):.1f} steps/s)",
                     flush=True,
                 )
 

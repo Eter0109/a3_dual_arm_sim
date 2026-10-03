@@ -1,0 +1,83 @@
+# π0.5 fine-tuned on the one-Cookie scene, 4,000 steps, starting from `lerobot/pi05_base`.
+#
+# The first A3 policy whose training data, prompt and evaluation scene all describe the same
+# task.  Every earlier checkpoint was trained on the dense eighty-Cookie layout and then asked
+# to work on a scene it had never seen; this one was trained on 400 expert episodes of
+# `a3_cookie_single_piece`, conditioned on that scene's own prompt, and is evaluated back on it.
+#
+# Why the run stopped at 4,000 of its 6,000 steps
+# -----------------------------------------------
+# It ran out of disk, not of budget.  `save_freq` is 2,000, and an unfrozen checkpoint is
+# 8.8 GB of weights plus 13 GB of optimiser state, so the save at step 4,000 needed 21.8 GB
+# with 14 GB free and died inside `safetensors` with "No space left on device".  The weights
+# that did land are complete -- 9,354,050,752 bytes, byte-for-byte the size of the checkpoints
+# that trained to completion -- but the optimiser state is not, so this is an evaluation of
+# step 4,000 and not a resume point.
+#
+# The loss was still falling when it stopped: 0.017 at step 2,000 and 0.006 at 3,980, against
+# 0.0057 for `adv40k`'s 40,000 steps on the dense scene.  So this is a checkpoint that had not
+# converged, evaluated because it exists.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_one_piece_4k.yaml
+
+name: pi05-a3-one-piece-4k
+notes: >
+  π0.5 fine-tuned 4,000 steps at batch 4 on 400 expert episodes of the one-Cookie scene,
+  starting from `lerobot/pi05_base` with the vision tower and the last 18 language layers
+  unfrozen.  The only A3 checkpoint so far whose training data, prompt and evaluation scene
+  describe the same task.  Training stopped early on a full disk, not on a budget.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_one_base/checkpoints/004000/pretrained_model
+    - --config
+    - dims=8
+    - --config
+    - cameras=observation.images.image=image,observation.images.image2=image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  dim: 8
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
