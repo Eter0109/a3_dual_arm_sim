@@ -1,0 +1,113 @@
+# π0.5 fine-tuned for 2,000 steps on the single-arm cookie task, starting from
+# `lerobot/pi05_libero_finetuned`.
+#
+# Why the interface is eight wide
+# -------------------------------
+# The task was redefined as single-arm because the right arm is provably inert in this
+# collection: across all 537,765 frames its eight values have `min == max` and `std ==
+# 0.000`, its gripper sits parked at 1.0, and its wrist camera changes in 0 of 119 sampled
+# frames.  So the data was re-derived without it and the models were trained on eight
+# values -- state `[left arm joints 0-6, left gripper]` and an eight-wide action.
+#
+# That is narrower than the environment, which is sixteen wide, and the two are reconciled
+# by the manifest rather than by padding on the model side:
+#
+#   * `observation.vectors.observation.state.slice: [0, 8]` sends the eight values the
+#     model was trained on.
+#   * `action.dim: 8` with `joint_map: [0..7]` says the model commands those eight.  The
+#     gateway then calls `latch_hold_values()` at episode start, which freezes joints 8-15
+#     at the pose the episode begins from.  That is the same behaviour the demonstrations
+#     have, so nothing is being invented to make this run.
+#
+# Cameras are supplied by name rather than by position.  `lerobot/pi05_libero_finetuned`
+# declares its two views as `observation.images.image` and `observation.images.image2`, and
+# the derived dataset was written with those exact keys so no rename is needed anywhere.
+# `image` is the third-person view and `image2` the left wrist -- the pairing the data was
+# collected with.
+#
+# The third slot the checkpoint declares, `empty_camera_0`, is not supplied.  It does not
+# need to be: `_preprocess_images` fills any declared-but-absent camera with the -1 padded
+# image and a zero attention mask, which is the same treatment the training run gave it.
+# Leaving it out is therefore equivalent to sending it, and cheaper.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_single_libero_2k.yaml
+
+name: pi05-a3-single-libero-2k
+notes: >
+  π0.5 fine-tuned 2,000 steps at batch 4 on the 1123-episode single-arm cookie dataset,
+  starting from `lerobot/pi05_libero_finetuned` and unfreezing the vision tower plus the
+  last 18 language layers (3.088 B of 4.143 B parameters trainable).  Its sibling
+  `pi05_a3_single_base_2k.yaml` is the same recipe from `lerobot/pi05_base`, which is the
+  comparison that matters: the pair isolates the starting weights, and the base start wins
+  by 2.7x on open-loop error (0.0587 rad against 0.1565) at identical settings.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_single_libero/checkpoints/002000/pretrained_model
+    # Eight, not the bimanual sixteen.  The checkpoint still *declares* a 32-wide state
+    # because π0.5 pads to `max_action_dim`, so this cannot be read off the weights.
+    - --config
+    - dims=8
+    # The checkpoint's own camera names paired with the slots this manifest declares.
+    - --config
+    - cameras=observation.images.image=image,observation.images.image2=image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # Offline, for the same reason as the bimanual manifests: the gated
+    # `google/paligemma-3b-pt-224` name resolves through the cache that
+    # `scripts/setup_paligemma_tokenizer_cache.py` populates, and reaches online for a file
+    # the mirror answers 403 on.
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    # The slot names are the checkpoint's, so the adapter needs no translation table.
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    # One vector, because π0.5's preprocessor consumes the state as a single tensor and
+    # discretizes it into the language prompt -- there is no state projector.
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  # The model emits eight; the environment wants sixteen.  See the header.
+  dim: 8
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7]
+  chunk: 50
+  # The same 16-of-50 the bimanual manifests use, so a report of this model differs from
+  # theirs in weights rather than in execution rhythm.
+  execute: 16
+  dt: 0.05
+  normalize:
+    # The checkpoint's own postprocessor already inverted the QUANTILES transform using the
+    # A3 single-arm statistics saved at training time, which travel with the weights.
+    mode: none
+
+success:
+  # The environment decides, so this model is measured on the same ruler as every other.
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

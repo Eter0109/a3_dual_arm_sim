@@ -1,0 +1,90 @@
+# `lerobot/pi05_base` **before** any fine-tuning, on the single-arm cookie scene.
+#
+# This is the "before" half of the `pi05_a3_single_base_2k.yaml` pair: the same checkpoint
+# the fine-tune started from, with no training of its own.  Read its numbers as a wiring
+# check rather than a capability test, for the reason `adapters/pi05_a3.py`'s own docstring
+# gives -- this is a fine-tuning base whose 32-wide action has no published meaning, so it
+# has never been trained to do this task or any other.
+#
+# Three things had to be stated rather than inherited, and each is a place a silent mistake
+# could hide:
+#
+#   * `dims=8` and the manifest's eight-wide state slice.  The checkpoint declares a
+#     32-wide state because π0.5 pads to `max_action_dim`; the declared width is a
+#     capacity, not a shape.
+#   * `stats=`, because this checkpoint ships `"features": {}` -- no normalisation
+#     statistics at all.  They belong to whoever fine-tunes it, so the single-arm
+#     dataset's q01/q99 are installed.  That is not cosmetic: without them the state is
+#     discretized into the language prompt as out-of-range bin indices and the model's raw
+#     output is read as radians, both of which look like a model that moves oddly rather
+#     than like a missing file.
+#   * `cameras=`.  This checkpoint's views are openpi's `base_0_rgb` and
+#     `left_wrist_0_rgb`; `right_wrist_0_rgb` is declared but not supplied, so
+#     `_preprocess_images` fills it with the -1 padded image and a zero attention mask --
+#     the same two-real-plus-one-absent arrangement the single-arm checkpoints end up with,
+#     which keeps the pre/post videos comparable.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_single_base_zs.yaml
+
+name: pi05-single-base-zero-shot
+notes: >
+  `lerobot/pi05_base` with no fine-tuning, on the single-arm cookie scene, with A3's
+  single-arm q01/q99 installed because the checkpoint ships none.  A wiring check, not a
+  capability test: no released π0.5 weight has ever been trained for this robot.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=lerobot/pi05_base
+    - --config
+    - dims=8
+    - --config
+    - stats=/root/autodl-tmp/datasets/a3_cookie_single_arm
+    - --config
+    - cameras=observation.images.base_0_rgb=front_view,observation.images.left_wrist_0_rgb=left_wrist_view
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  dim: 8
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

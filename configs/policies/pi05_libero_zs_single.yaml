@@ -1,0 +1,102 @@
+# `lerobot/pi05_libero_finetuned` **before** any A3 fine-tuning, on the single-arm cookie
+# scene.  The "before" half of the `pi05_a3_single_libero_2k.yaml` pair.
+#
+# This is the checkpoint that reproduces the published LIBERO numbers here -- spatial
+# 100/100, object 99/100, goal 98/100, libero_10 93/100, an average of 97.5 against the
+# paper's 97.5 -- so unlike `lerobot/pi05_base` this one is a genuinely capable policy.
+# It is simply capable at something else, and the video is where that becomes legible.
+#
+# Why seven and not eight
+# -----------------------
+# Unlike the other manifests here, this one does not trim the model to eight.  The
+# checkpoint declares a seven-wide action, and its normaliser sidecar carries statistics
+# for exactly that width, so asking it for eight columns would fail at the unnormaliser --
+# `The size of tensor a (7) must match the size of tensor b (8)` from inside
+# `_apply_transform`, naming tensor shapes and nothing about the real problem.  Seven is
+# also the honest description of what this model can command: LIBERO's action is
+# end-effector pose plus gripper, not eight joint values.  `joint_map: [0..6]` therefore
+# maps all seven of its outputs onto A3's first seven joints and the gateway holds the rest,
+# which includes the left gripper.
+#
+# The consequence is the point of the video.  Its statistics and its action head both
+# describe *end-effector deltas in LIBERO's action space*, and this manifest reads them as
+# *joint angles*, so the arm is being driven in a coordinate system it was not trained in.
+# That mismatch is what the open-loop probe measured as a 47.2 ratio of error to the
+# demonstrations' own per-step motion, against 2.07 for the dual-arm A3 fine-tune, and it is
+# why the fine-tune that starts here needs 8,000 samples just to work off the deficit.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_libero_zs_single.yaml
+
+name: pi05-libero-zero-shot-single
+notes: >
+  `lerobot/pi05_libero_finetuned` with no A3 fine-tuning, on the single-arm cookie scene.
+  Reproduces the published LIBERO average (97.5) on LIBERO's own suites, so it is a capable
+  policy -- just not for this robot.  Its seven outputs are end-effector deltas in LIBERO's
+  action space, read here as joint angles.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=lerobot/pi05_libero_finetuned
+    - --config
+    - dims=7
+    # Eight, because this checkpoint's state is eight wide (end-effector pose plus gripper,
+    # in LIBERO's convention) even though its action is seven -- the same pose without the
+    # redundant sixth rotation term.  Its `observation.state` statistics sidecar says eight,
+    # and the normaliser broadcasts those against whatever arrives, so sending seven would
+    # fail there instead.  This is the one checkpoint here where the two widths differ.
+    - --config
+    - state_dims=8
+    - --config
+    - cameras=observation.images.image=image,observation.images.image2=image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  # Seven, because that is what the checkpoint's own unnormaliser can invert.  See the
+  # header.  `joint_map` has to be the same length as `dim`; the gateway holds joints 7-15.
+  dim: 7
+  joint_map: [0, 1, 2, 3, 4, 5, 6]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    # The checkpoint's own postprocessor inverted its QUANTILES transform with LIBERO's
+    # statistics, which travel with the weights.  Leaving it alone is the faithful reading
+    # of what this model does out of the box.
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

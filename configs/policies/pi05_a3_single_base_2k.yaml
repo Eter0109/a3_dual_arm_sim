@@ -1,0 +1,73 @@
+# π0.5 fine-tuned for 2,000 steps on the single-arm cookie task, starting from
+# `lerobot/pi05_base`.  The control for `pi05_a3_single_libero_2k.yaml`.
+#
+# Everything here is the same as that manifest -- same dataset, same 2,000 steps, same
+# batch size, same unfrozen scope, and the learning-rate schedule was checked step by step
+# and is identical from step 220 onward (the scheduler auto-scales both runs to the same
+# peak; only the warm-up length differs, 66 steps against 333).  The only difference is
+# which weights the run started from.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_single_base_2k.yaml
+
+name: pi05-a3-single-base-2k
+notes: >
+  π0.5 fine-tuned 2,000 steps at batch 4 on the 1123-episode single-arm cookie dataset,
+  starting from `lerobot/pi05_base` and unfreezing the vision tower plus the last 18
+  language layers.  Identical to `pi05_a3_single_libero_2k.yaml` apart from the starting
+  weights, and it fits the data markedly better: training loss 0.014 against 0.067 at the
+  final step, and open-loop error 0.0587 rad against 0.1565.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_single_base/checkpoints/002000/pretrained_model
+    - --config
+    - dims=8
+    - --config
+    - cameras=observation.images.image=image,observation.images.image2=image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  dim: 8
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
