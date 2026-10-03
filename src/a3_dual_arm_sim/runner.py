@@ -19,6 +19,28 @@ def _jsonable(value: Any) -> Any:
     return jsonable(value)
 
 
+def _peakable(value: Any) -> float | None:
+    """An info entry as a number a running maximum can be taken of, or ``None``.
+
+    Deliberately narrow.  An environment's ``info`` carries action vectors and phase
+    labels beside its task counters, and folding those into a maximum would either
+    raise or invent a number.  ``bool`` is admitted on purpose: ``success`` is one,
+    and "did this ever become true" is the single most useful peak in the mapping.
+    """
+
+    if value is None or isinstance(value, (str, bytes, bytearray)):
+        return None
+    if isinstance(value, (np.ndarray, list, tuple, dict, set, frozenset)):
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
 @dataclass(frozen=True)
 class EpisodeResult:
     steps: int
@@ -30,12 +52,18 @@ class EpisodeResult:
     #: Final environment info mapping. Task-specific metrics live here rather
     #: than as fields, so every task can be summarised without changing this type.
     final_info: Mapping[str, Any] = field(default_factory=dict)
+    #: The largest value each scalar entry of ``final_info`` reached during the
+    #: episode, keyed the same way.  Read it as "did this happen at all", which the
+    #: final value cannot answer for an episode nothing cut short -- see
+    #: :meth:`EpisodeRunner.run`.  Empty when the episode never stepped.
+    peak_info: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable view, with numpy converted to builtins."""
 
         payload = asdict(self)
         payload["final_info"] = _jsonable(dict(self.final_info))
+        payload["peak_info"] = _jsonable(dict(self.peak_info))
         return payload
 
 
@@ -78,6 +106,17 @@ class EpisodeRunner:
             self.recorder.start_episode(context, type(self.policy).__name__)
         terminated = truncated = False
         info: dict[str, Any] = {}
+        # Running maximum of every scalar info entry.  The final value is not enough,
+        # and the gap is not hypothetical: a scene built with
+        # ``terminate_on_success=False`` -- which both cookie batch scenes are, so that
+        # the policy keeps executing its second batch -- goes on stepping after the
+        # task is done.  A policy that puts ten Cookies in the target box and then
+        # wanders off ends the episode with ``success=False`` and
+        # ``cookies_in_target=0``, which reads exactly like a policy that never
+        # touched one.  The peak separates those, and both values are reported: "did
+        # it happen" and "did it survive" are different questions and the report
+        # should not silently answer one with the other.
+        peaks: dict[str, float] = {}
         limit = max_steps or self.env.config.horizon
         steps = 0
         discarded = False
@@ -89,6 +128,10 @@ class EpisodeRunner:
                     self.env.emergency_stop("teleoperation emergency stop")
                 action = self.policy.act(observation, self.task)
                 next_observation, _, terminated, truncated, info = self.env.step(action)
+                for key, value in info.items():
+                    number = _peakable(value)
+                    if number is not None and number > peaks.get(key, -np.inf):
+                        peaks[key] = number
                 # Optional per-step hook, read the same duck-typed way as
                 # ``metrics`` and ``success_override`` below, so a caller that needs
                 # the trajectory rather than just its outcome does not have to
@@ -157,6 +200,7 @@ class EpisodeRunner:
             success=success,
             discarded=discarded,
             final_info=dict(info),
+            peak_info=peaks,
         )
 
     def close(self) -> None:

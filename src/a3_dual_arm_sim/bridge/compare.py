@@ -246,6 +246,13 @@ _TASK_KEYS = (
 )
 
 
+#: The task key whose peak reads as "how far into the task did this get".  One name
+#: rather than a list because the column has room for one number and the counting
+#: metric is the only one that means progress; a scene that publishes none of these
+#: gets an em dash rather than a fabricated zero.
+_PROGRESS_KEY = "cookies_in_target"
+
+
 #: Model self-report keys, matched by suffix so a new integration that names its
 #: estimate ``something_value`` is picked up without editing this list.
 _SELF_REPORT_SUFFIXES = ("_value", "_calls", "_task")
@@ -271,14 +278,24 @@ def episode_metrics(result: Any, trace: BehaviorTrace) -> EpisodeMetrics:
     """Turn a runner result plus a trace into the report's four families."""
 
     info = result.final_info
+    peaks: Mapping[str, Any] = getattr(result, "peak_info", None) or {}
     bridge = info.get("bridge") or {}
+    # Task numbers travel twice, under the plain key and under a ``_peak`` suffix:
+    # where the episode ended, and the best it ever reached.  Both are kept because
+    # they disagree in the case this report exists to catch -- an episode that
+    # finished the task and kept going -- and a reader who only wants the old number
+    # is not moved by the addition.  Flat rather than nested because both
+    # ``aggregate`` and the table treat this family as a mapping of numbers, and
+    # nesting would make one of them special-case the other.
+    task = {key: _plain(info[key]) for key in _TASK_KEYS if key in info}
+    task.update({f"{key}_peak": _plain(peaks[key]) for key in _TASK_KEYS if key in peaks})
     return EpisodeMetrics(
         seed=int(info.get("seed", -1)),
         steps=int(result.steps),
         terminated=bool(result.terminated),
         truncated=bool(result.truncated),
         behavior=trace.summary(),
-        task={key: _plain(info[key]) for key in _TASK_KEYS if key in info},
+        task=task,
         self_report=_self_report(info),
         cost={
             "startup_s": bridge.get("startup_s"),
@@ -341,6 +358,15 @@ class ManifestResult:
         payload["task_successes"] = sum(
             1 for ep in self.episodes if bool(ep.task.get("success"))
         )
+        # Counted as well as, not instead of, the final-step count.  The two differ
+        # exactly where it matters: ``success`` is read from the episode's last step,
+        # so a policy that finishes the task and then keeps moving -- which any scene
+        # with ``terminate_on_success=False`` permits -- scores zero in the first
+        # column and one here.  A run where they disagree is a run whose headline
+        # number is about the episode cap rather than about the policy.
+        payload["task_successes_peak"] = sum(
+            1 for ep in self.episodes if ep.task.get("success_peak")
+        )
         payload["safety_stops"] = sum(1 for ep in self.episodes if ep.terminated)
         return payload
 
@@ -371,6 +397,13 @@ class ComparisonReport:
     steps: int | None
     task: str | None
     results: list[ManifestResult] = field(default_factory=list)
+    #: Whether each episode drew its layout from the seed, or every episode ran the
+    #: scene's canonical one.  Recorded because the two produce tables that look
+    #: identical and mean different things: with randomisation off, a multi-seed
+    #: table is one configuration repeated and its episode count is not a sample size.
+    #: Nothing in the numbers themselves says which of the two happened, so it is
+    #: carried here and printed above the table.
+    randomized: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -378,6 +411,7 @@ class ComparisonReport:
             "seeds": list(self.seeds),
             "steps": self.steps,
             "task": self.task,
+            "randomized": self.randomized,
             "results": [result.to_dict() for result in self.results],
         }
 
@@ -398,10 +432,11 @@ def run_manifest(
     and reusing one would carry contact state across episodes -- two models would
     then be compared on different scene realisations.
 
-    ``reset_options`` is passed through to every reset.  The CLI's default is the
-    scene's canonical layout rather than a sampled one, so a reported number can be
-    reproduced and so a comparison table agrees with a rendered video of the same
-    configuration; ``--randomize`` opts back in.
+    ``reset_options`` is passed through to every reset.  The CLI samples each
+    episode's layout from its seed by default and pins the scene's canonical one only
+    under ``--no-randomize``.  Pinning is for reproducing a rendered video, not for
+    measuring a policy: with it on, every seed drew the identical scene and a
+    multi-seed table was one configuration repeated while looking like a sample.
     """
 
     from ..runner import EpisodeRunner
@@ -474,10 +509,13 @@ def compare(
     task: str | None = None,
     scene: str = "sandbox",
     reset_options: Mapping[str, Any] | None = None,
+    randomized: bool = True,
 ) -> ComparisonReport:
     """Run every manifest on the same scene and seeds."""
 
-    report = ComparisonReport(scene=scene, seeds=tuple(seeds), steps=steps, task=task)
+    report = ComparisonReport(
+        scene=scene, seeds=tuple(seeds), steps=steps, task=task, randomized=randomized
+    )
     for manifest in manifests:
         report.results.append(
             run_manifest(
@@ -515,6 +553,35 @@ def _cell(value: Any, digits: int = 3) -> str:
     return str(value)
 
 
+def _progress_cell(result: ManifestResult) -> str:
+    """``mean last → best`` for the scene's progress counter, or an em dash.
+
+    Two numbers rather than one because they answer different questions and the gap
+    between them is the diagnosis.  ``last`` is where the episode ran out of steps;
+    ``best`` is how far it ever got.  A model whose best is well above its last is
+    being cut off -- or is losing work it had already done -- and neither reading is
+    available from a figure that has averaged the two together.
+    """
+
+    finals = [
+        ep.task[_PROGRESS_KEY]
+        for ep in result.episodes
+        if isinstance(ep.task.get(_PROGRESS_KEY), (int, float))
+    ]
+    peaks = [
+        ep.task[f"{_PROGRESS_KEY}_peak"]
+        for ep in result.episodes
+        if isinstance(ep.task.get(f"{_PROGRESS_KEY}_peak"), (int, float))
+    ]
+    if not peaks:
+        return "—"
+    last = _cell(sum(finals) / len(finals), 1) if finals else "—"
+    # Cast to float before formatting.  ``_cell`` only pads decimal places for floats,
+    # and the peak arrives as an int whenever the counter is one -- so the column would
+    # read ``0.0 → 10`` and look like two different quantities.
+    return f"{last} → {_cell(float(max(peaks)), 1)}"
+
+
 def format_table(report: ComparisonReport) -> str:
     """A markdown summary, grouped by regime and led by the declared metric.
 
@@ -529,6 +596,24 @@ def format_table(report: ComparisonReport) -> str:
     ]
     if report.steps is not None:
         lines.append(f"Episode cap: {report.steps} steps")
+        lines.append("")
+    lines.append(
+        "Layout: sampled per episode from the seed (`--randomize`)."
+        if report.randomized
+        else "Layout: the scene's canonical one, the same for every seed (`--no-randomize`)."
+    )
+    lines.append("")
+    if not report.randomized and len(report.seeds) > 1:
+        # Printed rather than assumed, because the table cannot show it: a number that
+        # is one episode repeated looks exactly like a number that is four episodes
+        # averaged, and the difference decides whether any of it generalises.
+        lines.append(
+            f"> **All {len(report.seeds)} seeds ran the same scene.** Randomisation is "
+            "off, so the seed does not reach the layout, the arm's start pose or the "
+            "per-piece jitter; the episodes below are one configuration repeated and "
+            "their count is not a sample size. Re-run with `--randomize` before "
+            "reading a difference between two models out of this table."
+        )
         lines.append("")
     if report.task:
         lines.append(f"Task string sent to every model: `{report.task}`")
@@ -546,31 +631,34 @@ def format_table(report: ComparisonReport) -> str:
             lines.append("")
 
         header = (
-            "| model | prompt | cameras dropped | episodes | success | safety stops "
-            "| corrected | rate limited | saturated | correction max (rad) "
-            "| motion mean (rad) | infer mean (ms) | startup (s) |"
+            "| model | prompt | cameras dropped | episodes | success | success ever "
+            "| safety stops | corrected | rate limited | saturated "
+            "| correction max (rad) | motion mean (rad) | progress last → best "
+            "| infer mean (ms) | startup (s) |"
         )
-        divider = "|" + "---|" * 13
+        divider = "|" + "---|" * 15
         lines.extend([header, divider])
         for result in results:
             agg = result.aggregate()
             behavior = agg.get("behavior", {})
             cost = agg.get("cost", {})
             lines.append(
-                "| {name} | {prompt} | {dropped} | {episodes} | {success} | {safety} "
-                "| {corrected} | {limited} | {saturated} | {cmax} | {motion} | {infer} "
-                "| {startup} |".format(
+                "| {name} | {prompt} | {dropped} | {episodes} | {success} | {ever} "
+                "| {safety} | {corrected} | {limited} | {saturated} | {cmax} | {motion} "
+                "| {progress} | {infer} | {startup} |".format(
                     name=result.name,
                     prompt=result.prompt_kind,
                     dropped=", ".join(result.dropped_cameras) or "none",
                     episodes=agg.get("episodes", 0),
                     success=agg.get("task_successes", "—"),
+                    ever=agg.get("task_successes_peak", "—"),
                     safety=agg.get("safety_stops", "—"),
                     corrected=_cell(behavior.get("corrected_fraction")),
                     limited=_cell(behavior.get("rate_limited_fraction")),
                     saturated=_cell(behavior.get("saturated_fraction")),
                     cmax=_cell(behavior.get("correction_max_rad")),
                     motion=_cell(behavior.get("motion_mean_rad")),
+                    progress=_progress_cell(result),
                     infer=_cell(cost.get("request_mean_ms"), 0),
                     startup=_cell(cost.get("startup_s"), 1),
                 )
@@ -591,6 +679,25 @@ def format_table(report: ComparisonReport) -> str:
                 "- **corrected** — fraction of steps where the environment had to change "
                 "the command before applying it (joint clipping or rate limiting). The "
                 "clearest single sign that a model is not driving this robot."
+            ),
+            (
+                "- **success / success ever** — the first is read from each episode's "
+                "last step, the second from whether it was ever true. They differ "
+                "whenever the scene does not stop on success, which is the normal case "
+                "here: a policy that finishes the task and then keeps moving lands in "
+                "the second column and not the first. Read together, not either alone."
+            ),
+            (
+                "- **progress last → best** — mean count in the target box at the end of "
+                "an episode, then the best any episode ever reached. A best far above "
+                "the mean says the task does come together and then comes apart, or "
+                "that the step cap is cutting episodes off mid-task."
+            ),
+            (
+                "- **corrected, again** — it is met by a model that never moves: the "
+                "environment cannot overrule a command to stand still. A low value "
+                "beside a low **motion mean** is inaction, not competence, so the "
+                "progress column is the one to lead with."
             ),
             (
                 "- **rate limited** — the subset of those corrections caused by the "

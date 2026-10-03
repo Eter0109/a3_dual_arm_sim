@@ -234,7 +234,7 @@ def _policy_compare(args: argparse.Namespace) -> int:
     """
 
     from .bridge.compare import compare, format_table
-    from .bridge.gateway import ExternalPolicyGateway
+    from .bridge.gateway import ExternalPolicyGateway, GatewayCache
     from .bridge.manifest import ManifestError, load_manifest, validate_manifest
 
     manifests = []
@@ -255,28 +255,40 @@ def _policy_compare(args: argparse.Namespace) -> int:
             visual_style=args.visual_style,
         )
 
-    def policy_factory(manifest: object, env: object) -> object:
-        return ExternalPolicyGateway(manifest, env=env)  # type: ignore[arg-type]
+    # One gateway per manifest, reused across episodes; see :class:`GatewayCache` for
+    # why only one is held at a time and what that costs if it is not.
+    gateways = GatewayCache(
+        lambda manifest, env: ExternalPolicyGateway(manifest, env=env, keep_transport=True)
+    )
 
     seeds = _parse_seeds(args.seeds)
-    report = compare(
-        manifests,
-        env_factory=env_factory,
-        policy_factory=policy_factory,
-        seeds=seeds,
-        steps=args.steps,
-        # The scene's own prompt unless overridden.  ``compare`` falls back to a
-        # hardcoded sandbox string otherwise, which on a cookie scene would ask every
-        # model to "move the A3 dual-arm robot" while the frames fill with cookies --
-        # a silent mismatch between the task the scene implements and the task the
-        # model was told.
-        task=args.task or _default_task(args.scene),
-        scene=args.scene,
-        # The canonical layout unless asked otherwise, which is what the render
-        # script uses too -- a table and a video of "the same" configuration have to
-        # be the same configuration, or a reader who checks will find them disagreeing.
-        reset_options=None if args.randomize else DETERMINISTIC_RESET_OPTIONS,
-    )
+    try:
+        report = compare(
+            manifests,
+            env_factory=env_factory,
+            policy_factory=gateways.gateway_for,
+            seeds=seeds,
+            steps=args.steps,
+            # The scene's own prompt unless overridden.  ``compare`` falls back to a
+            # hardcoded sandbox string otherwise, which on a cookie scene would ask every
+            # model to "move the A3 dual-arm robot" while the frames fill with cookies --
+            # a silent mismatch between the task the scene implements and the task the
+            # model was told.
+            task=args.task or _default_task(args.scene),
+            scene=args.scene,
+            # The scene's own layout defaults, which randomise, unless pinned.  This used
+            # to be the other way round, and the cost was a silent one: with every seed on
+            # the canonical layout, a three-seed table was one configuration measured
+            # three times, and nothing in the output said so.  A table that reads like a
+            # sample average and is not one is worse than a table that says what it did.
+            reset_options=None if args.randomize else DETERMINISTIC_RESET_OPTIONS,
+            randomized=args.randomize,
+        )
+    finally:
+        # The gateways own the model processes now that they are shared across
+        # episodes, and ``runner.close`` deliberately leaves a shared transport alone.
+        # Nothing else will close them, so the process would outlive the command.
+        gateways.shutdown()
     table = format_table(report)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -725,11 +737,23 @@ def parser() -> argparse.ArgumentParser:
     compare.add_argument("--task", default=None)
     compare.add_argument(
         "--randomize",
+        dest="randomize",
         action="store_true",
+        default=True,
         help=(
-            "Let the scene randomise its layout per episode.  Off by default so a "
-            "reported number can be reproduced and so the table agrees with a "
-            "rendered video of the same configuration."
+            "Sample each episode's layout from its seed.  On by default: with it off "
+            "every seed runs the identical scene, so a multi-seed table is one "
+            "configuration repeated while reading like a sample average."
+        ),
+    )
+    compare.add_argument(
+        "--no-randomize",
+        dest="randomize",
+        action="store_false",
+        help=(
+            "Pin every episode to the scene's canonical layout.  Reproducible, and it "
+            "agrees with a rendered video of the same configuration; use it when that "
+            "matters more than whether the numbers generalise."
         ),
     )
     compare.add_argument(

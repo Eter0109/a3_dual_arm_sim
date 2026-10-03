@@ -91,6 +91,7 @@ class ExternalPolicyGateway:
         env: Any = None,
         transport: Transport | None = None,
         handler: InProcessHandler | None = None,
+        keep_transport: bool = False,
     ) -> None:
         self.manifest = manifest
         self._env = env
@@ -104,7 +105,8 @@ class ExternalPolicyGateway:
         self._chunk = ChunkBuffer(manifest.action.chunk, manifest.action.execute)
         self._chunk.expected_dim = manifest.action.dim
 
-        if transport is None:
+        built_here = transport is None
+        if built_here:
             if manifest.transport.kind == "in_process" and handler is None:
                 if not manifest.transport.command:
                     raise BridgeError(
@@ -114,6 +116,13 @@ class ExternalPolicyGateway:
                 handler = resolve_handler(manifest.transport.command[0], env)
             transport = build_transport(manifest.transport, handler=handler)
         self._transport = transport
+        #: Whether :meth:`close` may shut the transport down.  A transport handed in
+        #: from outside belongs to its caller, and one built here belongs to this
+        #: gateway -- unless the caller says it is keeping it, which the comparison
+        #: loop does: it reuses one gateway across episodes so the model process
+        #: survives them, and a transport closed at the end of the first episode
+        #: would take the model down with it.  The last user calls :meth:`shutdown`.
+        self._owns_transport = built_here and not keep_transport
         self._dropped = dropped_cameras(manifest)
 
         self._episode_id = ""
@@ -123,13 +132,25 @@ class ExternalPolicyGateway:
         self._stop_requested = False
         self._connected = False
         self._predicted_rows = 0
+        #: Model-load cost this episode actually paid.  Zero for every episode after
+        #: the first, because the process is started once and reused.  Reported
+        #: separately from the transport's cumulative total so a per-episode table
+        #: does not average one 110 s load across every episode and then present the
+        #: result as the cost of one -- which is what it did while the value was
+        #: cumulative, and it made the reuse look like it had not happened.
+        self._startup_s = 0.0
 
     # -- Policy protocol ----------------------------------------------------
 
     def reset(self, context: EpisodeContext) -> None:
-        if not self._connected:
+        first = not self._connected
+        if first:
             self._transport.connect()
             self._connected = True
+        # The transport times its own connect, and that timer is cumulative: it holds
+        # the one load this whole comparison paid.  Which episode paid it is what a
+        # per-episode reading needs, so it is attributed here.
+        self._startup_s = float(self._transport.report.startup_s) if first else 0.0
         self._episode_id = uuid.uuid4().hex[:12]
         self._step = 0
         self._last_info = {}
@@ -155,8 +176,42 @@ class ExternalPolicyGateway:
         return action
 
     def close(self) -> None:
+        if self._owns_transport:
+            self._transport.close()
+            # Only a transport this gateway closed has stopped being connected.  A
+            # shared one is still up, and saying otherwise would make the next reset
+            # believe it was starting the model -- which restarts nothing, because
+            # ``connect`` is idempotent, but does misattribute the load cost to an
+            # episode that did not pay it.
+            self._connected = False
+
+    def shutdown(self) -> None:
+        """Release the transport even when it is shared; the last owner calls this."""
+
         self._transport.close()
         self._connected = False
+
+    def rebind(self, env: Any) -> None:
+        """Point this gateway at a new environment for the next episode.
+
+        The comparison loop builds one environment per episode -- scenes randomise on
+        reset, and reusing one would carry contact state between realisations -- while
+        wanting a single model process for all of them.  Everything else the gateway
+        holds per episode is cleared by :meth:`reset`, so only the environment
+        reference is replaced here.  The bridge is rebuilt rather than patched because
+        it caches values derived from the environment, the cartesian adapter's model
+        among them, and those have to come from the new one.
+        """
+
+        target_mode: ActionMode = getattr(env, "action_mode", "joint_position")
+        if target_mode != self.action_mode:
+            raise BridgeError(
+                f"{self.manifest.name} was built for a {self.action_mode!r} environment "
+                f"and was handed a {target_mode!r} one; rebinding cannot change the "
+                "action space the model's commands are interpreted in"
+            )
+        self._env = env
+        self._bridge = ActionBridge(self.manifest.action, target_mode=target_mode, env=env)
 
     # -- duck-typed attributes the runner reads ------------------------------
 
@@ -167,6 +222,10 @@ class ExternalPolicyGateway:
                 "manifest": self.manifest.name,
                 "transport": self._transport.kind,
                 **self._transport.report.to_dict(),
+                # After the spread, so this episode's share of the load cost replaces
+                # the cumulative figure rather than sitting beside it.
+                "startup_s": round(self._startup_s, 3),
+                "startup_total_s": round(float(self._transport.report.startup_s), 3),
                 "dropped_cameras": list(self._dropped),
                 "action_space": self.manifest.action.space,
                 "action_dim": self.manifest.action.dim,
@@ -303,8 +362,63 @@ def make_handler(env: Any = None) -> InProcessHandler:
     )
 
 
+class GatewayCache:
+    """Keep one gateway -- and so one loaded model -- alive across episodes.
+
+    A comparison runs several seeds per manifest and several manifests per command.
+    Starting a model process costs about 110 s for the pi0.5 bridge -- most of a
+    400-step episode -- so the process is started once and reused, with
+    :meth:`ExternalPolicyGateway.rebind` pointing it at each new episode's
+    environment.
+
+    **One model at a time, deliberately.**  ``compare`` runs each manifest to
+    completion before starting the next, so a manifest the cache has not seen means
+    the previous one is finished, and holding it would keep a second loaded model on
+    the device for the whole rest of the run.  Measured at 10 GB of a 32 GB card for
+    one pi0.5 bridge, which turns a two-manifest comparison into an out-of-memory
+    error on a smaller card.  Releasing it restores the peak to one model.
+
+    The teardown is explicit rather than left to garbage collection because the
+    process is the thing being managed: a leaked handle keeps a child process alive,
+    and the child holds GPU memory whether or not anyone still refers to it.
+    """
+
+    def __init__(self, factory: Any) -> None:
+        #: Called as ``factory(manifest, env)`` to build a gateway.  Injected so the
+        #: lifecycle can be exercised without loading a model.
+        self._factory = factory
+        self._gateways: dict[str, ExternalPolicyGateway] = {}
+
+    def gateway_for(self, manifest: PolicyManifest, env: Any) -> ExternalPolicyGateway:
+        """The gateway for this manifest, built on first use and reused after."""
+
+        if manifest.name not in self._gateways and self._gateways:
+            self.shutdown()
+        gateway = self._gateways.get(manifest.name)
+        if gateway is None:
+            gateway = self._factory(manifest, env)
+            self._gateways[manifest.name] = gateway
+        else:
+            gateway.rebind(env)
+        return gateway
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Which manifests currently hold a model, for assertions and diagnostics."""
+
+        return tuple(self._gateways)
+
+    def shutdown(self) -> None:
+        """Release every held gateway and the process behind it."""
+
+        for gateway in self._gateways.values():
+            gateway.shutdown()
+        self._gateways.clear()
+
+
 __all__ = [
     "ExternalPolicyGateway",
+    "GatewayCache",
     "make_handler",
     "make_policy",
     "resolve_handler",
