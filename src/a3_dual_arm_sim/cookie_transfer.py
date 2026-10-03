@@ -69,8 +69,21 @@ class CookieTransferTaskConfig:
     require_upright: bool = True
 
     def __post_init__(self) -> None:
-        if self.required_cookies != 10:
-            raise ValueError("the 2x5 target contract requires exactly 10 cookies")
+        # The count is the scene's, not a constant.  The rule below is written in terms of
+        # `required_cookies` already and needs no change to grade one piece instead of ten
+        # -- what stopped that from being expressible was this check, which refused any
+        # value but ten.
+        if not 0 < self.required_cookies <= self.cookie_count:
+            raise ValueError(
+                f"required_cookies must be between 1 and cookie_count "
+                f"({self.cookie_count}), got {self.required_cookies}"
+            )
+        # The ten belongs to the *exact-slot* contract rather than to the class: a 2x5 grid
+        # has ten slots, and filling it means landing on all ten.  Tying it to
+        # `require_exact_slots` keeps the constraint where it is actually true, so the
+        # one-Cookie scene can opt out by opting out of the slot grid.
+        if self.require_exact_slots and self.required_cookies != 10:
+            raise ValueError("the exact-slot 2x5 contract requires exactly 10 cookies")
 
 
 class A3CookieTransferEnv(A3DualArmEnv):

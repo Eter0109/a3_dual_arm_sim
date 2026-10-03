@@ -376,8 +376,14 @@ class SimConfig:
             or len(self.cameras.right_wrist_target_m) != 3
         ):
             raise ValueError("camera positions must contain three values")
-        if len(self.cookie_transfer.cookie_source_positions_m) < 10:
-            raise ValueError("cookie_transfer must contain at least 10 source positions")
+        # The list *is* the layout -- one entry per Cookie in the source box -- so its
+        # length is the scene's cookie count rather than a constant.  Every registered
+        # collection scene uses the dense eighty, but a scene that studies a single piece
+        # has one entry, and the former "at least ten" rule made that unrepresentable while
+        # checking nothing the list itself guarantees.  An empty list is worth refusing: it
+        # would compile a source bin with nothing in it, which is a typo, not a scene.
+        if not self.cookie_transfer.cookie_source_positions_m:
+            raise ValueError("cookie_transfer must contain at least one source position")
         if len(self.cookie_transfer.target_slots_local_m) != 10:
             raise ValueError("cookie_transfer must contain exactly 10 target slots")
         spare_position = self.cookie_transfer.spare_target_bin_world_position_m

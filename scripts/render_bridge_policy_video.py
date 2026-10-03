@@ -42,7 +42,23 @@ POLICY_CAMERAS = ("front", "left_wrist", "right_wrist")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="A policy manifest.  Omit it with --expert to record the scene's own expert.",
+    )
+    parser.add_argument(
+        "--expert",
+        action="store_true",
+        help=(
+            "Record the scene's own scripted expert instead of a model.  The scene has to be "
+            "one of the registered ones -- the sandbox has no expert.  This is the reference a "
+            "model's recording is read against: same scene, same camera framing, same "
+            "compositing, same metrics, so the only difference left is which controller "
+            "drives the arm."
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--scene",
@@ -167,6 +183,35 @@ def progress_line(info: dict[str, Any]) -> str | None:
     return f"in target {placed}/{required}   in source {source}"
 
 
+class _SceneExpertDriver:
+    """The scene's own scripted expert behind the gateway's three-member interface.
+
+    The recording loop only ever calls ``reset`` and ``act`` and reads ``metrics``, so three
+    members are enough to put an expert and a model through one compositing path.  Sharing
+    that path is the point: the two recordings then differ in the controller and in nothing
+    else -- same scene, same camera framing, same overlay, same ``BehaviorTrace`` limits -- so
+    a difference in the video is a difference in behaviour rather than in how it was filmed.
+    """
+
+    def __init__(self, policy: Any) -> None:
+        self._policy = policy
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        # No self-report.  An expert has no value estimate or token count to publish, and the
+        # overlay's model line is meant to stay empty for exactly that case.
+        return {}
+
+    def reset(self, context: Any) -> None:
+        self._policy.reset(context)
+
+    def act(self, observation: dict[str, Any], task: str) -> Any:
+        return self._policy.act(observation, task)
+
+    def close(self) -> None:
+        self._policy = None
+
+
 def main() -> int:
     args = parse_args()
 
@@ -175,14 +220,19 @@ def main() -> int:
     from a3_dual_arm_sim.bridge.compare import BehaviorTrace, _arm_limits
     from a3_dual_arm_sim.bridge.gateway import ExternalPolicyGateway
     from a3_dual_arm_sim.bridge.manifest import load_manifest, validate_manifest
+    from a3_dual_arm_sim.collection import registered_scenes, scene_by_name
     from a3_dual_arm_sim.contracts import EpisodeContext
 
-    manifest = load_manifest(args.manifest)
-    problems = validate_manifest(manifest)
-    if problems:
-        raise SystemExit(
-            f"{args.manifest} is not usable:\n  - " + "\n  - ".join(problems)
-        )
+    manifest = None
+    if args.manifest is not None:
+        manifest = load_manifest(args.manifest)
+        problems = validate_manifest(manifest)
+        if problems:
+            raise SystemExit(
+                f"{args.manifest} is not usable:\n  - " + "\n  - ".join(problems)
+            )
+    elif not args.expert:
+        raise SystemExit("--manifest is required unless --expert is given")
 
     env, scene_task, reset_options = build_environment(
         args.scene, args.config, args.visual_style
@@ -194,7 +244,19 @@ def main() -> int:
 
     task = args.task or scene_task
 
-    gateway = ExternalPolicyGateway(manifest, env=env)
+    if args.expert:
+        # The scene's own `build_policy`: the same expert a collection run would drive, on the
+        # same environment object the recording is about to step.
+        if args.scene not in registered_scenes():
+            raise SystemExit(
+                f"--expert needs a registered scene; {args.scene!r} has no scripted expert. "
+                f"Available: {sorted(registered_scenes())}"
+            )
+        gateway: Any = _SceneExpertDriver(
+            scene_by_name(args.scene, visual_style=args.visual_style).build_policy(env)
+        )
+    else:
+        gateway = ExternalPolicyGateway(manifest, env=env)
     # The same trace the comparison uses, so the numbers on the video and the
     # numbers in a report are computed by one implementation.
     trace = BehaviorTrace()
@@ -204,13 +266,19 @@ def main() -> int:
     composer = FrameComposer(args.view_size, args.panel_size)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    title = (
-        f"{manifest.name}  ({manifest.evaluation.regime}, {manifest.evaluation.prompt_kind})",
-        (
-            f"transport {manifest.transport.kind}   action {manifest.action.space} "
-            f"{manifest.action.dim}d   chunk {manifest.action.chunk}/{manifest.action.execute}"
-        ),
-    )
+    if args.expert:
+        title = (
+            f"scripted expert  (scene {args.scene})",
+            "the reference that says this scene can be solved at all",
+        )
+    else:
+        title = (
+            f"{manifest.name}  ({manifest.evaluation.regime}, {manifest.evaluation.prompt_kind})",
+            (
+                f"transport {manifest.transport.kind}   action {manifest.action.space} "
+                f"{manifest.action.dim}d   chunk {manifest.action.chunk}/{manifest.action.execute}"
+            ),
+        )
 
     container = av.open(str(args.output), mode="w")
     stream = container.add_stream("libx264", rate=fps)
@@ -219,8 +287,15 @@ def main() -> int:
     stream.pix_fmt = "yuv420p"
     stream.options = {"crf": str(args.crf), "preset": "medium"}
 
-    print(f"manifest   : {args.manifest}")
-    print(f"model      : {manifest.name}  regime={manifest.evaluation.regime}")
+    print(f"manifest   : {args.manifest if manifest is not None else '<scripted expert>'}")
+    print(
+        "model      : "
+        + (
+            "scripted expert"
+            if manifest is None
+            else f"{manifest.name}  regime={manifest.evaluation.regime}"
+        )
+    )
     print(f"scene      : {args.scene}")
     print(f"task       : {task!r}")
     print(f"output     : {args.output}")

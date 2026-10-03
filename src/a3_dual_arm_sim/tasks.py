@@ -79,6 +79,22 @@ GRASP_PROMPT = "pick up the red cube"
 #: and does not aim at the ten slot centres a single-Cookie grip does.
 _BATCH_CONTRACT = "released_10_upright_settled_contained_70_remain"
 
+#: The instruction for the one-Cookie scene, and the only variant whose prompt is not
+#: ``COOKIE_PROMPT``.
+#:
+#: The prompt has to change with the layout, and that is not a stylistic choice: the shared
+#: wording asks for *five at a time, twice, all ten slots*, none of which is what this scene
+#: is.  Asking for ten while showing one would make the instruction unanswerable from the
+#: picture, which is the failure the shared prompt's own docstring is written to avoid.
+#: Naming "one" and showing one keeps the sentence and the scene in agreement.
+#:
+#: It also means a policy conditioned on this prompt is not comparable to one conditioned on
+#: ``COOKIE_PROMPT``: the two are different tasks to the model, which is why this is a
+#: separate entry in ``TASKS`` rather than another variant sharing the string.
+_SINGLE_PIECE_PROMPT = (
+    "pick up the one yellow block from the source bin and put it in the target box"
+)
+
 TASKS: dict[str, TaskSpec] = {
     "a3_grasp": TaskSpec(
         name="a3_grasp",
@@ -101,7 +117,20 @@ TASKS: dict[str, TaskSpec] = {
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
     ),
-    # The relay fills two boxes rather than one, so its acceptance rule is its own:
+    # One Cookie, one instruction.  The same physical act -- out of the source bin, into the
+    # target box -- reduced to a single piece, so that a result separates two questions the
+    # ten-Cookie scene answers at once: whether a policy can approach, grasp and place at
+    # all, and whether it can do so ten times without knocking the stack over.  A failure
+    # here is about the first; it says nothing about the second.
+    #
+    # `require_released=True` because a Cookie still held by the pads is not placed, and
+    # `require_exact_slots=False` because the 2x5 slot grid is about the ten-piece fill: with
+    # one piece, "counted in the box and let go of" is the whole of the task.
+    "a3_cookie_single_piece": TaskSpec(
+        name="a3_cookie_single_piece",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="released_1_upright_settled_contained_0_remain",
+    ),    # The relay fills two boxes rather than one, so its acceptance rule is its own:
     # ten Cookies in each box with sixty left in the source, box A pushed clear and
     # box B back in the station.  The environment cannot express it -- its task
     # config checks a single target bin -- which is why this task's contract is the

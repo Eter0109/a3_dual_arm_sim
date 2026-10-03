@@ -19,6 +19,7 @@ from .policy import Policy
 from .recording import LeRobotV3Recorder
 from .runner import EpisodeRunner
 from .same_column_batch_expert import A3SameColumnBatchExpert
+from .single_piece_expert import A3SinglePieceExpert
 from .tasks import TASKS, TaskSpec
 from .two_box_batch import TwoBoxBatchExpert
 
@@ -674,6 +675,107 @@ def cookie_two_box_scene(
     )
 
 
+def cookie_single_piece_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
+    """One Cookie in the source box, and an instruction that names one.
+
+    The smallest arrangement that is still the task: take a piece out of the source bin and
+    put it in the target box.  Nothing physical is re-derived -- same bins, same Cookie,
+    same target box, and the piece sits exactly where the dense layout puts its first one,
+    which is the one the five-at-a-time experts reach for first.  Only the number changes.
+
+    That is the point.  A result here separates two questions the dense scene answers at
+    once: whether a policy can approach, grasp and place at all, and whether it can do so
+    ten times without disturbing the stack.  A failure here is about the first, and says
+    nothing about the second.
+
+    The layout is *replaced* rather than parameterised because the source positions **are**
+    the Cookies: ``model._add_cookie_scene`` compiles one body per entry, so a one-entry list
+    is a one-Cookie scene by construction rather than by a count that could disagree with it.
+    The piece kept is the config's own first source position, which is where a policy
+    fine-tuned on the dense scene has seen a Cookie before.
+
+    ``require_exact_slots=False``: the ten-slot grid is the ten-piece fill's criterion, and
+    one piece cannot fill it.  With a single piece the task is "counted in the box and let go
+    of", which is what ``require_released`` already says.  ``terminate_on_success=True``,
+    unlike the batch scenes, because there is no expert stopping rule to defer to and no
+    second batch to reach.
+
+    ``build_policy`` is :class:`~a3_dual_arm_sim.single_piece_expert.A3SinglePieceExpert`: the
+    base single-Cookie state machine with its held-box opening removed.  That opening is what
+    made this scene look expertless -- ``A3CookieTransferExpert`` spends its first phase
+    having the right arm fetch the tabletop box, times out with "right box approach timeout;
+    contacts=[0.0, 0.0]" (the same failure three pre-existing tests record), and never reaches
+    the Cookies.  With the box left where the scene put it, the rest of that state machine --
+    approach, close, verify, lift, place, release, retract -- runs as written, and it is the
+    reference that says this scene can be solved at all.
+    """
+
+    def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
+        loaded = _styled_config("configs/cookie_same_column.yaml", visual_style)
+        layout = loaded.cookie_transfer.cookie_source_positions_m
+        loaded = replace(
+            loaded,
+            cookie_transfer=replace(
+                loaded.cookie_transfer,
+                # This config's **first** source position, which is the piece the verified
+                # five-at-a-time expert grasps first: `_candidate_batches` walks the columns
+                # in x order and takes the five lowest y, so index 0 is that expert's opening
+                # move.  Reducing the layout to it changes the count and nothing else.
+                #
+                # The config matters, and getting it wrong is not obvious from a failure.  An
+                # earlier version of this scene started from the default config, whose target
+                # box sits at a different world position, and every expert placement failed --
+                # including the batch expert's own reachability check, which reported "target
+                # column 1 unreachable with vertical grasp: the closest pose is 6.39 mm from
+                # the target".  Nothing about that message says "wrong config", and it was
+                # read first as a Cookie-count problem.
+                #
+                # The module-level COOKIE_SOURCE_POSITIONS would not serve either: this config
+                # has its own rows, and mixing one in would put the piece at a y the expert
+                # never used.
+                cookie_source_positions_m=(layout[0],),
+            ),
+        )
+        task_config = CookieTransferTaskConfig(
+            cookie_count=1,
+            required_cookies=1,
+            position_noise_m=position_noise_m,
+            yaw_noise_rad=yaw_noise_rad,
+            require_exact_slots=False,
+            require_released=True,
+            terminate_on_success=True,
+        )
+        return A3CookieTransferEnv(loaded, task_config=task_config, render_cameras=True)
+
+    def build_policy(env: A3DualArmEnv) -> Policy:
+        return CookieCollectionPolicy(
+            expert=A3SinglePieceExpert(env),  # type: ignore[arg-type]
+            hold_steps=hold_steps,
+        )
+
+    return CollectionScene(
+        task=TASKS["a3_cookie_single_piece"],
+        build_env=build_env,
+        build_policy=build_policy,
+        metric_keys=("cookies_in_target", "cookies_in_source"),
+        randomize_placements=True,
+        # No stack, so there is nothing for a per-Cookie jitter to disturb; the clearance
+        # argument that turns it off for the batch scenes does not apply.
+        randomize_cookies=True,
+        details={
+            "config": "configs/cookie_same_column.yaml, with cookie_source_positions_m reduced to one entry",
+            "hold_steps": hold_steps,
+            "source_positions": 1,
+            "required_cookies": 1,
+            "require_exact_slots": False,
+            "require_released": True,
+            "expert": "A3SinglePieceExpert (base state machine, box left on the table)",
+        },
+    )
+
+
 def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
     """Scene name -> builder.  This is the list a CLI or a sweep iterates."""
 
@@ -683,6 +785,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_batch": cookie_batch_scene,
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
+        "a3_cookie_single_piece": cookie_single_piece_scene,
     }
 
 
