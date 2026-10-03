@@ -54,6 +54,19 @@ NAME="${5:-a3_pi05}"
 
 PYTHON="${A3_PI05_PYTHON:-/root/autodl-tmp/a3-collect/.venv/bin/python}"
 BASE="${A3_PI05_BASE:-lerobot/pi05_base}"
+
+# Dataset-key -> policy-key renames.  Unset means "the three A3 cameras onto the three openpi
+# slots"; set it to the empty string to omit the flag entirely, which is what a dataset that
+# already carries the checkpoint's own names needs.  That is the case for
+# `scripts/make_single_arm_dataset.py`, which names its two cameras `observation.images.image`
+# and `observation.images.image2` because those are the keys `lerobot/pi05_libero_finetuned`
+# declares -- so there is no second naming to translate, and a map naming keys the dataset does
+# not have is a mismatch in two places at once rather than a harmless no-op:
+# `lerobot_train.py` applies it both to the policy's feature keys and to the batches.
+RENAME_MAP="${A3_RENAME_MAP-auto}"
+if [[ "${RENAME_MAP}" == "auto" ]]; then
+    RENAME_MAP='{"observation.images.front":"observation.images.base_0_rgb","observation.images.left_wrist":"observation.images.left_wrist_0_rgb","observation.images.right_wrist":"observation.images.right_wrist_0_rgb"}'
+fi
 # Resolved from this script's own location, so the launcher is found no matter which
 # directory the training is started from.
 PROJECT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -159,12 +172,9 @@ ARGS=(
     # and neither decord nor opencv can decode it.
     --dataset.video_backend=pyav
 
-    # Dataset key -> policy key.  `lerobot_train.py` applies this both to the policy's
-    # feature keys and to the batches, which is why it is a flag rather than a dataset
-    # edit: rewriting 26 GB of videos to change three strings would be the alternative,
-    # and it would also destroy the dataset's value as something GR00T can still read.
-    --rename_map='{"observation.images.front":"observation.images.base_0_rgb","observation.images.left_wrist":"observation.images.left_wrist_0_rgb","observation.images.right_wrist":"observation.images.right_wrist_0_rgb"}'
-
+    # Dataset key -> policy key.  See `RENAME_MAP` above; appended after this array because
+    # the flag has to be absent, not empty, when the dataset already uses the checkpoint's
+    # names.
     --batch_size="${BATCH}"
     --steps="${STEPS}"
     --num_workers=4
@@ -183,5 +193,22 @@ ARGS=(
     --policy.push_to_hub=false
     --seed=1000
 )
+
+# Appended separately, and only when non-empty: passing `--rename_map=''` would be a
+# different thing from not passing it, and the processor that consumes it treats an empty
+# map and an absent map differently.
+if [[ -n "${RENAME_MAP}" ]]; then
+    ARGS+=(--rename_map="${RENAME_MAP}")
+fi
+
+# The two branches exist because a quote inside `${VAR:-<default>}` is not literal: bash
+# parses the `:-` word for quoting, so an apostrophe in the fallback text opens a string that
+# never closes and the failure reads as `unexpected EOF` at the end of the file.
+if [[ -n "${RENAME_MAP}" ]]; then
+    echo "  rename_map  : ${RENAME_MAP}"
+else
+    echo "  rename_map  : <none - the dataset already uses the checkpoint names>"
+fi
+echo
 
 "${PYTHON}" "${PROJECT}/scripts/train_pi05_launcher.py" "${ARGS[@]}" "${@:6}"

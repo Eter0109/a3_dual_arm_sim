@@ -1,0 +1,104 @@
+# π0.5 continued from a3_adv_40k/040000 with the PaliGemma backbone un-frozen.
+#
+# This file exists to answer one question about the run next to it, so the only thing it
+# changes is what is trainable.  Everything else -- the dataset, the camera, the 16-of-50
+# execution chunk, the checkpoint's own embedded normalisation statistics -- is copied from
+# `pi05_a3_adv40k.yaml`, which is what makes the two teacher-forcing numbers comparable.
+#
+# What the fold in the curve is
+# -----------------------------
+# `a3_adv_40k` was trained with `--policy.train_expert_only=true`: 0.69 B of 4.14 B
+# parameters, the action expert and the projections, with all of PaliGemma held fixed.  It
+# plateaued at a teacher-forced per-step error of 0.030 rad against a demonstration that
+# moves 0.018 rad per step -- the model cannot reproduce the expert from the expert's own
+# observations, which is the failure the closed-loop drift is made of.
+#
+# Three pieces of evidence pointed at the freeze rather than at the data:
+#   * 5.6x more episodes and 2x more steps moved that error from 1.90 to 1.78 (b1 vs adv):
+#     it is not a data ceiling.
+#   * the error is 79% bias, not variance -- four samples of one frame agree to 0.029 of a
+#     0.037 mean, so averaging cannot remove it.  Bias is what a mis-adapted representation
+#     produces.
+#   * the published π0.5 LIBERO recipe trains the whole model, and it does so from an
+#     already LIBERO-specialised checkpoint.  This run starts from a general one
+#     (`lerobot/pi05_base`) and no published π0.5 weights have ever been trained on a
+#     dual-arm 16-dimensional joint layout, so the backbone has the most to learn here.
+#
+# What this run actually un-froze
+# -------------------------------
+# Not the whole model: 4.14 B trainable does not fit in 32 GB (weights 8.29 GB are fixed,
+# and each trainable parameter adds 6 bytes -- 2 B of bf16 gradient plus 4 B of bf16 AdamW
+# moments -- for 33.1 GB).  `scripts/train_pi05_launcher.py` therefore un-freezes the vision
+# tower and all 18 language-model layers, 3.088 B, 74.5%, leaving `embed_tokens` and
+# `lm_head` frozen.  The same launcher forces AdamW onto its fused kernel, without which
+# the run dies inside `torch._foreach_sqrt` at 30.4 GiB of 31.4 GiB.
+#
+# Read the run's own log for the numbers; this file is the pointer to it:
+#   /root/autodl-tmp/logs/a3_adv40k_unfreeze3k.log
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_adv40k_unfreeze3k.yaml
+
+name: pi05-a3-adv-unfreeze3k
+notes: >
+  π0.5 continued for 3,000 further steps at batch 4 from the 40,000-step randomised run,
+  this time with the vision tower and all 18 PaliGemma language layers trainable
+  (3.088 B of 4.14 B, 74.5%) instead of the action expert alone.  12,000 samples, which is
+  small on purpose: the question is whether the per-step error moves at all, not whether
+  this run is finished.  If it moves, the freeze was the ceiling and the next run is a long
+  one; if it does not, un-freezing is not the lever and the argument has to go back to the
+  observations.  Compared against `pi05-a3-adv-40k` on the same teacher-forcing probe and
+  the same camera, so the flags differ only in what was trainable.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_adv40k_unfreeze3k/checkpoints/003000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

@@ -1,0 +1,120 @@
+# π0.5 fine-tuned on the randomised collection, 1123 episodes / 40,000 steps.
+#
+# Its predecessor is configs/policies/pi05_a3_finetuned.yaml (200 episodes, 20,000 steps),
+# and the point of this file is that the pair is *not* a clean A/B: the two runs differ in
+# how much data they saw **and** in the camera that data was recorded with.  Read the
+# "Camera" section below before comparing their numbers.
+#
+# Camera
+# ------
+# This run's data was collected on `codex/randomization-profiles`, whose `CameraConfig`
+# default is the closer, more top-down front camera `(0.50, -0.18, 1.25)` at fovy 48.0 --
+# roughly 0.70 m from the workspace, against 1.15 m for this branch's default.  Measured,
+# not inferred: rendering the nominal layout under both cameras and differencing against a
+# stored frame of each dataset gives mean|diff| 8.3 for the branch camera and 29.1 for this
+# one on b1, and the reverse on the randomised set.  A model fed the wrong camera sees a
+# scene it was never trained on, so every comparison has to state which camera it used.
+#
+# Repointing it at a different checkpoint
+# ---------------------------------------
+# Checkpoints are named by step, zero-padded to six digits, with a `last` symlink beside
+# them.  `040000` is the end of this run and is pinned explicitly rather than via `last`,
+# because `last` is a symlink that a resumed run would move.
+#
+# What this run changed relative to the 20,000-step one
+# ----------------------------------------------------
+# 1. 1123 episodes instead of 200 (5.6x), from 16 parallel collectors on disjoint seed
+#    blocks, with real randomisation of both boxes and the arm start pose.  `--randomize`
+#    was off for the 20k run's data, so its 200 episodes were 200 renderings of one layout;
+#    a policy can score on that by memorising a trajectory.
+# 2. `--policy.scheduler_decay_steps=40000 --policy.scheduler_warmup_steps=1300`.  The
+#    default decay is 30,000, and `configuration_pi05.py` scales it only when
+#    `--steps < scheduler_decay_steps`, so at 40,000 steps the schedule was not scaled and
+#    the last quarter of training sat pinned at the 2.5e-6 floor.
+#
+# Everything else -- frozen PaliGemma, the 16-of-50 execution chunk, the checkpoint's own
+# embedded normalisation statistics -- is unchanged from the 20k manifest, which is what
+# makes the two reports comparable at all.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_adv40k.yaml
+
+name: pi05-a3-adv-40k
+notes: >
+  π0.5 (PaliGemma-2B plus a 300M flow-matching action expert) fine-tuned here on 1123
+  episodes collected from a3_cookie_same_column with both boxes and the arm start pose
+  randomised, 40,000 steps at batch 8.  0.60 of an epoch -- the loss was still falling
+  (0.0057 at step 40,000 against 0.008 for the 20,000-step run on 200 episodes), so this
+  run was stopped by its step budget and not by convergence.  Only the action expert and
+  the projections were trained.  Unlike its 20k predecessor this model was trained through
+  the closer codex-era front camera, so a report of it is only comparable to another
+  report that names the same camera.
+
+transport:
+  kind: subprocess
+  runtime:
+    # "local" because the command names the interpreter directly; the isolation is the
+    # same as conda's -- a separate process with a separate environment.  This one holds
+    # Python 3.12.3, torch 2.8.0+cu128, lerobot 0.5.1, transformers 5.3.0.
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_adv_40k/checkpoints/040000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # Offline, for the same reason as the 20k manifest: the gated `google/paligemma-3b-pt-224`
+    # name resolves through the cache that `scripts/setup_paligemma_tokenizer_cache.py`
+    # populates, and reaches for a file online serving would 403 on.
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    # One vector, because π0.5's preprocessor consumes the state as a single tensor and
+    # discretizes it into the language prompt -- there is no state projector.
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  # The same 16-of-50 as the other two manifests, so the reports differ in weights rather
+  # than in execution rhythm.  50 steps is 2.5 s of open-loop motion; 16 is A3's own
+  # quarter-second beat.
+  execute: 16
+  dt: 0.05
+  normalize:
+    # The checkpoint's own postprocessor inverted the QUANTILES transform using the
+    # statistics saved at training time, which travel with the weights -- so this run's
+    # 1123-episode statistics are used rather than the 200-episode dataset's.
+    mode: none
+
+success:
+  # The environment decides, so this model is measured on the same ruler as every other.
+  probe: env
+
+evaluation:
+  regime: finetuned
+  # Both, because the two answers differ and their agreement is the interesting part.
+  primary_metric: both
+  prompt_kind: free_text
