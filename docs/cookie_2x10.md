@@ -23,6 +23,8 @@ first_grasp: random    # 0–9 / random，选择 2×10 任务首夹数量
 - `first_grasp: random` 每个 episode 均匀抽取一次 0–9，首夹和第三夹共用该数量。
   抽样由 episode seed 决定，与环境扰动及选列使用独立随机流。
 
+源盒初始化会重抽相交的饼干摆放，位置和角度仍在配置的扰动幅度内。
+
 可复制 YAML，通过 `--randomization-config path/to/config.yaml` 指定另一份配置。
 文件启动时读取一次，修改后需要重新启动。配置必须包含 `first_grasp`。
 `--first-grasp` 参数可临时覆盖 YAML，正常使用只需编辑配置。
@@ -99,14 +101,36 @@ Ctrl+C 会在当前 episode 完成后关闭记录器。
 数量为 0 时，指令明确跳过第 1、3 次抓取。
 
 数据采用 LeRobot v3 格式，训练入口见 [SmolVLA 使用说明](smolvla.md)。
+训练入口识别 2×10 数据后，将文本长度设为 128 tokens，保留完整四次抓取指令。
 `collection_summary.json` 记录 2×10 布局及数量模式；episode 元数据记录实际数量、
 四次计划、饼干 ID、抬升与释放检查和目标各列数量。审计核对指令、seed 和计划。
 原十块任务的 benchmark 与二十块任务分别评估，不共用成功分数。
 
-## 验证范围
+例如，采集目录为 `datasets/cookie_2x10_trial`、repo-id 为 `local/cookie-2x10-trial` 时，
+先验证训练读取、视频解码和 GPU 优化：
 
-确定性第 1 列中，0–9 十种固定数量各测试一个 seed，均完成二十块搬运。
-基础随机化 seed 0 的第 1、2 列测试成功；第 3 列出现额外移出的源饼干，
-第 4 列最后一次抓取失败，这些回合不会保存为成功数据。
-这些检查不代表所有 seed、来源列或随机化档位的成功率。正式采集前应使用独立 seed
-试采，并统计成功数与包含失败的总尝试数。
+```bash
+python -m a3_dual_arm_sim.cli train-smolvla \
+  --root datasets/cookie_2x10_trial --repo-id local/cookie-2x10-trial \
+  --output outputs/cookie_2x10_smoke/model \
+  --steps 20 --batch-size 8 --save-freq 20 --device cuda
+```
+
+短训练正常退出并保存检查点后，再对正式采集的数据运行完整训练。
+批大小按显存实测调整，训练和测试使用对应的 2×10 场景及任务指令。
+
+## 采集前试跑
+
+先按需要设置 YAML 的强度、来源列和首夹数量，再运行几个不同 seed：
+
+```bash
+python examples/run_cookie_2x10.py --seed 100 --output artifacts/cookie_2x10/seed100.json
+python examples/run_cookie_2x10.py --seed 101 --output artifacts/cookie_2x10/seed101.json
+```
+
+结果中的 `success` 应为 `true`，`target_column_counts` 应为 `[10,10]`，
+`cookies_in_source` 应为 `60`。`grasp_reports` 记录每夹的计划数量、实际抬升数量和
+释放结果；数量为零的夹次会标记 `skipped`。
+
+采集结束后，查看 `collection_summary.json` 中的成功数和总尝试数，并抽查回放。
+用新的 seed 评估 SmolVLA，避免使用训练数据中的布局作为最终测试集。

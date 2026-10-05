@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import mujoco
 import numpy as np
 
 from a3_dual_arm_sim.controllers.expert import CookiePhase
@@ -25,6 +26,84 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
         )
         self._selection_batch_index = None
         super().reset(context)
+        # Keep the tightly packed neighboring columns clear while the stack
+        # leaves the box; a fast lift can carry adjacent Cookies with it.
+        self._max_lift_speed = 0.0012
+        self._batch_pinch_height_m = 0.010
+        site_rotation = self.data.site_xmat[self._l_site].reshape(3, 3)
+        base = self.model.geom("L_2f85_base_collision").id
+        self._base_offset_local = site_rotation.T @ (
+            self.data.geom_xpos[base] - self.data.site_xpos[self._l_site]
+        )
+        self._base_rotation_local = site_rotation.T @ self.data.geom_xmat[base].reshape(3, 3)
+        self._base_size = self.model.geom_size[base].copy()
+
+    def _grasp_pitch_for_column(self, column_rank, pitch_deg):
+        if column_rank != 3:
+            return super()._grasp_pitch_for_column(column_rank, pitch_deg)
+        # The final group can sit much farther back than either legacy group.
+        # Choose a reachable wrist pitch before inserting either finger.
+        positions = self._positions()
+        rotations = self.data.xmat[
+            list(np.asarray(self.env._cookie_bodies)[self.batch_indices])
+        ].reshape(-1, 3, 3)
+        up = rotations[:, :, 2].mean(axis=0)
+        up /= np.linalg.norm(up)
+        pad_height_axis = up if self._aligned_grasp else np.array([0.0, 0.0, 1.0])
+        for pitch in (-35, -40, -45, -50, -55):
+            c, s = np.cos(np.deg2rad(pitch)), np.sin(np.deg2rad(pitch))
+            rotation = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]) @ self._grasp_rotation
+            axis = rotation[:, 0]
+            projections = positions @ axis
+            half_extents = (
+                np.abs(np.einsum("nji,j->ni", rotations, axis)) @ self.env.COOKIE_HALF_SIZE
+            )
+            center = positions.mean(axis=0)
+            center += (
+                (min(projections - half_extents) + max(projections + half_extents)) / 2
+                - center @ axis
+            ) * axis
+            if (
+                self._is_followup_batch
+                and self._base_push_attempts >= 2
+                and self._rear_clearance_m < 0.0025
+                and not self._aligned_grasp
+            ):
+                center += 0.002 * axis
+            base_axis = (rotation @ self._base_rotation_local)[:, 2]
+            base_half_height = self._base_size[0] * np.sqrt(
+                max(0.0, 1 - base_axis[2] ** 2)
+            ) + self._base_size[1] * abs(base_axis[2])
+            base_offset = rotation @ (self._base_offset_local - self._pad_offset)
+            pinch_height = max(
+                0.010,
+                (self.env.SOURCE_WALL_TOP_Z + 0.003 - center[2] - base_offset[2] + base_half_height)
+                / pad_height_axis[2],
+            )
+            pick = center + pinch_height * pad_height_axis - rotation @ self._pad_offset
+            quat = np.empty(4)
+            mujoco.mju_mat2Quat(quat, rotation.ravel())
+            q = self.q_transit
+            reachable = True
+            for position in (pick + [0, 0, 0.082], pick):
+                q = self.env.solve_ik(position, quat, q)
+                work = self.env._ik._work
+                work.qpos[self._l_qpos] = q
+                mujoco.mj_kinematics(self.model, work)
+                actual, error = np.empty(4), np.empty(3)
+                mujoco.mju_mat2Quat(actual, work.site_xmat[self._l_site])
+                mujoco.mju_subQuat(error, quat, actual)
+                if (
+                    np.linalg.norm(work.site_xpos[self._l_site] - position) > 0.0008
+                    or np.linalg.norm(error) > 0.015
+                ):
+                    reachable = False
+                    break
+            if reachable:
+                self._selected_pick_pitch_deg = pitch
+                self._batch_pinch_height_m = pinch_height
+                return pitch
+        raise RuntimeError("the far-column group has no reachable grasp pitch")
 
     @property
     def batch_size(self):
@@ -61,6 +140,7 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
         if self._selection_batch_index != self.batch_index:
             self._base_push_attempts = 0
             self._selection_batch_index = self.batch_index
+        self._batch_pinch_height_m = 0.010
         # Match the unchanged physical 85 mm gripper to the selected stack.
         # Five-cookie values are exactly the old limits; one-cookie stacks
         # can close farther, and ten-cookie stacks can release farther.
@@ -114,7 +194,11 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
             c, s = np.cos(angle), np.sin(angle)
             relief = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
             tool_rotation = box_rotation @ relief @ self._held_cookie_rotation_local.T
-        center += box_rotation[:, 0] * (0.005 if column == 0 else 0.003)
+        wall_clearance = 0.005 if column == 0 else 0.003
+        if column_index is None and column == 1 and self.batch_size == 1:
+            # Keep an isolated slab off the outer wall while it settles upright.
+            wall_clearance = 0.001
+        center += box_rotation[:, 0] * wall_clearance
         return center - tool_rotation @ self._group_offset, tool_rotation
 
     def _act_step(self, observation=None, task=""):
@@ -125,6 +209,9 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
                 report.update(
                     grasp=self.batch_index + 1, planned_count=self.batch_size, skipped=False
                 )
+                if self.selected_source_column_index == 3:
+                    report["pick_pitch_deg"] = self._selected_pick_pitch_deg
+                    report["pinch_height_m"] = self._batch_pinch_height_m
                 self._set_release_opening()
         if self.phase is CookiePhase.DONE:
             self._verify_complete_fill()

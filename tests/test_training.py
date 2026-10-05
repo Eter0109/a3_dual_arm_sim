@@ -118,6 +118,41 @@ def test_train_command_is_local_reproducible_smoke(tmp_path: Path) -> None:
     assert not any(flag.startswith("--ema.") for flag in command)
 
 
+def test_long_prompt_limit_updates_saved_processor_and_policy(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(
+        json.dumps(
+            {
+                "type": "smolvla",
+                "max_state_dim": 32,
+                "max_action_dim": 32,
+                "tokenizer_max_length": 48,
+            }
+        )
+    )
+    (base / "model.safetensors").write_bytes(b"weights")
+    (base / "policy_preprocessor.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "registry_name": "tokenizer_processor",
+                        "config": {"max_length": 48, "tokenizer_name": "uncached/vlm"},
+                    }
+                ]
+            }
+        )
+    )
+    adapted = prepare_a3_smolvla_source(
+        base, tmp_path / "adapted", device="cpu", tokenizer_max_length=128
+    )
+    assert json.loads((adapted / "config.json").read_text())["tokenizer_max_length"] == 128
+    saved = json.loads((adapted / "policy_preprocessor.json").read_text())
+    assert saved["steps"][0]["config"]["max_length"] == 128
+    assert json.loads((base / "config.json").read_text())["tokenizer_max_length"] == 48
+
+
 def test_training_schedule_overrides(tmp_path: Path) -> None:
     base = tmp_path / "base"
     base.mkdir()

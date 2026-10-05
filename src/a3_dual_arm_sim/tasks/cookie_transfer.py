@@ -266,24 +266,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.data.qvel[dof_adr : dof_adr + 6] = 0.0
 
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
-            if randomize_cookies:
-                dx, dy = self.np_random.uniform(
-                    -self.task_config.position_noise_m,
-                    self.task_config.position_noise_m,
-                    size=2,
-                )
-                yaw = float(
-                    self.np_random.uniform(
-                        -self.task_config.yaw_noise_rad,
-                        self.task_config.yaw_noise_rad,
-                    )
-                )
-            else:
-                dx = dy = yaw = 0.0
-            quaternion = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
-            self.set_cookie_pose(
-                index, (base_x + sdx + dx, base_y + sdy + dy, self.COOKIE_RESET_Z), quaternion
+            position, quaternion = self._sample_source_cookie_pose(
+                index, (base_x + sdx, base_y + sdy, self.COOKIE_RESET_Z), randomize_cookies
             )
+            self.set_cookie_pose(index, position, quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
         self.data.time = 0.0
@@ -330,6 +316,24 @@ class A3CookieTransferEnv(A3DualArmEnv):
             source_initially_filled=self._source_initially_filled,
         )
         return observation, info
+
+    def _sample_source_cookie_pose(self, index, base_position, randomize):
+        if randomize:
+            dx, dy = self.np_random.uniform(
+                -self.task_config.position_noise_m,
+                self.task_config.position_noise_m,
+                size=2,
+            )
+            yaw = float(
+                self.np_random.uniform(
+                    -self.task_config.yaw_noise_rad, self.task_config.yaw_noise_rad
+                )
+            )
+        else:
+            dx = dy = yaw = 0.0
+        position = (base_position[0] + dx, base_position[1] + dy, base_position[2])
+        quaternion = (np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2))
+        return position, quaternion
 
     def set_cookie_pose(
         self,

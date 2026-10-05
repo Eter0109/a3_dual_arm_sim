@@ -110,6 +110,8 @@ MUJOCO_GL=egl python examples/collect_cookie_2x10.py \
 续采使用相同配置、数据目录、repo-id 和 seed 起点，加 `--resume`。
 成功要求目标两列各十个、共二十个，源盒保留六十个。详细用法见
 [2×10 使用说明](docs/cookie_2x10.md)。
+正式采集前先用不同 seed 试跑，并抽查三路视频；采集允许失败尝试，训练集只保留
+通过数量、抬升和释放检查的完整回合。采集完成后再审计数据并训练 SmolVLA。
 
 ## 资源与许可
 
