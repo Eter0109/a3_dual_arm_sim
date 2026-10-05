@@ -34,6 +34,7 @@ The same arguments `lerobot-train` takes::
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -114,6 +115,25 @@ def _apply_unfreeze(model, mode: bool) -> None:
         for param in tower.parameters():
             param.requires_grad = True
 
+        # The projector is part of the vision path and has to move with the tower.
+        #
+        # It is the only map from the tower's output into the language model's embedding
+        # space (1152 -> 2048 for PaliGemma), and this ran without it for two full runs:
+        # the weights of every one of the tower's 437 tensors changed while both of the
+        # projector's stayed bit-identical to `pi05_base`.  A frozen projector forces the
+        # drifting tower to keep describing the world in a coordinate system fixed by the
+        # *original* tower, which is the opposite of what unfreezing the tower is for.
+        #
+        # The symptom is not a crash but a ceiling: measured with the input-ablation probe,
+        # the fine-tune's reliance on the wrist camera stayed at 0.006 rad from step 2000 to
+        # step 4000 while its error fell 33x, i.e. every bit of that progress came from the
+        # proprioceptive path -- even though a linear probe on state + wrist features
+        # decodes the expert's action to 0.0061 rad, under the 0.0075 the expert fails at.
+        projector = paligemma.model.multi_modal_projector
+        projector.train(mode)
+        for param in projector.parameters():
+            param.requires_grad = True
+
     if layers:
         stack = paligemma.model.language_model.layers
         depth = len(stack)
@@ -121,6 +141,211 @@ def _apply_unfreeze(model, mode: bool) -> None:
             block.train(mode)
             for param in block.parameters():
                 param.requires_grad = True
+
+
+def _unfreeze_summary() -> str:
+    """One line describing the un-freeze scope, for `main` to print once.
+
+    Deliberately not printed from `_apply_unfreeze`.  That function runs on *every*
+    `train()` call -- the training loop calls `policy.train()` before each step, and each
+    call re-applies the un-freeze -- so a `print` there writes the line thousands of times.
+    The overfit run's log holds 5002 copies of it and 0 lines of anything else in the tail,
+    which is how a log stops being greppable: `grep -c` for the loss reported nothing and
+    the run looked like it had died at startup when it had in fact finished.
+    """
+
+    layers, vision = _unfreeze_request()
+    if not vision and not layers:
+        return "frozen (expert only)"
+    parts = []
+    if vision:
+        # 2.36 M, read off `PaliGemmaMultiModalProjector` rather than hard-coded so the
+        # line keeps telling the truth if the checkpoint's projector changes width.
+        parts.append("vision tower + multi_modal_projector (2.4 M projector params)")
+    if layers:
+        parts.append(f"last {layers} LLM layers")
+    return " + ".join(parts)
+
+
+_STATE_PROJECTOR_ENV = "A3_STATE_PROJECTOR"
+
+
+def _state_projector_enabled() -> bool:
+    """On by default; `A3_STATE_PROJECTOR=0` reproduces pi0.5's shipped behaviour."""
+
+    return os.environ.get(_STATE_PROJECTOR_ENV, "1").strip().lower() not in ("0", "false", "")
+
+
+def _state_projector_class():
+    """A `Linear` that does not report itself as a missing key in a pi05 checkpoint.
+
+    Every released pi05 checkpoint predates this module, so loading one with `strict=True`
+    raises `Missing key(s) in state_dict: model.state_proj.weight, model.state_proj.bias`.
+    `load_state_dict` has already copied every other tensor by the time it raises, and
+    `PI05Policy.from_pretrained` swallows the exception, so the weights do arrive -- but the
+    log then reads "Warning: Could not load state dict" instead of "All keys loaded
+    successfully!", and trading a real loading check for a cosmetic one is how a genuine
+    loading failure gets missed later.
+
+    Supplying the module's own current values for a key the checkpoint does not carry keeps
+    `strict=True` meaningful for every other parameter.
+    """
+
+    import torch.nn as nn
+
+    class _StateProjector(nn.Linear):
+        def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+            for name, tensor in self.named_parameters():
+                state_dict.setdefault(prefix + name, tensor.detach().clone())
+            super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    return _StateProjector
+
+
+def _attach_state_projector(model, config) -> None:
+    """Give `PI05Pytorch` the proprioceptive map that pi0 had and pi0.5 dropped.
+
+    π0.5 has no state projector at all: proprioception reaches the model only as 256
+    discretised bin indices inside the language prompt.  For an *absolute* target that is
+    survivable -- the model can emit a pose without knowing where it is -- but everything
+    measured on this task says the task lives in the residual, and a residual cannot be
+    produced without knowing the current pose.  The evidence, in the order it was gathered:
+
+      * the target is 95% identity.  Per joint, `std(action - state) / std(action)` is
+        4.4-8.8%, and 57% of frames have a residual under 0.010 rad, so a model that emits
+        the state it was handed already has a small loss;
+      * a ridge regression on the same 30 episodes fits them to 0.0047 rad while a 3B
+        fine-tune on those episodes stalls at 0.0195 -- and stalls there whether it sees 30
+        episodes for 3 epochs, one episode for 21 epochs, or 400 for 0.18;
+      * the fine-tune's error is *bias*, not sampler noise: averaging 32 flow-matching draws
+        moves it 0.0305 -> 0.0273, where zero-mean noise would have fallen 5.7x.  Its motion
+        magnitude is right (`0.0237` against the expert's `0.0250`) and its direction is 58
+        degrees off;
+      * and training in relative-action space -- which puts the residual in the target
+        directly -- collapsed to "do not move", which is what an unpredictable residual looks
+        like when the current pose cannot be read.
+
+    So: one extra prefix token, `Linear(max_state_dim, language_hidden)`, mask 1 and
+    attention mask 0 -- the slot `embed_suffix`'s comment still describes ("so that image,
+    language and state inputs do not attend to action tokens").
+
+    Its *magnitude* is the whole game, and getting it wrong is silent.  Attention logits are
+    `q . k`, so a token whose key is orders of magnitude smaller than its neighbours takes a
+    softmax weight of essentially zero and is invisible no matter how well it is trained.
+    Measured on this model: image tokens enter the prefix at element std 4.2, language tokens
+    at 9.6 (the language path multiplies its embedding by `sqrt(hidden)`).  A zero-initialised
+    `Linear` fed this robot's eight states produced std 0.0055 after 4000 steps -- a channel
+    1700x smaller than the tokens around it, and a whole training run and probe cycle that
+    measured nothing at all.  Hence: openpi's `std=0.02` initialisation for new projection
+    heads, times the same `sqrt(hidden)` the language embeddings get, which lands the token
+    at std ~1.5 -- the same order as an image token, and trainable from there.
+
+    Width comes from `config.max_state_dim` (32), not from the batch: the declared state
+    width is a capacity, and the eight values this robot actually sends are zero-padded to
+    it, exactly as `prepare_action` pads the action.
+    """
+
+    import torch.nn as nn
+
+    if getattr(model, "state_proj", None) is not None:
+        return
+
+    # Both are 2048 for PaliGemma-2B; read rather than written down so a different base
+    # checkpoint cannot silently build the projector at the wrong width.
+    hidden = model.paligemma_with_expert.paligemma.model.multi_modal_projector.linear.out_features
+    projector = _state_projector_class()(config.max_state_dim, hidden)
+    # `std=0.02` is the initialisation openpi uses for its new projection heads; the
+    # `sqrt(hidden)` scaling is applied in `embed_prefix`, not here, because it is part of
+    # how the prefix is assembled rather than part of what this layer computes.
+    nn.init.normal_(projector.weight, std=0.02)
+    nn.init.zeros_(projector.bias)
+    model.state_proj = projector
+    # Consumed by `embed_prefix` and cleared, so a second call inside one forward cannot
+    # append a second token.
+    model._a3_state = None
+    for parameter in projector.parameters():
+        parameter.requires_grad = True
+
+
+def _patch_state_projector() -> None:
+    """Wire the state token in, and hand the raw state to it on every entry point.
+
+    Lives here rather than in `modeling_pi05.py` for the same reason the other patches do:
+    the vendored lerobot is not ours to edit, and a patch leaves an obvious answer to "what
+    did this run change?" in the launcher's own log.
+    """
+
+    if not _state_projector_enabled():
+        print("state projector    : off (pi0.5 default: proprioception only as prompt bins)",
+              flush=True)
+        return
+
+    import torch
+    from lerobot.policies.pi05 import modeling_pi05 as M
+
+    original_init = M.PI05Pytorch.__init__
+    original_embed_prefix = M.PI05Pytorch.embed_prefix
+    original_policy_forward = M.PI05Policy.forward
+    original_policy_chunk = M.PI05Policy.predict_action_chunk
+
+    def __init__(self, config, *args, **kwargs):
+        original_init(self, config, *args, **kwargs)
+        # Built here, not lazily, because the optimizer is constructed from
+        # `policy.parameters()` right after the policy exists: a projector that appeared on
+        # the first forward would never be given to AdamW and would stay at its zero init
+        # forever, which looks exactly like "the idea did not work".
+        _attach_state_projector(self, config)
+
+    def embed_prefix(self, images, img_masks, tokens, masks):
+        embs, pad_masks, att_masks = original_embed_prefix(self, images, img_masks, tokens, masks)
+        state = getattr(self, "_a3_state", None)
+        if state is None:
+            return embs, pad_masks, att_masks
+        self._a3_state = None
+
+        width = self.config.max_state_dim
+        if state.shape[-1] < width:
+            state = torch.cat(
+                [state, state.new_zeros(*state.shape[:-1], width - state.shape[-1])], dim=-1
+            )
+        elif state.shape[-1] > width:
+            state = state[..., :width]
+
+        token = self.state_proj(state.to(embs.dtype))[:, None, :]
+        # Same scale as the language embeddings get in `embed_prefix`; see
+        # `_attach_state_projector` for why an unscaled token is invisible to attention.
+        token = token * math.sqrt(token.shape[-1])
+        batch = embs.shape[0]
+        embs = torch.cat([embs, token], dim=1)
+        pad_masks = torch.cat(
+            [pad_masks, torch.ones(batch, 1, dtype=pad_masks.dtype, device=pad_masks.device)],
+            dim=1,
+        )
+        att_masks = torch.cat(
+            [att_masks, torch.zeros(batch, 1, dtype=att_masks.dtype, device=att_masks.device)],
+            dim=1,
+        )
+        return embs, pad_masks, att_masks
+
+    def _stash(policy, batch):
+        state = batch.get("observation.state")
+        if state is not None:
+            policy.model._a3_state = state
+
+    def policy_forward(self, batch, reduction="mean"):
+        _stash(self, batch)
+        return original_policy_forward(self, batch, reduction=reduction)
+
+    def predict_action_chunk(self, batch, **kwargs):
+        _stash(self, batch)
+        # `original_policy_chunk` is the `@torch.no_grad()`-decorated function, so calling
+        # it as a plain callable keeps the decorator that this wrapper would otherwise drop.
+        return original_policy_chunk(self, batch, **kwargs)
+
+    M.PI05Pytorch.__init__ = __init__
+    M.PI05Pytorch.embed_prefix = embed_prefix
+    M.PI05Policy.forward = policy_forward
+    M.PI05Policy.predict_action_chunk = predict_action_chunk
 
 
 def _patch_partial_unfreeze() -> None:
@@ -192,10 +417,72 @@ def _patch_fused_adamw() -> None:
     torch.optim.AdamW.__init__ = __init__
 
 
+#: Frames to drop from the end of every episode when building training windows.  0 (the
+#: default) keeps them all, which is what every run before this one did.
+_ENV_DROP_TAIL = "A3_DROP_N_LAST_FRAMES"
+
+
+def _patch_drop_n_last_frames() -> int:
+    """Let ``PI05Config`` carry ``drop_n_last_frames``, so the padded chunk tail is not trained on.
+
+    A window near the end of an episode runs past it, and the rows beyond are filled with
+    **the last action repeated**.  Nothing removes them from the loss:
+
+    * ``dataset_reader`` does publish an ``action_is_pad`` tensor, but ``PI05Policy.forward``
+      neither accepts nor consults it -- it takes ``losses.mean()`` over the whole chunk;
+    * ``lerobot_train.py``:358 builds the frame-dropping ``EpisodeAwareSampler`` only
+      ``if hasattr(cfg.policy, "drop_n_last_frames")``, and neither ``PI05Config`` nor
+      ``PreTrainedConfig`` declares that field.  So the branch is never taken, the sampler is
+      ``None``, and every padded row is trained on as though it were a command.
+
+    Measured on the one-Cookie dataset (400 episodes, median 218 frames long): **11.3% of the
+    action rows inside the 50-step chunks are that repetition, and 22.5% of the samples contain
+    at least one.**  What those rows teach is "flatten toward the end of the chunk" -- the same
+    shape two independent measurements already showed: the teacher-forcing probe's chunk error
+    grows x2.16 from row 0 to row 15, and ``action.execute`` above 16 makes a rollout markedly
+    worse by committing to those rows.
+
+    An attribute rather than a declared field, which is sufficient because the reader is
+    ``hasattr`` followed by an attribute access.  It has to happen before the config is built
+    from the command line, which is why it sits with the other shims instead of in the loop.
+    """
+
+    raw = os.environ.get(_ENV_DROP_TAIL, "0").strip()
+    if not raw or raw.lower() in ("0", "false", ""):
+        return 0
+
+    count = int(raw)
+    if count <= 0:
+        raise SystemExit(f"{_ENV_DROP_TAIL} must be positive when set, got {raw!r}")
+
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+
+    PI05Config.drop_n_last_frames = count
+    return count
+
+
 def main() -> int:
     _register_legacy_step_names()
+    _patch_state_projector()
     _patch_partial_unfreeze()
     _patch_fused_adamw()
+    # Printed here, once, rather than from `_apply_unfreeze`, which the training loop calls
+    # before every step.  See `_unfreeze_summary`.
+    print(f"unfreeze           : {_unfreeze_summary()}", flush=True)
+    print(
+        "state projector    : "
+        + ("Linear(32 -> 2048) x sqrt(2048), std=0.02 init, one extra prefix token"
+           if _state_projector_enabled() else "off"),
+        flush=True,
+    )
+    dropped = _patch_drop_n_last_frames()
+    if dropped:
+        # Printed because it is otherwise invisible: the effect is a smaller training set,
+        # which shows up only as a different number of samples per step.
+        print(
+            f"drop_n_last_frames : {dropped} (padded chunk tails excluded from training)",
+            flush=True,
+        )
 
     # Imported after the shim so nothing that resolves processors can run first.
     from lerobot.scripts.lerobot_train import main as lerobot_main
