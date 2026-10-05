@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -834,6 +835,105 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         ET.SubElement(cookie, "geom", **visual_attributes)
 
 
+def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) -> None:
+    """Append the configured LIBERO objects to the scene as free bodies.
+
+    A LIBERO object directory holds one self-contained MJCF: an ``<asset>`` block naming
+    a ``.msh`` mesh (and a texture) and a ``<worldbody>`` block holding one body tree.
+    Two things have to be true before that fragment can live inside this model.
+
+    **Names must be made unique.**  LIBERO's objects are authored as if each were the
+    only model in the world -- the plate and the bowl both name a texture ``texture.png``
+    and a body ``object`` -- and MuJoCo treats a duplicate name as a compile error rather
+    than as a shadow.  So every ``name`` is prefixed, and the ``mesh=`` / ``material=`` /
+    ``texture=`` references that point at the renamed assets are rewritten with it.  Both
+    halves are needed: prefixing the declarations alone leaves the references dangling,
+    which MuJoCo reports as a missing asset rather than as a rename that only went
+    half-way.
+
+    **File paths must be absolute.**  These assets live in the LIBERO cache, not in this
+    repository, and `build_model` compiles from a string with a virtual asset dictionary
+    built out of ``assets/a3/meshes``.  An absolute path is looked up on the real
+    filesystem even when that dictionary is non-empty, which is what makes the *written*
+    XML (``write_generated_xml``, used by the inspection tools) resolve its props too;
+    registering the bytes under invented names instead would leave the file on disk
+    unreadable by anything but this one code path.
+
+    **The body needs a free joint, inserted first.**  MJCF is order-sensitive inside a
+    body -- joints before geoms -- and appending the joint after the fragment's own
+    geoms produces "joint found after geom" rather than a body that falls.
+    """
+
+    props = config.cookie_transfer.libero_props
+    if not props:
+        return
+    assets = root.find("asset")
+    if assets is None:
+        raise RuntimeError("model assets must exist before adding a LIBERO prop")
+
+    for prop in props:
+        directory = Path(prop.directory).expanduser()
+        candidates = sorted(directory.glob("*.xml"))
+        if len(candidates) != 1:
+            raise ValueError(
+                f"{prop.name}: {directory} holds {len(candidates)} XML files "
+                f"({[path.name for path in candidates]}); a LIBERO object directory holds "
+                "exactly one, and picking one of several silently would decide which "
+                "object this scene gets"
+            )
+        source = ET.parse(candidates[0]).getroot()
+        source_assets = source.find("asset")
+        source_world = source.find("worldbody")
+        if source_assets is None or source_world is None:
+            raise ValueError(f"{prop.name}: {candidates[0]} has no <asset> or <worldbody>")
+
+        prefix = f"libero_{prop.name}"
+        # Declarations first, so the reference pass below has a complete map to consult.
+        renames = {}
+        for element in source_assets:
+            old = element.get("name")
+            if old:
+                renames[old] = f"{prefix}_{old}"
+            path = element.get("file")
+            if path:
+                absolute = (directory / path).resolve()
+                if not absolute.is_file():
+                    raise FileNotFoundError(
+                        f"{prop.name}: {candidates[0]} names {path}, which is not at "
+                        f"{absolute}"
+                    )
+                element.set("file", str(absolute))
+
+        for element in source.iter():
+            name = element.get("name")
+            if name:
+                element.set("name", f"{prefix}_{name}")
+            for attribute in ("mesh", "material", "texture"):
+                target = element.get(attribute)
+                if target in renames:
+                    element.set(attribute, renames[target])
+
+        wrappers = list(source_world)
+        if len(wrappers) != 1:
+            raise ValueError(
+                f"{prop.name}: {candidates[0]} has {len(wrappers)} bodies under "
+                "<worldbody>; the loader was written for LIBERO's single-wrapper layout"
+            )
+        body = wrappers[0]
+        # LIBERO's outer wrapper is usually anonymous, and an unnamed body cannot be
+        # looked up by name -- which turns a missing prop into `mj_name2id` returning -1
+        # and every later query silently reading the *last* body in the model instead.
+        # Naming it here is what makes the prop addressable from a diagnostic.
+        body.set("name", f"{prefix}_root")
+        body.set("pos", _vec(tuple(float(v) for v in prop.position_m)))
+        half = math.radians(float(prop.yaw_deg)) / 2.0
+        body.set("quat", _vec((math.cos(half), 0.0, 0.0, math.sin(half))))
+        body.insert(0, ET.Element("freejoint", name=f"{prefix}_free"))
+        world.append(body)
+        for element in list(source_assets):
+            assets.append(element)
+
+
 def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
     if scene not in ("sandbox", "cookie_transfer"):
         raise ValueError(f"unsupported scene: {scene}")
@@ -1116,6 +1216,9 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
 
     if scene == "cookie_transfer":
         _add_cookie_scene(root, world, config)
+        # After the Cookie scene, because the props are passive scenery laid on top of it
+        # and nothing in the scene builder may depend on them.
+        _add_libero_props(root, world, config)
     else:
         colors = (
             (0.68, -0.22, 0.79, "0.85 0.15 0.12 1"),

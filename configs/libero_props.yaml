@@ -1,0 +1,88 @@
+# The A3 scene with **LIBERO's own objects** on the table, and A3's trays shrunk away.
+#
+# Why
+# ---
+# Every policy measured in this repository has been judged on A3's own Cookie, which
+# appears in no public robot-learning dataset.  A policy can fail on the Cookie because it
+# cannot see it, or because it cannot drive this arm; no Cookie experiment separates the
+# two.  `lerobot/pi05_libero_finetuned` was trained to pick up *the object in
+# `assets/.../akita_black_bowl`* and place it on *the plate*, so putting those two objects
+# on this table is the one arrangement where a failure has a meaning: whatever it does
+# with a bowl it has seen ten thousand times is a statement about the arm and the
+# renderer, not about object recognition.
+#
+# What was changed, and why the trays are gone
+# --------------------------------------------
+# The two Cookie trays are moved off the table rather than shrunk or removed.  Shrinking
+# them is a compile error -- `_add_open_bin` derives the wall geoms from the half size, so
+# a millimetre box produces a geom with a non-positive extent -- and removing them is a
+# crash, because `A3CookieTransferEnv` looks its task up by body name.  Parked past the
+# table's corner (x >= -0.40, y >= -0.75) they fall to the floor behind the arm, out of
+# both cameras, and the table is left clear -- which is the point: a plate sitting inside
+# a walled target bin reads as "put it in the bin", and the LIBERO task is "put it on the
+# plate".
+#
+# The Cookie that remains is a single one, falling with the source tray.  It is kept
+# because the environment needs at least one to build its task config; nothing in the
+# scene can reach it.
+#
+# The props themselves are inert.  No expert touches them, no metric counts them, and
+# `success` still means "the Cookie is in the target bin", which it never is.  Rollouts of
+# this scene are for watching, and any number read off it should say so.
+#
+# Check the wiring without loading anything:
+#   a3-sim inspect --config configs/libero_props.yaml
+
+physics_hz: 1000
+control_hz: 20
+horizon: 6000
+# LIBERO's own OSC_POSE numbers, so a policy's action means here what it meant there.
+# `output_max` is [0.05 m x3, 0.5 rad x3] per unit of action, and the position half is
+# world-frame, which is what `CartesianDeltaAdapter` implements.
+cartesian_translation_scale_m: 0.05
+cartesian_rotation_scale_rad: 0.50
+# A 50 mm step is 1 m/s at 20 Hz, and on an arm of this reach that is about 0.1 rad/step;
+# the harness default of 0.05 would clip every command and make the arm move at half the
+# speed the policy planned for, which is a different experiment.
+max_joint_step_rad: 0.10
+randomization:
+  source_bin_x_m: 0.0
+  source_bin_y_m: 0.0
+  source_bin_yaw_rad: 0.0
+  target_bin_x_m: 0.0
+  target_bin_y_m: 0.0
+  target_bin_yaw_rad: 0.0
+  arm_home_rad: 0.0
+  min_box_clearance_m: 0.020
+cookie_transfer:
+  left_gripper_kp: 1200.0
+  left_finger_pad_half_thickness_m: 0.0005
+  cookie_edge_bevel_m: 0.0025
+  cookie_bottom_edge_bevel_m: 0.0010
+  cookie_collision_mode: compound
+  cookie_friction: [0.8, 0.003, 0.0002]
+  cookie_solref: [0.004, 1.0]
+  cookie_solimp: [0.99, 0.999, 0.0005, 0.5, 2.0]
+  # Moved past the table's corner; see the header.  Sizes are left alone.
+  source_bin_center_m: [-0.600, -1.200]
+  target_bin_world_position_m: [-0.600, -1.400, 0.753]
+  cookie_source_positions_m:
+    - [-0.600, -1.200]
+  libero_props:
+    # LIBERO's `akita_black_bowl`: the object every `libero_spatial` task picks up.  The
+    # directory holds one MJCF that names a 4.6 MB visual mesh and a 12.8 MB texture, both
+    # loaded from the LIBERO cache rather than copied into this repository.
+    #
+    # **`position_m` is the wrapper body's origin, not the bowl's.**  LIBERO authors this
+    # object with an inner body offset by `pos="0 -0.1 0"`, so the mesh and its collision
+    # shapes -- and therefore the bowl a camera sees and a gripper can touch -- sit 100 mm
+    # towards -y from the number below.  Measured after settling: the wrapper is at
+    # (0.15, 0.23, 0.748) and the mesh at (0.15, 0.13, 0.748).  Anything that measures
+    # distance to "the bowl" has to use `libero_bowl_object`, not `libero_bowl_root`.
+    - name: bowl
+      directory: /root/.cache/libero/assets/stable_scanned_objects/akita_black_bowl
+      position_m: [0.150, 0.230, 0.780]
+    # LIBERO's `plate`: where every `libero_spatial` task puts the bowl.
+    - name: plate
+      directory: /root/.cache/libero/assets/stable_scanned_objects/plate
+      position_m: [0.150, 0.330, 0.775]

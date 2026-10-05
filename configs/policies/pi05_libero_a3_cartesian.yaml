@@ -1,0 +1,106 @@
+# `lerobot/pi05_libero_finetuned` driven through the interface it was trained on, on the A3
+# arm, in the A3 renderer, with LIBERO's own bowl and plate on the table.
+#
+# What "the interface it was trained on" means here
+# ------------------------------------------------
+#   state  = [eef_pos(3), axis_angle(eef_quat)(3), gripper_qpos(2)]     8 wide
+#   action = [dx, dy, dz, drx, dry, drz, gripper]   in [-1, 1]          7 wide
+#   images = agentview + eye-in-hand, both flipped 180 degrees
+#
+# and `action.space: cartesian_delta`, so the seven values are solved into joint targets by
+# the scene's own IK instead of being read as joint angles.  The sibling manifest
+# `pi05_libero_zs_single.yaml` does read them as joint angles -- deliberately, and it says
+# so -- and it is the run this one exists to replace: there, `rate_limited` was 0.9975 with
+# `motion_mean` pinned at the cap, because an end-effector delta in `[-1, 1]` and a joint
+# angle in radians differ by about a factor of seven.
+#
+# `dim: 14`, not 7
+# ----------------
+# `CARTESIAN_ACTION_DIM` is fourteen -- six pose terms plus a gripper, per arm -- and
+# `ActionBridge` rejects anything else for this space rather than guessing.  LIBERO drives
+# one arm, so the adapter pads the right arm's seven with zeros, and a zero delta is what
+# `CartesianDeltaAdapter` reads as "hold the pose you are in": the right arm is inert, which
+# is also what it does in the single-arm A3 collection.
+#
+# The two cameras are named `image` and `image2` because those are the checkpoint's own
+# keys, in LIBERO's order.  Swapping them is not detectable -- the shapes match -- it just
+# hands the policy a wrist view where it expects a room.
+#
+# `execute: 10` is what the published LIBERO evaluation uses: the queue replays ten rows of
+# one predicted chunk before re-planning.  `chunk: 50` is the model's own horizon.
+#
+# What a result here can and cannot mean
+# --------------------------------------
+# The robot, the renderer and the state convention all change at once, so a failure is not
+# attributable to any one of them.  A success would be a strong statement -- the interface
+# would be shown to transfer across embodiments -- and a failure is only a floor.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_libero_a3_cartesian.yaml
+
+name: pi05-libero-a3-cartesian
+notes: >
+  `lerobot/pi05_libero_finetuned` zero-shot on the A3 arm, through its own end-effector
+  delta interface: 8-wide eef-pose state, 7-wide normalised OSC delta solved by IK,
+  180-degree-flipped agentview and eye-in-hand.  LIBERO's bowl and plate are on the table.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - /root/a3_dual_arm_sim/scripts/adapter_libero_iface.py
+    - --config
+    - ckpt=lerobot/pi05_libero_finetuned
+    - --config
+    - cameras=image,image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    # The left arm's end-effector pose.  `observation.eef_pose` is fourteen wide -- two
+    # arms of position plus quaternion -- and the left arm is the first seven.
+    eef_pose:
+      source: observation.eef_pose
+      slice: [0, 7]
+    # LIBERO's second gripper value is the first one negated, so only one is sent and the
+    # adapter mirrors it.  Sending both would need a second slice of the same source and
+    # would not carry more information.
+    gripper:
+      source: observation.state
+      slice: [7, 8]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  execute: 10
+  dt: 0.05
+  normalize:
+    # The checkpoint's postprocessor already inverted MEAN_STD with LIBERO's own
+    # statistics, and what comes out is the normalised OSC delta the controller consumed.
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

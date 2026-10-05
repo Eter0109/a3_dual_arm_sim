@@ -776,6 +776,69 @@ def cookie_single_piece_scene(
     )
 
 
+def libero_props_scene(*, visual_style: str = "plain") -> CollectionScene:
+    """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
+
+    Why this scene exists, and what its numbers mean
+    ------------------------------------------------
+    Nothing here can be scored.  `success` still asks whether the Cookie is in the target
+    bin, the Cookie is off the table with the shrunk trays, and no expert can reach it --
+    so every episode ends in failure by construction and a success rate of 0% here carries
+    no information at all.  What the scene is for is **watching**: it is the one
+    arrangement where a policy's failure has a meaning, because
+    ``lerobot/pi05_libero_finetuned`` has picked up this exact bowl and placed it on this
+    exact plate tens of thousands of times in training.  Whatever it does here is a
+    statement about the arm and the renderer rather than about whether it can see the
+    object.
+
+    The scene is a thin wrapper over `configs/libero_props.yaml`, which holds the props and
+    the explanation.  The task string is deliberately *not* overridden here: the scene
+    declares the Cookie prompt like every other, and a caller that wants LIBERO's language
+    passes it explicitly, so a report cannot silently pair LIBERO's words with A3's task.
+
+    ``terminate_on_success=False`` because there is no success to terminate on; the
+    episode should run its full budget so the recording shows what the policy does after
+    the point where a Cookie task would have stopped.
+    """
+
+    def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
+        loaded = _styled_config("configs/libero_props.yaml", visual_style)
+        task_config = CookieTransferTaskConfig(
+            cookie_count=1,
+            required_cookies=1,
+            position_noise_m=position_noise_m,
+            yaw_noise_rad=yaw_noise_rad,
+            require_exact_slots=False,
+            require_released=True,
+            terminate_on_success=False,
+        )
+        return A3CookieTransferEnv(loaded, task_config=task_config, render_cameras=True)
+
+    def build_policy(env: A3DualArmEnv) -> Policy:
+        # Unused by any recording this scene is for, but `CollectionScene` requires one,
+        # and the single-piece expert is the honest choice: it is the expert the props
+        # scene's Cookie layout was reduced for, and it ignores the props entirely.
+        return CookieCollectionPolicy(
+            expert=A3SinglePieceExpert(env),  # type: ignore[arg-type]
+            hold_steps=0,
+        )
+
+    return CollectionScene(
+        task=TASKS["a3_cookie_single_piece"],
+        build_env=build_env,
+        build_policy=build_policy,
+        metric_keys=("cookies_in_target", "cookies_in_source"),
+        randomize_placements=False,
+        randomize_cookies=False,
+        details={
+            "config": "configs/libero_props.yaml",
+            "props": "LIBERO `akita_black_bowl` and `plate`, as passive scenery",
+            "scorable": False,
+            "why": "no reachable Cookie, so failure is by construction; use it for video",
+        },
+    )
+
+
 def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
     """Scene name -> builder.  This is the list a CLI or a sweep iterates."""
 
@@ -786,6 +849,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
         "a3_cookie_single_piece": cookie_single_piece_scene,
+        "a3_libero_props": libero_props_scene,
     }
 
 

@@ -71,6 +71,37 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class LiberoPropConfig:
+    """One of LIBERO's own 3D objects, dropped into this scene as a passive prop.
+
+    Why this exists: every policy measured here has been judged on A3's own objects,
+    none of which appear in any public robot-learning dataset.  A LIBERO object is
+    different -- `lerobot/pi05_libero_finetuned` was trained to pick up *this* bowl and
+    place it on *this* plate -- so putting them in this scene separates "the policy
+    cannot recognise the object" from "the policy cannot drive this arm", which no
+    experiment on the Cookie could.
+
+    The prop is deliberately inert: nothing in the environment names it, no task
+    counts it, and no expert touches it.  It is scenery that a policy can look at, and
+    the rollouts that use it are recorded as video rather than scored, because A3's
+    success criterion is about Cookies and saying otherwise would be a lie.
+    """
+
+    #: Short label, also the prefix every name from the object's MJCF is given so two
+    #: props -- or a prop and the A3 model -- cannot collide.
+    name: str
+    #: Directory holding one LIBERO object: a single ``*.xml`` plus the mesh, texture
+    #: and collision files it names.  Absolute, because these live in the HuggingFace
+    #: cache rather than in this repository.
+    directory: str
+    #: World position of the object's own origin, in metres.
+    position_m: tuple[float, ...] = (0.0, 0.0, 0.0)
+    #: Rotation about world z, in degrees.  LIBERO authors its objects upright, so one
+    #: angle is the whole orientation.
+    yaw_deg: float = 0.0
+
+
+@dataclass(frozen=True)
 class CookieSceneConfig:
     """Prototype cookie-transfer values copied from the working example."""
 
@@ -133,6 +164,9 @@ class CookieSceneConfig:
         1.506819,
         1.0,
     )
+    #: LIBERO props to place in this scene.  Empty by default, so every existing
+    #: config and every existing number is unaffected.
+    libero_props: tuple[LiberoPropConfig, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -546,6 +580,7 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             cookie_raw, "target_slot_tolerance_m", defaults.target_slot_tolerance_m
         ),
         deployment_home=_float_tuple(cookie_raw, "deployment_home", defaults.deployment_home),
+        libero_props=_libero_props(cookie_raw),
     )
     return SimConfig(
         home=home,
@@ -558,6 +593,34 @@ def load_config(path: str | Path | None = None) -> SimConfig:
 
 def _float_tuple(values: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(float(value) for value in values.get(key, default))
+
+
+def _libero_props(values: dict[str, Any]) -> tuple[LiberoPropConfig, ...]:
+    """Parse the ``libero_props`` block, naming the offending entry on a typo.
+
+    Written out rather than folded into ``_float_tuple`` because these carry a path and
+    a label as well as numbers, and a silently-defaulted path would put a prop at the
+    world origin -- inside the robot -- instead of failing.
+    """
+
+    entries = values.get("libero_props") or ()
+    props = []
+    for index, entry in enumerate(entries):
+        for required in ("name", "directory", "position_m"):
+            if required not in entry:
+                raise ValueError(
+                    f"cookie_transfer.libero_props[{index}] has no {required!r}; "
+                    f"got keys {sorted(entry)}"
+                )
+        props.append(
+            LiberoPropConfig(
+                name=str(entry["name"]),
+                directory=str(entry["directory"]),
+                position_m=tuple(float(v) for v in entry["position_m"]),
+                yaw_deg=float(entry.get("yaw_deg", 0.0)),
+            )
+        )
+    return tuple(props)
 
 
 def _axis_range(values: dict[str, Any], key: str) -> AxisRange:
