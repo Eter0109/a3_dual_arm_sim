@@ -1,0 +1,92 @@
+# The ridge read-out, rolled out closed loop on the one-Cookie scene.
+#
+# This is not a learned policy and is not meant to be deployed.  It is the answer to one
+# question: **is a 0.0061 rad error small enough to place a Cookie?**
+#
+# The chain of reasoning it terminates
+# ------------------------------------
+#   * the fine-tuned π0.5 sits at 0.0185 rad and transfers zero Cookies;
+#   * a ridge on (joint state, wrist-camera features) reaches 0.0061 rad cross-episode,
+#     against a 0.0075 rad tolerance and 0.0185 for the best VLA;
+#   * so a linear read-out of the same tower is strictly better than the VLA at the thing
+#     the VLA is failing at, while being far too simple to "understand" the task.
+#
+# If this places Cookies, the observation is sufficient and the π0.5 action head is what
+# is broken.  If it does not, no amount of training on this interface helps, and the
+# 0.0075 tolerance -- derived by injecting iid noise into expert actions, which is harsher
+# than a systematic error of the same size -- is the wrong ruler.
+#
+# Deliberate deviations from `pi05_a3_one_piece_4k.yaml`
+# ----------------------------------------------------
+#   * Only the **wrist** camera is declared.  The fitted blocks are `state,wrist`, so the
+#     front camera's features are never read; rendering it would cost a `_render_camera`
+#     call per control step for nothing.  `front` scored 0.0142 against `wrist`'s 0.0061
+#     in the probe, so this is not a lost advantage.
+#   * `chunk: 1` and `execute: 1`.  A ridge maps an observation to a single target pose,
+#     so there is no chunk to execute open-loop; re-planning every step is the closed-loop
+#     condition the open-loop probe was standing in for.  The π0.5 manifest's `execute: 16`
+#     is a property of that model's chunk, and borrowing it here would compare unlike
+#     things.
+#   * `normalize: none`: the ridge was fitted in A3's own joint units and the coefficients
+#     already carry the standardisation.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/ridge_cookie_one.yaml
+
+name: ridge-cookie-one
+notes: >
+  Ridge regression on the fine-tuned π0.5 vision tower's wrist features plus the eight
+  joint angles, fitted on all 400 episodes of `a3_cookie_one_pi05` (cross-episode error
+  0.0061 rad, against 0.0185 for the best VLA checkpoint and 0.0075 for the expert's own
+  tolerance).  Rolled out closed loop as an upper bound on what the observation supports.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - /root/a3_dual_arm_sim/scripts/adapter_ridge_cookie.py
+    - --config
+    - coeffs=/root/autodl-tmp/logs/ridge_cookie_policy.npz
+    - --config
+    - tower=/root/autodl-tmp/pi05-runs/a3_one_base/checkpoints/004000/pretrained_model
+    - --config
+    - images=image2
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 8]
+
+action:
+  space: joint_position
+  dim: 8
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7]
+  chunk: 1
+  execute: 1
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
