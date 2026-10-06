@@ -63,6 +63,10 @@ ACTION_UNIT_M = 0.05
 #: is a noise allowance rather than a physical tolerance.
 RESTING_TOL_M = 0.005
 
+#: How many control steps the bowl has to hold still, at the end of an episode, before it
+#: counts as put down rather than still being moved.  50 steps is 2.5 s.
+SETTLED_STEPS = 50
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -115,21 +119,31 @@ def _verdict(trace: dict[str, np.ndarray], plate_radius_m: float) -> tuple[bool,
     """Was the bowl put on the plate, and if not, which part of it missed?
 
     A placement is three conditions at the last recorded step: the bowl's centre is within
-    the plate's own measured radius, it is touching the table, and the arm is not touching
-    it.  The last two come from MuJoCo's contact list rather than from a height threshold,
-    so "resting" and "still held" are observed instead of inferred.
+    the plate's own measured radius, the arm is not touching it, and it is **settled** --
+    it has not moved in the last ``SETTLED_STEPS`` steps.
+
+    Settled is what does the work, and it replaced a test that was simply wrong.  The
+    first version of this function asked for contact with the *table*, which is the one
+    place a correctly placed bowl is not: it is standing on the plate, 15 mm up and
+    touching nothing else.  That version reported a rollout which picked the bowl up,
+    carried it to the plate and left it there as a failure, and it took a rendered video to
+    notice -- the numbers were all consistent, they were just being read against a rule
+    that could not be satisfied.  "Has not moved recently" catches resting on the plate,
+    resting on the table, and being held or falling, without having to say which surface.
     """
 
     over = float(trace["bowl_plate_mm"][-1]) <= plate_radius_m * 1000.0
-    on_table = bool(trace["touch_table"][-1])
     held = bool(trace["touch_arm"][-1])
-    if over and on_table and not held:
+    moved = trace["bowl_mm"]
+    settled = (len(moved) > SETTLED_STEPS
+               and abs(float(moved[-1]) - float(moved[-1 - SETTLED_STEPS])) < 2.0)
+    if over and not held and settled:
         return True, "PLACED"
-    if held:
-        return False, "not placed -- the arm is still on the bowl at the last step"
-    if over and not on_table:
-        return False, "not placed -- over the plate but off the table"
-    return False, "not placed -- on the table, off the plate"
+    if over and held:
+        return False, "not placed -- over the plate but still in the gripper"
+    if over and not settled:
+        return False, "not placed -- over the plate but still moving"
+    return False, "not placed -- settled on the table, off the plate"
 
 
 def main() -> int:
