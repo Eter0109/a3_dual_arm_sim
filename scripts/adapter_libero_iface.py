@@ -156,7 +156,18 @@ def _image_tensor(frame: Any, torch) -> Any:
     import numpy as np
 
     tensor = torch.from_numpy(np.array(frame, dtype=np.uint8))
-    tensor = torch.flip(tensor, dims=[0, 1])  # H and W, still HWC
+    # **Vertical flip only.**  robosuite's `sim.render` returns the renderer's rows in
+    # OpenGL's bottom-up order and LIBERO hands that to the policy unchanged -- measured:
+    # LIBERO's own `pixels/image` differs from `sim.render(...)` by 0.00, from `[::-1]` by
+    # 55.7 and from a 180-degree flip by 70.3.  This environment renders through
+    # `mujoco.Renderer`, which flips them back (`out[:] = np.flipud(out)`, in its own
+    # source), so the whole of the difference between the two pipelines is that one flip.
+    #
+    # This used to flip both axes.  A 180-degree flip is a vertical flip *and* a horizontal
+    # one, and no camera pose can produce a horizontal mirror of a scene, so for the whole
+    # of this investigation the policy was being shown a left-right mirrored world: it could
+    # see how far away the bowl was and could not see which side of it it was on.
+    tensor = torch.flip(tensor, dims=[0])  # H only, still HWC
     tensor = tensor.permute(2, 0, 1).float().div_(255.0)
     return tensor.unsqueeze(0)
 

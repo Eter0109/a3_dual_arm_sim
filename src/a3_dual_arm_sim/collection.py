@@ -776,11 +776,20 @@ def cookie_single_piece_scene(
     )
 
 
-#: LIBERO's agentview subtends 2.89 mm per pixel at the table; this arm's front camera
-#: subtends 4.58 at its configured pose, and the perturbation sweep prices a 1.55x change in
-#: apparent scale at 12-14 points.  The distance below makes the two agree, and it is not a
-#: guess: `origin/main` carried a front pose at exactly this distance for the same reason.
-LIBERO_MATCHED_FRONT_DISTANCE_M = 0.722
+#: LIBERO's agentview, expressed **relative to the object it is there to look at** -- the
+#: only form in which it can be reproduced in a scene whose table is 220 mm lower and whose
+#: robot has a different base.  Measured off LIBERO's compiled model by
+#: `scripts/compare_libero_environment.py`, which prints both sides of every one of these.
+LIBERO_AGENTVIEW_DISTANCE_M = 0.96
+LIBERO_AGENTVIEW_ELEVATION_DEG = 39.83   # above the bowl, i.e. looking down by this much
+LIBERO_AGENTVIEW_BEARING_DEG = 163.43    # in the table plane, against the world +x axis
+LIBERO_AGENTVIEW_FOVY_DEG = 45.0
+
+#: Where the bowl actually is, after settling: the scene config's spawn position plus the
+#: mesh's 100 mm offset along -y and the 6 mm it drops.  Measured, and equal to the 0.774 m
+#: that `scripts/probe_libero_props_trace.py` reports.
+LIBERO_MATCHED_FOCUS_M = (0.150, 0.130, 0.774)
+
 #: LIBERO's `eye_in_hand` is `pos="0.05 0 0"` on `right_hand`, i.e. on the approach axis, at
 #: fovy 75.  This arm's is 45 mm out along its own tool axis -- the same idea -- but 85 mm
 #: *off* it, and 70 degrees.
@@ -807,14 +816,12 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
 
     What is matched
     ---------------
-    *Front.*  LIBERO's agentview subtends **2.89 mm per pixel** at the table
-    (`2 d tan(fovy/2) / 256` at `d = 0.86 m`, `fovy = 45`).  This arm's front camera
-    subtends **4.58** at its configured 1.150 m and 54 degrees -- a **1.59x** mismatch, on
-    an axis worth 12-14 points.  Moving it in along its own view direction to **0.722 m**
-    gives 2.87, keeping both the view direction and the arms in frame.  (`origin/main`
-    carried a front pose at exactly this distance for the same reason, and rejected it only
-    because it cropped the arms; for a policy-side test the framing matters more than the
-    recording.)
+    *Front.*  LIBERO's agentview is rebuilt around the bowl from its measured distance,
+    elevation and bearing, at its own **45 degrees**, and the auto-aim target is moved to the
+    bowl so the direction follows.  The previous version equalised millimetres-per-pixel by
+    sliding the camera along its existing view direction to 0.722 m and left the field of
+    view at 54: a scalar matched, with the perspective still wrong, and the camera still
+    aiming at a point that is not the object.
 
     *Wrist.*  LIBERO's `eye_in_hand` is `pos="0.05 0 0"` on `right_hand`, whose +x is the
     tool axis, at fovy 75.  This arm's wrist camera is 45 mm out along its own tool axis --
@@ -824,13 +831,25 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     and 75 degrees matches the field of view.
     """
 
-    target = np.asarray(cameras.workspace_target_m, dtype=np.float64)
-    position = np.asarray(cameras.front_position_m, dtype=np.float64)
-    view = position - target
-    matched_front = target + view * (LIBERO_MATCHED_FRONT_DISTANCE_M / np.linalg.norm(view))
+    elevation = np.radians(LIBERO_AGENTVIEW_ELEVATION_DEG)
+    bearing = np.radians(LIBERO_AGENTVIEW_BEARING_DEG)
+    focus = np.asarray(LIBERO_MATCHED_FOCUS_M, dtype=np.float64)
+    # Placed on a sphere around the object it is there to look at, at LIBERO's own distance,
+    # elevation and bearing -- measured off LIBERO's compiled model rather than guessed from
+    # a millimetres-per-pixel figure, because that scalar is the product of a distance and a
+    # field of view and pins neither.  The earlier version of this function equalised
+    # millimetres per pixel by moving the camera alone, and left the projection at 54 degrees
+    # where LIBERO's is 45: the wrong perspective, matched in scale.
+    horizontal = LIBERO_AGENTVIEW_DISTANCE_M * np.cos(elevation)
+    matched_front = focus - np.array([np.cos(bearing), np.sin(bearing), 0.0]) * horizontal
+    matched_front[2] = focus[2] + LIBERO_AGENTVIEW_DISTANCE_M * np.sin(elevation)
     return replace(
         cameras,
         front_position_m=tuple(float(value) for value in matched_front),
+        front_fovy_deg=LIBERO_AGENTVIEW_FOVY_DEG,
+        # The camera aims at a target body, so the target has to move to the object as well
+        # or the framing is right and the direction is not.
+        workspace_target_m=LIBERO_MATCHED_FOCUS_M,
         left_wrist_position_m=(0.0, LIBERO_MATCHED_WRIST_AXIAL_M, 0.0),
         left_wrist_target_m=(
             0.0,
@@ -903,8 +922,8 @@ def libero_props_scene(
             "config": "configs/libero_props.yaml",
             "props": "LIBERO `akita_black_bowl` and `plate`, as passive scenery",
             "cameras": (
-                "LIBERO-matched: front at 0.722 m (2.87 mm/px against LIBERO's 2.89), "
-                "wrist on the tool axis at fovy 75"
+                "LIBERO-matched: the agentview rebuilt around the bowl at LIBERO's own "
+                "0.96 m / 39.8 deg / 163.4 deg / fovy 45, wrist on the tool axis at fovy 75"
                 if matched_cameras
                 else "this branch's: front at 1.150 m (4.58 mm/px), wrist 85 mm off axis"
             ),

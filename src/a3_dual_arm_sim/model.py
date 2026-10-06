@@ -952,10 +952,14 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         "option",
         timestep=f"{1 / config.physics_hz:.10g}",
         gravity="0 0 -9.81",
-        integrator="implicitfast",
+        integrator="Euler" if config.libero_fidelity else "implicitfast",
         cone="elliptic" if scene == "cookie_transfer" else "pyramidal",
-        impratio="10" if scene == "cookie_transfer" else "1",
-        noslip_iterations="5" if scene == "cookie_transfer" else "0",
+        impratio="20" if config.libero_fidelity else (
+            "10" if scene == "cookie_transfer" else "1"
+        ),
+        noslip_iterations="0" if config.libero_fidelity else (
+            "5" if scene == "cookie_transfer" else "0"
+        ),
     )
     if scene == "cookie_transfer":
         # Flat beveled meshes need a contact patch, not a single rocking point.
@@ -1081,8 +1085,19 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         )
 
     world = ET.SubElement(root, "worldbody")
-    ET.SubElement(world, "light", pos="0.4 -0.8 2.4", dir="-0.2 0.3 -1", diffuse="0.9 0.9 0.9")
-    ET.SubElement(world, "light", pos="-0.6 0.8 1.8", dir="0.2 -0.3 -1", diffuse="0.45 0.45 0.45")
+    if config.libero_fidelity:
+        # LIBERO's own two lights, as compiled: both pointing almost straight down from far
+        # above the table, diffuse 0.8, and **not casting shadows**.  The `castshadow` flag
+        # is most of the visual difference between the two scenes -- the recording of this
+        # scene has a hard shadow of the arm across the table and LIBERO's has none.
+        for position in ("1 1 4", "-3 -3 4"):
+            ET.SubElement(world, "light", pos=position, dir="0 -0.15 -1",
+                          diffuse="0.8 0.8 0.8", castshadow="false")
+    else:
+        ET.SubElement(world, "light", pos="0.4 -0.8 2.4", dir="-0.2 0.3 -1",
+                      diffuse="0.9 0.9 0.9")
+        ET.SubElement(world, "light", pos="-0.6 0.8 1.8", dir="0.2 -0.3 -1",
+                      diffuse="0.45 0.45 0.45")
     ET.SubElement(
         world,
         "geom",

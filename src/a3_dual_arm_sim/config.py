@@ -354,6 +354,21 @@ class SimConfig:
     # read as separate objects rather than as one striped block.  It is opt-in per
     # run, so a comparison can state which style it used.
     visual_style: str = "plain"
+    # Switch the scene's lighting and solver to LIBERO's own, for reproducing that benchmark
+    # as closely as a different robot allows.  Each item here was read off LIBERO's compiled
+    # model rather than its source, because these are robosuite defaults that no LIBERO file
+    # states -- `scripts/compare_libero_environment.py` prints both sides.
+    #
+    #   lights        LIBERO's two at (1,1,4) and (-3,-3,4), diffuse 0.8, `castshadow` OFF;
+    #                 the scene's own are close in, brighter, and cast shadows.
+    #   integrator    Euler, against this harness's `implicitfast`.
+    #   impratio      20, against the cookie scene's 10.
+    #   noslip        0 iterations, against the cookie scene's 5 -- a no-slip post-pass
+    #                 LIBERO does not run, and one that changes how a dropped bowl slides.
+    #
+    # The timestep is not here because `physics_hz` already is: LIBERO runs 500 Hz, so set
+    # `physics_hz: 500` alongside this.
+    libero_fidelity: bool = False
     max_joint_step_rad: float = 0.05
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025

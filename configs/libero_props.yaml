@@ -33,7 +33,7 @@
 # Check the wiring without loading anything:
 #   a3-sim inspect --config configs/libero_props.yaml
 
-physics_hz: 1000
+physics_hz: 500
 control_hz: 20
 horizon: 6000
 # LIBERO's own OSC_POSE numbers, so a policy's action means here what it meant there.
@@ -75,6 +75,11 @@ arm_actuator_damping: 0.40
 # the harness default of 0.05 would clip every command and make the arm move at half the
 # speed the policy planned for, which is a different experiment.
 max_joint_step_rad: 0.10
+# Reproduce LIBERO's own lighting and solver in this scene; `config.py` lists what that
+# switches and `scripts/compare_libero_environment.py` prints the two side by side.  With
+# it on, the remaining differences are the ones that cannot be removed: this arm, this
+# gripper, this table's height, and this scene's contents.
+libero_fidelity: true
 # --- the servo, and the two knobs that are not the same knob -------------------------
 #
 # `arm_actuator_damping` scales the velocity gain alone, so it sets the damping *ratio*:
