@@ -51,6 +51,26 @@ horizon: 6000
 cartesian_translation_scale_m: 0.05
 cartesian_rotation_scale_rad: 0.50
 cartesian_rotation_frame: world
+# The arm's servo cannot execute a per-step command at 20 Hz, and a LIBERO policy issues one
+# every step.  Measured with `scripts/probe_tracking.py` at 10 mm per command, this arm
+# delivers **56%** of what it is commanded at the default `arm_actuator_damping: 1.0` -- the
+# joint servos need 150-200 ms to cover a step and the control period is 50 -- so a policy's
+# plan is executed at half speed with the position lag accumulating for the whole episode.
+#
+# Lower damping buys the tracking back, at the cost of a transient overshoot that the default
+# was chosen to avoid (`config.py` explains the ringing it was hiding):
+#
+#   damping    one-step response   tracking at 50 ms   overshoot
+#   1.00            43%                  56%             none
+#   0.50            63%                  82%             +8%
+#   0.45            67%                  86%            +10%
+#   0.40            70%                  95%            +12%
+#
+# 0.40 is the knee: the last 9 points of tracking cost 2 points of overshoot, where the
+# previous 5 cost 4.  It is a config field and not a constant precisely because a scene whose
+# expert was tuned for the damped response must be able to keep it -- the two-box relay turns
+# it off -- so this scene-local value touches nothing else.
+arm_actuator_damping: 0.40
 # A 50 mm step is 1 m/s at 20 Hz, and on an arm of this reach that is about 0.1 rad/step;
 # the harness default of 0.05 would clip every command and make the arm move at half the
 # speed the policy planned for, which is a different experiment.

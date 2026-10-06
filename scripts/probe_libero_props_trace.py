@@ -215,12 +215,13 @@ def _plot(runs: list[dict[str, np.ndarray]], destination: Path) -> None:
                       loc="left", fontsize=10)
 
     axes[1].set_ylabel("bowl displacement (mm)")
-    axes[1].set_title("the bowl never moves, in any seed", loc="left", fontsize=10)
+    axes[1].set_title("how far the bowl ends up from where it started", loc="left",
+                      fontsize=10)
 
     axes[2].axhline(0.05, color="k", ls="--", label="closed")
     axes[2].set_ylabel("gripper opening")
     axes[2].legend(loc="upper right", fontsize=8)
-    axes[2].set_title("the gripper cycles open and shut without ever closing on the bowl",
+    axes[2].set_title("the gripper's opening (near the dashed line is closed)",
                       loc="left", fontsize=10)
 
     axes[3].axhline(ACTION_UNIT_M * 1000, color="k", ls="--",
