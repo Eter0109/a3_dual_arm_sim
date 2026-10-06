@@ -51,6 +51,9 @@ BOWL_MESH_BODY = "libero_bowl_object"
 PLATE_MESH_BODY = "libero_plate_object"
 FINGERTIPS = ("L_finger_inner_touch", "L_finger_outer_touch")
 
+#: The site the IK solves for, so "where the arm went" is the point the policy controls.
+EEF_SITE = "L_eef"
+
 #: One unit of action, under the scene's `cartesian_translation_scale_m`.
 ACTION_UNIT_M = 0.05
 
@@ -244,7 +247,8 @@ def main() -> int:
         bowl = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, BOWL_MESH_BODY)
         plate = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, PLATE_MESH_BODY)
         tips = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name) for name in FINGERTIPS]
-        if min(bowl, plate, *tips) < 0:
+        eef = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, EEF_SITE)
+        if min(bowl, plate, eef, *tips) < 0:
             raise SystemExit(
                 "the scene does not carry the LIBERO props; "
                 "a3_libero_props is the one built for them"
@@ -266,6 +270,12 @@ def main() -> int:
         bowl_geoms = set(_prop_geoms(model, bowl))
         arm_bodies = _robot_bodies(model)
         bowl_top_z = float(bowl_start[2] + bowl_size_m[2] / 2.0)
+        # The task direction, as a unit vector on the table.  Every "the bowl moved N mm"
+        # figure this probe has printed is a magnitude, and a magnitude whose *sign along
+        # this axis* is unrecorded cannot say whether the policy is doing the task badly or
+        # doing something else in the opposite direction.
+        goal_xy = plate_centre[:2] - bowl_start[:2]
+        goal_xy = goal_xy / np.linalg.norm(goal_xy)
         # Printed, not assumed.  Every number the verdict rests on is a measurement that
         # has to be checkable against the mesh, because the numbers this probe used before
         # -- a 39 mm rim and a centre 26 mm below the real one -- were both wrong.
@@ -305,9 +315,24 @@ def main() -> int:
                 float(np.linalg.norm(tip[:2] - bowl_centre[:2])) for tip in fingertips
             )
             above_rim = min(float(tip[2] - bowl_top_z) for tip in fingertips)
+            eef_position = np.asarray(env.data.site_xpos[eef], dtype=np.float64)
+            # The command is the model's own first row in normalised OSC units; the
+            # translation half is world-frame, so its projection on the goal axis is the
+            # travel the policy is *asking* for towards the plate, in metres.
+            asked_xy = np.asarray(command[:2], dtype=np.float64) * ACTION_UNIT_M
+            asked_norm = float(np.linalg.norm(asked_xy))
+            toward_plate = float(np.dot(asked_xy, goal_xy))
+            align_deg = (float(np.degrees(np.arccos(np.clip(
+                np.dot(asked_xy / asked_norm, goal_xy), -1.0, 1.0))))
+                if asked_norm > 1e-9 else float("nan"))
             rows.append(
                 {
                     "step": step,
+                    "eef_x_mm": float(eef_position[0] - bowl_start[0]) * 1000.0,
+                    "eef_y_mm": float(eef_position[1] - bowl_start[1]) * 1000.0,
+                    "eef_z_mm": float(eef_position[2] - bowl_start[2]) * 1000.0,
+                    "toward_plate_mm": toward_plate * 1000.0,
+                    "align_deg": align_deg,
                     "gap_mm": gap * 1000.0,
                     "radial_mm": radial * 1000.0,
                     "above_rim_mm": above_rim * 1000.0,
@@ -387,6 +412,19 @@ def main() -> int:
           + ", ".join(f"{float(t['bowl_plate_mm'].min()):.1f}" for t in runs))
     print("verdict, per seed: "
           + ", ".join(_verdict(trace, plate_radius_m)[1].split(" --")[0] for trace in runs))
+    # The direction the policy *asks* for, which no displacement magnitude can show.  A
+    # sum near zero means it never intends to cross the table at all, whatever the bowl
+    # ended up doing; a negative one means it is asking to go the other way.
+    print("commanded travel towards the plate, summed, per seed: "
+          + ", ".join(f"{float(t['toward_plate_mm'].sum()):+.0f}" for t in runs)
+          + f" mm   (the task needs about +"
+            f"{float(np.linalg.norm(plate_centre[:2] - bowl_start[:2])) * 1000:.0f} mm)")
+    print("mean angle between the commanded translation and the bowl->plate direction: "
+          + ", ".join(f"{float(np.nanmean(t['align_deg'])):.0f}" for t in runs)
+          + " deg   (0 = straight at the plate, 90 = across it, 180 = straight away)")
+    print("left eef at the last step, relative to the bowl (x, y, z in mm): "
+          + ", ".join(f"({float(t['eef_x_mm'][-1]):+.0f}, {float(t['eef_y_mm'][-1]):+.0f}, "
+                      f"{float(t['eef_z_mm'][-1]):+.0f})" for t in runs))
 
     _plot(runs, args.figure, plate_radius_m, bowl_radius_m)
     print(f"trace   {args.trace}")
@@ -407,7 +445,7 @@ def _plot(
     plate_radius_m: float,
     bowl_radius_m: float,
 ) -> None:
-    """Six panels, one line colour per seed.
+    """Eight panels, one line colour per seed.
 
     Overlaid rather than averaged, because the spread *is* a finding: this policy samples
     fresh noise per chunk, and two rollouts at the same seed differ by more than the
@@ -420,7 +458,7 @@ def _plot(
     import matplotlib.pyplot as plt
 
     colours = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]
-    figure, axes = plt.subplots(6, 1, figsize=(11, 17), sharex=True)
+    figure, axes = plt.subplots(8, 1, figsize=(11, 22), sharex=True)
 
     for index, trace in enumerate(runs):
         colour = colours[index % len(colours)]
@@ -433,7 +471,10 @@ def _plot(
         axes[4].plot(step, trace["gripper"], color=colour)
         axes[4].fill_between(step, 0.0, 1.0, where=trace["touch_arm"] > 0,
                              color=colour, alpha=0.13, linewidth=0)
-        axes[5].plot(step, trace["command_mm"], color=colour)
+        axes[5].plot(step, trace["eef_y_mm"], color=colour)
+        axes[5].plot(step, trace["eef_x_mm"], color=colour, ls=":", alpha=0.8)
+        axes[6].plot(step, np.cumsum(trace["toward_plate_mm"]), color=colour)
+        axes[7].plot(step, trace["command_mm"], color=colour)
 
     axes[0].axhline(bowl_radius_m * 1000, color="k", ls="--",
                     label=f"mouth radius ({bowl_radius_m * 1000:.0f} mm)")
@@ -469,12 +510,23 @@ def _plot(
     axes[4].set_title("the gripper's opening, with the steps the bowl is in contact with "
                       "the arm shaded", loc="left", fontsize=10)
 
-    axes[5].axhline(ACTION_UNIT_M * 1000, color="k", ls="--",
-                    label=f"one action unit ({ACTION_UNIT_M * 1000:.0f} mm)")
-    axes[5].set_ylabel("commanded Cartesian step (mm)")
-    axes[5].set_xlabel("control step")
+    axes[5].axhline(0.0, color="k", ls="--", lw=1, label="the bowl's axis")
+    axes[5].set_ylabel("eef relative to\nthe bowl (mm)")
     axes[5].legend(loc="upper right", fontsize=8)
-    axes[5].set_title("what the model asks for, before the clip", loc="left", fontsize=10)
+    axes[5].set_title("where the tool actually goes: along the bowl-to-plate axis (solid), "
+                      "and across it (dotted)", loc="left", fontsize=10)
+
+    axes[6].axhline(0.0, color="k", ls="--", lw=1)
+    axes[6].set_ylabel("asked for, towards\nthe plate (mm)")
+    axes[6].set_title("the travel the policy asks for, accumulated along the bowl-to-plate "
+                      "direction", loc="left", fontsize=10)
+
+    axes[7].axhline(ACTION_UNIT_M * 1000, color="k", ls="--",
+                    label=f"one action unit ({ACTION_UNIT_M * 1000:.0f} mm)")
+    axes[7].set_ylabel("commanded Cartesian step (mm)")
+    axes[7].set_xlabel("control step")
+    axes[7].legend(loc="upper right", fontsize=8)
+    axes[7].set_title("what the model asks for, before the clip", loc="left", fontsize=10)
 
     for axis in axes:
         axis.grid(alpha=0.25)
