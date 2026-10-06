@@ -252,6 +252,23 @@ class A3CookieTransferExpert:
     action_mode: ActionMode = "joint_position"
     max_joint_step_rad: float = 0.020
     max_gripper_step: float = 0.060
+    #: Largest joint step the placement descent may take.  A safety limit rather than a
+    #: motion plan: the descent lowers a held Cookie into a 6.7 mm cell with neighbours on
+    #: both sides, and the failure mode of overshooting is knocking the row over.
+    #:
+    #: It is also, measured, most of why the demonstrations dwell.  `0.008` is a **sixth** of
+    #: the environment's own `max_joint_step_rad` (0.05), `DESCEND_TO_PLACE` is **27%** of
+    #: every episode, and 100% of its steps come in under a fifth of the cap -- so this one
+    #: clamp is 27 points of the 57% that makes the action distribution look stationary
+    #: (`scripts/probe_expert_dwell.py`).  Raising it trades placement safety for a training
+    #: signal, which is the experiment; the default is the verified value.
+    place_step_limit_rad: float = 0.008
+    #: Floor on how many steps `_trajectory_command` spends covering a joint delta.  The
+    #: default 12 means a small delta -- anything under 0.24 rad, which every grasp descent
+    #: is -- is interpolated into twelfth-sized steps, i.e. ~7.5% of the cap, and DESCEND is
+    #: 20% of every episode.  Unlike `max_joint_step_rad`, which caps a step, this one sets
+    #: the step, and only for the phases whose delta is small.
+    descend_min_steps: int = 12
     joint_tolerance_rad: float = 0.055
     # IK acceptance.  The old thresholds (retry above 12 mm, accept up to 16 mm)
     # were loose enough to silently accept a solution that missed the commanded
@@ -353,7 +370,16 @@ class A3CookieTransferExpert:
         self.phase_steps = 0
         self.current_cookie_index: int | None = None
         self.target_slot_index: int | None = None
-        self.retry_counts = [0] * self.env.task_config.required_cookies
+        # Sized by the **cells** it is indexed by, not by `required_cookies`.  `_retry` looks
+        # up `retry_counts[self._current_slot()]`, and `_current_slot()` is a
+        # `target_slot_index` into `TARGET_SLOTS_LOCAL`, so the two dimensions only agree by
+        # coincidence -- the ten-Cookie scene wants ten Cookies and the target box has ten
+        # cells, which is why this went unnoticed.  The one-Cookie scene wants one, so the
+        # list had length 1 while a slot could be anything in 0..9.  The `IndexError`
+        # therefore fires only on a *retry*, i.e. only after the expert has already failed a
+        # grasp -- and in 400 collected episodes on this scene it never had.  A faster
+        # descent does fail occasionally, and that is how it surfaced.
+        self.retry_counts = [0] * len(self.env.TARGET_SLOTS_LOCAL)
         self.completed_cookie_indices: list[int] = []
         self.skipped_cookie_indices: list[int] = []
         self.transition_history: list[CookiePhase] = []
@@ -451,7 +477,8 @@ class A3CookieTransferExpert:
         self.phase_steps = 0
         self.current_cookie_index = None
         self.target_slot_index = None
-        self.retry_counts = [0] * self.env.task_config.required_cookies
+        # See the matching line in `__post_init__`: sized by cells, not by cookies.
+        self.retry_counts = [0] * len(self.env.TARGET_SLOTS_LOCAL)
         self.completed_cookie_indices = []
         self._packed_positions: dict[int, np.ndarray] = {}
         self.skipped_cookie_indices = []
@@ -544,7 +571,11 @@ class A3CookieTransferExpert:
             self._advance(CookiePhase.DESCEND)
 
         if self.phase is CookiePhase.DESCEND:
-            action = self._trajectory_command(self._waypoints["grasp"], self._descent_gripper())
+            action = self._trajectory_command(
+                self._waypoints["grasp"],
+                self._descent_gripper(),
+                min_steps=self.descend_min_steps,
+            )
             if self._motion_done and self._reached(
                 self._waypoints["grasp"], tolerance=self.arrival_tolerance_rad
             ):
@@ -638,7 +669,8 @@ class A3CookieTransferExpert:
             dq = jac.T @ np.linalg.solve(
                 jac @ jac.T + 0.02**2 * np.eye(6), np.r_[position_error, rotation_error] * 0.15
             )
-            action[:7] = self.data.qpos[self._l_qpos] + np.clip(dq, -0.008, 0.008)
+            limit = self.place_step_limit_rad
+            action[:7] = self.data.qpos[self._l_qpos] + np.clip(dq, -limit, limit)
             self._waypoints["place"] = action[:7].copy()
             aligned = (
                 np.linalg.norm(local_position[:2] - target_xy) < 0.004
