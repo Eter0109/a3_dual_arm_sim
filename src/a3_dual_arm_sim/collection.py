@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from .batch_expert import A3CookieBatchExpert
-from .config import load_config
+from .config import CameraConfig, load_config
 from .contracts import ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 from .env import A3DualArmEnv
@@ -776,7 +776,74 @@ def cookie_single_piece_scene(
     )
 
 
-def libero_props_scene(*, visual_style: str = "plain") -> CollectionScene:
+#: LIBERO's agentview subtends 2.89 mm per pixel at the table; this arm's front camera
+#: subtends 4.58 at its configured pose, and the perturbation sweep prices a 1.55x change in
+#: apparent scale at 12-14 points.  The distance below makes the two agree, and it is not a
+#: guess: `origin/main` carried a front pose at exactly this distance for the same reason.
+LIBERO_MATCHED_FRONT_DISTANCE_M = 0.722
+#: LIBERO's `eye_in_hand` is `pos="0.05 0 0"` on `right_hand`, i.e. on the approach axis, at
+#: fovy 75.  This arm's is 45 mm out along its own tool axis -- the same idea -- but 85 mm
+#: *off* it, and 70 degrees.
+LIBERO_MATCHED_WRIST_AXIAL_M = 0.045
+LIBERO_MATCHED_WRIST_LOOKAHEAD_M = 0.200
+LIBERO_MATCHED_WRIST_FOVY_DEG = 75.0
+
+
+def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
+    """The camera geometry that reproduces LIBERO's own framing on this arm.
+
+    Why this touches the cameras and nothing else
+    ---------------------------------------------
+    A LIBERO-trained policy is being asked to drive this arm, and the perturbation sweep
+    over `libero_spatial` prices what such a policy needs from a camera: every material
+    flattened to one grey and every texture reference dropped costs **2 points**, the camera
+    headlight costs **0**, the front camera's field of view costs 12-14 either way, and a
+    1.85x change in the wrist camera's field of view costs **all 50**.  The project's own
+    `plain`-versus-`detailed` test on this scene agrees that style is free.
+
+    So this matches the cameras and deliberately leaves the lighting and the materials
+    alone.  Changing those would be work with a measured price of nought and a real chance
+    of moving something else; the cameras carry the money.
+
+    What is matched
+    ---------------
+    *Front.*  LIBERO's agentview subtends **2.89 mm per pixel** at the table
+    (`2 d tan(fovy/2) / 256` at `d = 0.86 m`, `fovy = 45`).  This arm's front camera
+    subtends **4.58** at its configured 1.150 m and 54 degrees -- a **1.59x** mismatch, on
+    an axis worth 12-14 points.  Moving it in along its own view direction to **0.722 m**
+    gives 2.87, keeping both the view direction and the arms in frame.  (`origin/main`
+    carried a front pose at exactly this distance for the same reason, and rejected it only
+    because it cropped the arms; for a policy-side test the framing matters more than the
+    recording.)
+
+    *Wrist.*  LIBERO's `eye_in_hand` is `pos="0.05 0 0"` on `right_hand`, whose +x is the
+    tool axis, at fovy 75.  This arm's wrist camera is 45 mm out along its own tool axis --
+    the same idea -- but **85 mm off it**, aimed at a target body that shares the offset, so
+    its optical axis runs *parallel* to the approach axis instead of through it.  Removing
+    the lateral term puts the axis through the grasp point, which is where LIBERO's points,
+    and 75 degrees matches the field of view.
+    """
+
+    target = np.asarray(cameras.workspace_target_m, dtype=np.float64)
+    position = np.asarray(cameras.front_position_m, dtype=np.float64)
+    view = position - target
+    matched_front = target + view * (LIBERO_MATCHED_FRONT_DISTANCE_M / np.linalg.norm(view))
+    return replace(
+        cameras,
+        front_position_m=tuple(float(value) for value in matched_front),
+        left_wrist_position_m=(0.0, LIBERO_MATCHED_WRIST_AXIAL_M, 0.0),
+        left_wrist_target_m=(
+            0.0,
+            LIBERO_MATCHED_WRIST_AXIAL_M + LIBERO_MATCHED_WRIST_LOOKAHEAD_M,
+            0.0,
+        ),
+        wrist_fovy_deg=LIBERO_MATCHED_WRIST_FOVY_DEG,
+    )
+
+
+def libero_props_scene(
+    *, visual_style: str = "plain", matched_cameras: bool = False
+) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
 
     Why this scene exists, and what its numbers mean
@@ -803,6 +870,8 @@ def libero_props_scene(*, visual_style: str = "plain") -> CollectionScene:
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
+        if matched_cameras:
+            loaded = replace(loaded, cameras=_libero_matched_cameras(loaded.cameras))
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
@@ -833,6 +902,12 @@ def libero_props_scene(*, visual_style: str = "plain") -> CollectionScene:
         details={
             "config": "configs/libero_props.yaml",
             "props": "LIBERO `akita_black_bowl` and `plate`, as passive scenery",
+            "cameras": (
+                "LIBERO-matched: front at 0.722 m (2.87 mm/px against LIBERO's 2.89), "
+                "wrist on the tool axis at fovy 75"
+                if matched_cameras
+                else "this branch's: front at 1.150 m (4.58 mm/px), wrist 85 mm off axis"
+            ),
             "scorable": False,
             "why": "no reachable Cookie, so failure is by construction; use it for video",
         },
@@ -850,6 +925,12 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_two_box": cookie_two_box_scene,
         "a3_cookie_single_piece": cookie_single_piece_scene,
         "a3_libero_props": libero_props_scene,
+        # The same scene with the camera geometry a LIBERO policy was trained under.  A
+        # separate name rather than a flag on the CLI because the two produce numbers that
+        # must not be compared, and a name is the only thing that survives into a report.
+        "a3_libero_props_matched": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, **kwargs
+        ),
     }
 
 
