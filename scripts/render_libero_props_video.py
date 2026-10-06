@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chart-height", type=int, default=170)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--crf", type=int, default=20, help="lower is higher quality")
+    parser.add_argument("--trace", type=Path, default=None,
+                        help="Optional .npz of the same series the trace probe records.  "
+                             "A success shows up in about one rollout in fifteen, so when "
+                             "the camera catches one the numbers have to be kept too -- "
+                             "re-recording the same seed will not reproduce it.")
     parser.add_argument("--shadows", action="store_true",
                         help="Keep the shadow and reflection passes.  They cost about four "
                              "times the frame time and only change how it looks.")
@@ -281,6 +286,7 @@ def main() -> int:
 
     gateway = None
     written = 0
+    traces: list[dict[str, np.ndarray]] = []
     started = time.perf_counter()
     try:
         for seed in seeds:
@@ -325,6 +331,7 @@ def main() -> int:
                   f"  gap {start_gap_mm:.1f} mm", flush=True)
 
             touched = 0
+            rows: list[dict[str, float]] = []
             for step in range(args.steps):
                 view = (env.render_view("front", height=args.view_size, width=args.view_size)
                         if args.view_size else None)
@@ -347,6 +354,23 @@ def main() -> int:
                 gripper = float(np.asarray(observation[STATE], dtype=np.float64)[7])
                 command = gateway.metrics.get("libero_command") or [0.0] * 7
                 chart.add(radial_mm, bowl_plate_mm)
+                # The same keys the trace probe writes, so one analysis reads either.
+                rows.append({
+                    "step": step,
+                    "radial_mm": radial_mm,
+                    "above_rim_mm": above_rim_mm,
+                    "gap_mm": float(np.linalg.norm(
+                        np.asarray(fingertips[0]) - bowl_centre)) * 1000.0,
+                    "bowl_mm": float(np.linalg.norm(bowl_centre - bowl_start)) * 1000.0,
+                    "bowl_plate_mm": bowl_plate_mm,
+                    "bowl_height_mm": bowl_height_mm,
+                    "eef_x_mm": float(eef_position[0] - bowl_start[0]) * 1000.0,
+                    "eef_y_mm": float(eef_position[1] - bowl_start[1]) * 1000.0,
+                    "eef_z_mm": float(eef_position[2] - bowl_start[2]) * 1000.0,
+                    "touch_arm": float(on_bowl),
+                    "touch_table": float(on_table),
+                    "gripper": gripper,
+                })
 
                 frame = composer.compose(
                     view, cameras, chart, title,
@@ -377,6 +401,14 @@ def main() -> int:
                           f"bowl->plate {bowl_plate_mm:6.0f} mm  "
                           f"touched {touched:>3}", flush=True)
             env.close()
+            traces.append({key: np.asarray([row[key] for row in rows]) for key in rows[0]})
+
+        if args.trace is not None:
+            args.trace.parent.mkdir(parents=True, exist_ok=True)
+            np.savez(args.trace, **{f"{key}_s{index}": trace[key]
+                                    for index, trace in enumerate(traces)
+                                    for key in trace})
+            print(f"trace  : {args.trace}")
 
         for packet in stream.encode():
             container.mux(packet)
