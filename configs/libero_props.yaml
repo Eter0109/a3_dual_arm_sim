@@ -75,6 +75,35 @@ arm_actuator_damping: 0.40
 # the harness default of 0.05 would clip every command and make the arm move at half the
 # speed the policy planned for, which is a different experiment.
 max_joint_step_rad: 0.10
+# --- the servo, and the two knobs that are not the same knob -------------------------
+#
+# `arm_actuator_damping` scales the velocity gain alone, so it sets the damping *ratio*:
+# it buys tracking speed by buying ringing.  Measured on the joint step response at 20 Hz
+# (`scripts/probe_tracking.py`), one control step delivers:
+#
+#   damping   per-command tracking   overshoot past the settled value   settles in
+#   1.00            55%                       0.0%                        250 ms
+#   0.70            68%                       1.0%                        100 ms
+#   0.40            91%                      12.2%                        300 ms
+#
+# 0.40 was chosen here for the tracking and the ringing was not priced -- which was a
+# mistake, because a policy issuing a fresh command every 50 ms sees a position oscillating
+# in a direction its own plan never asked for, and that is motion a viewer calls shaking.
+#
+# `arm_servo_bandwidth` scales *both* gains, so the ratio and the overshoot are untouched
+# while the servo responds sooner.  At damping 0.40:
+#
+#   bandwidth   per-command tracking   overshoot   settles in
+#   1                    91%            12.2%       300 ms
+#   2                    91%             4.8%       150 ms
+#   4                    90%             0.0%        50 ms
+#   8                    88%             0.0%       100 ms
+#
+# 4 is the only point that is fast *and* still, and it is the configuration this scene
+# should end up on.  It is left at the default for now on purpose: `execute` in the policy
+# manifest was changed in the same sitting for a separate reason, and the two have to be
+# measured one at a time or neither result means anything.
+# arm_servo_bandwidth: 4.0
 randomization:
   source_bin_x_m: 0.0
   source_bin_y_m: 0.0

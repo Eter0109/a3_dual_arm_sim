@@ -122,6 +122,45 @@ def _step_response(env: object, steps: int) -> dict:
     return {"limit": limit, "trace": np.asarray(trace)}
 
 
+def _ringing(trace: np.ndarray, tolerance: float = 0.02) -> dict:
+    """How much the response overshoots the value it settles at, and how long it shakes.
+
+    Tracking accuracy and smoothness are separate costs and the knob below trades one for
+    the other, so measuring only the fraction delivered per step hides the half of it that a
+    person watching the arm sees.  A servo that delivers 95% of a step while overshooting by
+    12% is *shaking* its way to the target: the policy then sees a position that varies in a
+    direction its own plan does not, and corrects for it, and the correction is the next
+    command.
+
+    ``overshoot`` is the largest excursion past where the arm ends up, as a fraction of the
+    total travel; ``reversals`` counts the direction changes before it settles, which is what
+    "ringing" means as a number rather than as an adjective.
+    """
+
+    values = np.asarray(trace, dtype=np.float64)
+    total = float(values[-1])
+    if total <= 0.0 or len(values) < 3:
+        return {"overshoot": 0.0, "reversals": 0, "settled_at": len(values)}
+    settled_at = len(values)
+    for index in range(len(values) - 1, -1, -1):
+        if abs(values[index] - total) > tolerance * total:
+            settled_at = index + 1
+            break
+    # Only past the first step: the first step is the servo's rise, not a reversal.  And
+    # only excursions that clear the tolerance: counting every wobble of the last digit would
+    # report numerical noise as ringing, which is how this metric reported 14 reversals for a
+    # response that is inside 2% by step 6.
+    error = values - total
+    significant = np.where(np.abs(error) > tolerance * total, np.sign(error), 0.0)
+    significant = significant[significant != 0]
+    reversals = int(np.count_nonzero(np.diff(significant) != 0))
+    return {
+        "overshoot": float(max(0.0, (values[1:].max() - total) / total)),
+        "reversals": reversals,
+        "settled_at": settled_at,
+    }
+
+
 def _cartesian_tracking(env: object, delta_mm: float, steps: int, axis: int,
                         hold: int = 1) -> dict:
     """Send one constant Cartesian delta every `hold` steps and measure what is achieved.
@@ -204,6 +243,10 @@ def main() -> int:
         first = float(trace[0]) * 1000
         print(f"   after 1 step {first:.2f} mm   after {len(trace)} steps {final:.2f} mm   "
               f"=> one step delivers {first / max(final, 1e-9) * 100:.1f}% of the total")
+        shake = _ringing(trace)
+        print(f"   overshoot past where it settles {shake['overshoot'] * 100:.1f}%, "
+              f"{shake['reversals']} direction reversal(s), settled by step "
+              f"{shake['settled_at']} ({shake['settled_at'] / env.config.control_hz * 1000:.0f} ms)")
         print()
 
         tracking = _cartesian_tracking(env, args.delta_mm, args.steps, axis=args.axis,

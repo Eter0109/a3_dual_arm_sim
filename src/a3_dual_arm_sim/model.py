@@ -1243,7 +1243,13 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
 
     actuators = ET.SubElement(root, "actuator")
     for joint in source_joints.values():
-        kp = 600.0 if joint.effort >= 60 else (400.0 if joint.effort >= 30 else 200.0)
+        # ``arm_servo_bandwidth`` scales both gains, so the ratio -- and with it the
+        # overshoot -- is unchanged while the servo responds sooner.  ``arm_actuator_damping``
+        # scales only the velocity gain, which is what changes the ratio, and is the knob to
+        # reach for when a controller is tuned around a *soft* response rather than a fast
+        # one.
+        kp = (600.0 if joint.effort >= 60 else (
+            400.0 if joint.effort >= 30 else 200.0)) * config.arm_servo_bandwidth
         # Velocity feedback on the arm position servos.  Without it a position
         # command that moves faster than the joint can track is answered by
         # overshoot and a sustained ring, because nothing but the joint's own
@@ -1257,7 +1263,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         # relay's right-arm controllers are tuned for the undamped response.
         kv = (
             40.0 if joint.effort >= 60 else (30.0 if joint.effort >= 30 else 15.0)
-        ) * config.arm_actuator_damping
+        ) * config.arm_actuator_damping * config.arm_servo_bandwidth
         ET.SubElement(
             actuators,
             "position",

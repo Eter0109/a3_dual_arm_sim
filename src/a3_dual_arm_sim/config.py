@@ -390,6 +390,20 @@ class SimConfig:
     # relay's yield falls from 2/3 to 0/4.  So it is a property of the arm an
     # expert was tuned for, and the relay's config turns it off.
     arm_actuator_damping: float = 1.0
+    # Servo bandwidth: multiplies the arm's position gain *and* its velocity gain, so the
+    # damping **ratio** is unchanged and only the speed of response moves.  It is the other
+    # half of the pair above and it exists because the two were being conflated.
+    #
+    # ``arm_actuator_damping`` scales the velocity gain alone, which lowers the damping
+    # ratio: measured on the joint step response, 1.0 delivers 43% of a step with no
+    # overshoot, 0.5 delivers 63% at 7.9% overshoot, and 0.4 delivers 70% at 12.2%.  Buying
+    # tracking that way *is* buying ringing, and a policy issuing a fresh command every 50 ms
+    # sees a position oscillating in a direction its own plan does not ask for.
+    #
+    # Raising both gains instead moves the servo's natural frequency up without touching the
+    # ratio, which is what a lagging arm actually needs.  It is bounded in practice by
+    # ``forcerange`` on each actuator: past that the servo saturates and stops being linear.
+    arm_servo_bandwidth: float = 1.0
     # Which of the batch expert's validated tunings to run; see
     # ``batch_profile``.  "fast" is the one the README's speed section
     # documents; "baseline" is the slower tuning the two-box relay is
