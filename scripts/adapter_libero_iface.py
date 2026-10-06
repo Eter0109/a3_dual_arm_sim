@@ -31,13 +31,19 @@ cleanly, and three choices had to be made:
   is that difference, so the policy sees its familiar hover pose at rest.  A pure
   translation is the right operation for this, because the action is a world-frame delta
   and a translation does not change world-frame directions.
-* **Orientation is passed through unchanged.**  The two grippers' mounting conventions
-  differ -- ours reads 120 degrees at rest, LIBERO's about 180 -- and the difference is a
-  property of how each gripper is attached, not of a shared world frame.  Rotating the
-  whole state to hide it would make the state look right while the *images* still showed
-  this robot, and the two would then disagree.  So the axis-angle this adapter produces is
-  **out of the checkpoint's training distribution** and that is stated here rather than
-  papered over.
+* **Orientation is reported relative to the hover pose.**  This used to be passed through
+  unchanged, on the argument that the two grippers are mounted differently and that hiding
+  the difference would make the state look right while the *images* still showed this robot.
+  The second half of that is true and remains true -- no state convention makes a Robotiq
+  look like a Panda.  The first half was a guess, and it was wrong: LIBERO's end-effector
+  frame is **world-aligned at hover**, measured at 3.2 degrees, so the policy has only ever
+  seen this input read about zero at rest.  This arm's reads **120.0 degrees**.  Every
+  rollout therefore began by telling the policy its gripper was facing a direction it had
+  never been trained on -- while the *position* half of the same state was already being
+  translated to LIBERO's hover exactly, an asymmetry nobody had noticed.
+
+  So the orientation is now expressed the same way: see `home_referenced_axis_angle`.  It is
+  a constant built from one measurement, not a calibration, and it costs three multiplies.
 * **The gripper is scaled into metres and mirrored.**  LIBERO's `gripper_qpos` is two
   finger joints in metres, mirrored about zero (`[+0.04, −0.04]` fully open); this arm
   reports one normalised opening in `[0, 1]`.  `gripper_scale` converts, because the
@@ -74,6 +80,66 @@ DEFAULT_CAMERAS = ("image", "image2")
 #: `libero_spatial`'s hover pose in LIBERO's own base frame, measured by stepping the
 #: benchmark with no-op actions.  Subtracted the other way it is added to this arm's.
 LIBERO_HOVER_POSITION = (-0.2114, -0.0110, 1.1741)
+
+#: This arm's end-effector orientation in the scene's own home pose, measured off the model
+#: as an axis-angle: **120.0 degrees**, about the (-1, 1, -1) axis, which maps +x to -y, +y to
+#: -z and +z to +x.
+#:
+#: It exists because the state's orientation needs the same treatment the state's position
+#: already had.  LIBERO's end-effector frame is **world-aligned at hover** -- measured, its
+#: axis-angle is 3.2 degrees and its axes come out as the world's to three decimals -- so the
+#: policy has only ever seen this input read about zero at rest.  Ours reads 120.  Reporting
+#: the orientation relative to this arm's own home pose, in world axes, is what makes the two
+#: agree, and it is a constant rather than a calibration.
+#:
+#: The position was already mapped this way and nobody noticed the asymmetry: the offset
+#: below takes (0.100, 0.250, 0.920) to (-0.211, -0.011, 1.174) exactly, so the policy was
+#: being told it was standing where it expects and facing a direction it had never seen.
+THIS_ARM_HOME_ROTATION = (-1.2092, 1.2092, -1.2092)  # axis-angle, radians
+
+
+def quaternion_from_axis_angle(rotation: tuple) -> tuple[float, float, float, float]:
+    """A (w, x, y, z) quaternion from an axis-angle triple."""
+
+    angle = math.sqrt(sum(value * value for value in rotation))
+    if angle < 1e-12:
+        return (1.0, 0.0, 0.0, 0.0)
+    scale = math.sin(angle / 2.0) / angle
+    return (math.cos(angle / 2.0),
+            rotation[0] * scale, rotation[1] * scale, rotation[2] * scale)
+
+
+#: The same rotation as a quaternion, built once so the per-inference path is three multiplies.
+HOME_QUATERNION = quaternion_from_axis_angle(THIS_ARM_HOME_ROTATION)
+
+
+def quaternion_product(a: tuple, b: tuple) -> tuple[float, float, float, float]:
+    """Hamilton product of two (w, x, y, z) quaternions."""
+
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def home_referenced_axis_angle(quaternion: tuple) -> list[float]:
+    """An end-effector orientation as LIBERO reports it: relative to the hover pose.
+
+    ``current * home^-1`` -- a *right* multiplication, so that a rotation applied in world
+    axes is reported about those world axes.  The left-multiplied form ``home^-1 * current``
+    also reads zero at hover, and it is wrong: it reports a turn about world z as a turn
+    about whatever direction z happens to lie along in the home frame, which here is 120
+    degrees away.  Verified by feeding it a known 90 degree world rotation and checking that
+    the report comes back as 90 degrees about world z, rather than about world -y.
+    """
+
+    inverse = (HOME_QUATERNION[0], -HOME_QUATERNION[1],
+               -HOME_QUATERNION[2], -HOME_QUATERNION[3])
+    return axis_angle_from_wxyz(quaternion_product(quaternion, inverse))
 
 #: Fully-open finger travel of LIBERO's Panda gripper, in metres, and its sign flip: the
 #: two fingers are mirrored, so an open gripper reads `[+0.04, -0.04]`.
@@ -188,7 +254,9 @@ def infer(model: dict[str, Any], request: Any) -> dict[str, Any]:
     eef = np.asarray(request.vector("eef_pose"), dtype=np.float64)  # left arm pos + quat(wxyz)
     opening = float(np.asarray(request.vector("gripper"), dtype=np.float64).reshape(-1)[0])
     position = eef[:3] + model["offset"]
-    rotation = axis_angle_from_wxyz(tuple(eef[3:7]))
+    # Relative to this arm's home pose, so that at hover it reads about zero the way LIBERO's
+    # does.  See `THIS_ARM_HOME_ROTATION`.
+    rotation = home_referenced_axis_angle(tuple(float(v) for v in eef[3:7]))
     fingers = model["gripper_scale"] * opening
     state = np.r_[position, rotation, fingers, -fingers].astype(np.float32)
     batch["observation.state"] = torch.from_numpy(state).unsqueeze(0).to(model["device"])
