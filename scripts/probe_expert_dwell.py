@@ -133,6 +133,20 @@ def main() -> int:
     parser.add_argument("--scene", default="a3_cookie_single_piece")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--place-step-limit",
+        type=float,
+        default=None,
+        help="override the expert's placement-descent clamp in radians (default: its own "
+             "0.008, which is a sixth of the environment's 0.05 rad cap)",
+    )
+    parser.add_argument(
+        "--descend-min-steps",
+        type=int,
+        default=None,
+        help="override the interpolation floor for the grasp descent (default: the expert's "
+             "own 12, which makes a small descent advance a twelfth of its delta per step)",
+    )
     args = parser.parse_args()
 
     scene = scene_by_name(args.scene)
@@ -141,6 +155,22 @@ def main() -> int:
     # this process off the GPU entirely rather than merely off the frame path.
     env.render_cameras = False
     policy = scene.build_policy(env)
+    # Written onto the expert *after* the scene built it, rather than passed to a constructor
+    # of my own: the point of sweeping these two numbers is that nothing else differs from
+    # collection, and rebuilding the policy here is exactly the kind of edit that quietly
+    # changes something else.  Both fields are read at use, never cached at construction.
+    overrides = {
+        "place_step_limit_rad": args.place_step_limit,
+        "descend_min_steps": args.descend_min_steps,
+    }
+    overrides_applied: dict[str, float] = {}
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        if not hasattr(policy.expert, name):  # type: ignore[attr-defined]
+            raise SystemExit(f"this expert has no {name!r} to override")
+        setattr(policy.expert, name, value)
+        overrides_applied[name] = value
     log = _PhaseLog(policy)
     policy.act = log.act  # type: ignore[method-assign]
     policy.observe_step = log.observe_step  # type: ignore[attr-defined]
@@ -158,6 +188,8 @@ def main() -> int:
     )
 
     per_phase: dict[str, list[float]] = defaultdict(list)
+    states: list[np.ndarray] = []
+    applied_rows: list[np.ndarray] = []
     accepted = 0
     steps_total = 0
     try:
@@ -169,6 +201,8 @@ def main() -> int:
             steps_total += len(log.phase)
             for name, state, applied in zip(log.phase, log.state, log.applied, strict=True):
                 per_phase[name].append(_displacement(state, applied, cap))
+            states.extend(log.state)
+            applied_rows.extend(log.applied)
             log.phase.clear()
             log.state.clear()
             log.requested.clear()
@@ -178,12 +212,37 @@ def main() -> int:
 
     print(f"{args.scene}: {args.episodes} attempts, {accepted} accepted, "
           f"{steps_total} control steps, cap {cap:.3f} rad/step")
+    if overrides_applied:
+        print("  overridden: " + ", ".join(f"{k}={v}" for k, v in overrides_applied.items()))
+    # A rate-limit relaxation that costs the expert its episodes is not a result, and the
+    # failure is easy to miss because the run still completes and still reports a dwell.
+    # Every rate-limit row below therefore has to be read next to this number.
+    if accepted < args.episodes:
+        print(f"  ** {args.episodes - accepted} attempt(s) were NOT accepted -- "
+              f"read the phase table below with that in mind")
     print()
 
     every = np.concatenate([np.asarray(v) for v in per_phase.values()]) if per_phase else np.zeros(1)
     print("overall stand-still fraction (reproduces the dataset probe)")
     for threshold in DWELL_THRESHOLDS:
         print(f"  < {threshold*100:>3.0f}% of the cap: {np.mean(every < threshold) * 100:>5.1f}%")
+
+    # The metric that actually decides whether a policy can learn the task, and the one the
+    # dwell table is only a proxy for.  The expert's action is an absolute joint target and
+    # the state is the pose it is already in, so the *task* is carried by `action - state`
+    # while `state` itself is the identity component a policy can reproduce for free.  Their
+    # ratio is how much of the target is task; the trajectory the checkpoints train on has it
+    # at 4.4-8.8%, which is what makes "output the state" so nearly optimal.
+    state_rows = np.stack(states)
+    target_rows = np.stack(applied_rows)
+    residual = target_rows[:, :7] - state_rows[:, :7]
+    per_joint = residual.std(axis=0) / np.maximum(target_rows[:, :7].std(axis=0), 1e-12)
+    print()
+    print("identity component: std(action - state) / std(action), per arm joint")
+    print(f"  min {per_joint.min()*100:.1f}%   median {np.median(per_joint)*100:.1f}%   "
+          f"max {per_joint.max()*100:.1f}%")
+    print(f"  pooled std(residual) {residual.std():.4f} rad   "
+          f"mean |residual| {np.abs(residual).mean() / cap * 100:.1f}% of the cap")
     print()
 
     order = sorted(per_phase, key=lambda name: -len(per_phase[name]))
