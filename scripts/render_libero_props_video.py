@@ -66,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene", default="a3_libero_props_matched")
     parser.add_argument("--manifest", type=Path,
                         default=PROJECT / "configs/policies/pi05_libero_a3_cartesian.yaml")
-    parser.add_argument("--task", default="pick up the black bowl and place it on the plate")
+    parser.add_argument("--task",
+                        default="pick up the black bowl between the plate and the ramekin and "
+                                "place it on the plate")
     parser.add_argument("--seeds", default="0",
                         help="Comma separated.  Each becomes one section of the video, "
                              "sharing one model process; the sections are not comparable "

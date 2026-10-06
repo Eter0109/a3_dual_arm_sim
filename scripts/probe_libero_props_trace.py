@@ -68,12 +68,20 @@ RESTING_TOL_M = 0.005
 SETTLED_STEPS = 50
 
 
+#: LIBERO's own instruction for `libero_spatial` task 0, word for word.  It names three
+#: objects and which one to take, and the scene now holds all three -- see the `libero_props`
+#: block in `configs/libero_props.yaml`.  The simplified wording this used to carry
+#: ("pick up the black bowl and place it on the plate") referred to a scene that had one bowl
+#: and one plate in it, which is not the scene the policy was trained on.
+LIBERO_TASK = "pick up the black bowl between the plate and the ramekin and place it on the plate"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scene", default="a3_libero_props")
     parser.add_argument("--manifest", type=Path,
                         default=PROJECT / "configs/policies/pi05_libero_a3_cartesian.yaml")
-    parser.add_argument("--task", default="pick up the black bowl and place it on the plate")
+    parser.add_argument("--task", default=LIBERO_TASK)
     parser.add_argument("--seeds", default="0,1,2",
                         help="The policy samples fresh flow-matching noise per chunk, so two "
                              "rollouts of the same seed differ by more than the effect being "

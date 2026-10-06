@@ -143,10 +143,39 @@ cookie_transfer:
     # towards -y from the number below.  Measured after settling: the wrapper is at
     # (0.15, 0.23, 0.748) and the mesh at (0.15, 0.13, 0.748).  Anything that measures
     # distance to "the bowl" has to use `libero_bowl_object`, not `libero_bowl_root`.
+    #
+    # The layout below is LIBERO's own, taken off `libero_spatial` task 0 and reproduced
+    # **relative to the bowl's measured centre** -- the only form in which it can be
+    # reproduced in a scene whose robot and table are different.  Measured there, as offsets
+    # from the centre of the bowl the task picks up:
+    #
+    #     second `akita_black_bowl`   (-125.2, +118.3) mm   172 mm away
+    #     `plate`                     (+116.6,   +3.7) mm   117 mm away
+    #     `glazed_rim_porcelain_ramekin` (-134.0, -12.9) mm 135 mm away
+    #
+    # and the task's own prompt names all three: *"pick up the black bowl between the plate
+    # and the ramekin and place it on the plate"*.  This scene used to hold one bowl and one
+    # plate, 200 mm apart on a bearing 88 degrees off LIBERO's -- so the policy was being
+    # asked to carry 1.7x as far in a direction it had never carried, towards a plate that
+    # was the only referent its instruction mentioned.  The stove and cabinet that also sit
+    # in that scene are left out: they are 350 mm away, no part of the instruction, and one
+    # more chance to collide with this arm.
     - name: bowl
       directory: /root/.cache/libero/assets/stable_scanned_objects/akita_black_bowl
       position_m: [0.150, 0.230, 0.780]
-    # LIBERO's `plate`: where every `libero_spatial` task puts the bowl.
+    # The distractor bowl.  It is not decoration: without it "the black bowl between the
+    # plate and the ramekin" names the only bowl in the scene, and the phrase has nothing to
+    # disambiguate.  It carries a different `name` so its bodies are prefixed differently --
+    # `libero_bowl_near_object` against `libero_bowl_object` -- which is what keeps the trace
+    # probe measuring the bowl the task is about.
+    - name: bowl_near
+      directory: /root/.cache/libero/assets/stable_scanned_objects/akita_black_bowl
+      position_m: [0.025, 0.348, 0.780]
+    # LIBERO's `plate`: where every `libero_spatial` task puts the bowl.  No inner offset,
+    # so the wrapper is the mesh centre.
     - name: plate
       directory: /root/.cache/libero/assets/stable_scanned_objects/plate
-      position_m: [0.150, 0.330, 0.775]
+      position_m: [0.267, 0.134, 0.775]
+    - name: ramekin
+      directory: /root/.cache/libero/assets/stable_scanned_objects/glazed_rim_porcelain_ramekin
+      position_m: [0.016, 0.117, 0.780]
