@@ -60,9 +60,22 @@ class CartesianDeltaAdapter:
             mujoco.mju_mat2Quat(target_quaternion, work.site_xmat[site_id])
             has_rot = bool(np.any(np.abs(command[arm_index, 3:6]) > 1e-4))
             if has_rot:
+                delta = command[arm_index, 3:6]
+                if self.config.cartesian_rotation_frame == "world":
+                    # `mju_quatIntegrate` composes as `q @ exp(delta)`, i.e. about the tool's
+                    # own axes.  Expressing the same delta in those axes -- `R^T @ delta` --
+                    # makes it `exp(delta) @ q` instead, which is the world-frame composition
+                    # robosuite's OSC performs (`set_goal_orientation`: `R_err @ R_current`)
+                    # and therefore the one a policy trained on a robosuite benchmark emits.
+                    #
+                    # This matters here and not in general: the two agree only while the tool
+                    # is aligned with the world, and this arm's tool sits at 120 degrees from
+                    # it, so an unconverted delta commands a rotation about an axis that is
+                    # 120 degrees away from the intended one.
+                    delta = work.site_xmat[site_id].reshape(3, 3).T @ delta
                 mujoco.mju_quatIntegrate(
                     target_quaternion,
-                    command[arm_index, 3:6],
+                    delta,
                     self.config.cartesian_rotation_scale_rad,
                 )
             limits = self._ranges[arm_index]

@@ -39,8 +39,18 @@ horizon: 6000
 # LIBERO's own OSC_POSE numbers, so a policy's action means here what it meant there.
 # `output_max` is [0.05 m x3, 0.5 rad x3] per unit of action, and the position half is
 # world-frame, which is what `CartesianDeltaAdapter` implements.
+#
+# The rotation half is world-frame *there* and was not here, which is the correction this
+# file is now the first to ask for: `mujoco.mju_quatIntegrate` composes about the tool's own
+# axes, while robosuite's `set_goal_orientation` composes `R_err @ R_current` -- about
+# world-fixed ones.  The two agree only while the tool is aligned with the world, and this
+# arm's tool sits at **120 degrees** from it (measured; 120.1 while holding a Cookie), so
+# every rotation command was being applied about an axis 120 degrees from the intended one.
+# Translation was never affected, which is why the arm could approach the bowl and could
+# never orient the gripper to grasp it.
 cartesian_translation_scale_m: 0.05
 cartesian_rotation_scale_rad: 0.50
+cartesian_rotation_frame: world
 # A 50 mm step is 1 m/s at 20 Hz, and on an arm of this reach that is about 0.1 rad/step;
 # the harness default of 0.05 would clip every command and make the arm move at half the
 # speed the policy planned for, which is a different experiment.

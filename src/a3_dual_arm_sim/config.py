@@ -358,6 +358,23 @@ class SimConfig:
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025
     cartesian_rotation_scale_rad: float = 0.10
+    # The frame a `cartesian_delta` rotation component is expressed in, which is a property
+    # of the controller that *produced* the action and not of this robot.
+    #
+    # `"world"` is what robosuite's OSC does, and therefore what any policy trained on a
+    # robosuite benchmark emits: `set_goal_orientation` computes `R_err @ R_current`, so the
+    # delta is applied about world-fixed axes.  `"body"` is what `mujoco.mju_quatIntegrate`
+    # does -- `q @ exp(delta)` -- i.e. about the tool's own axes.  The two differ by the
+    # tool's current orientation, which on this arm is **120 degrees** (measured, and 120.1
+    # while a Cookie is held), so getting it wrong points every rotation command about the
+    # wrong axis by that much.
+    #
+    # The default is `"body"` because that is what `CartesianDeltaAdapter` has always done,
+    # and silently changing it would move numbers that other manifests were measured under
+    # (`gr00t_bimanual.yaml` uses this space too).  The comment above `libero_props.yaml`'s
+    # scales claims the adapter is world-frame; it is not, and that discrepancy is a bug --
+    # this field is how the two are told apart while it is being measured instead of argued.
+    cartesian_rotation_frame: str = "body"
     ik_damping: float = 0.05
     ik_iterations: int = 8
     joint_damping: float = 0.8
@@ -396,6 +413,12 @@ class SimConfig:
             raise ValueError(
                 f"visual_style must be one of {', '.join(VISUAL_STYLES)}, "
                 f"got {self.visual_style!r}"
+            )
+        if self.cartesian_rotation_frame not in ("body", "world"):
+            raise ValueError(
+                "cartesian_rotation_frame must be 'body' (mujoco's own convention, "
+                f"q @ exp(delta)) or 'world' (robosuite's, exp(delta) @ q); "
+                f"got {self.cartesian_rotation_frame!r}"
             )
         if len(self.home.left) != 7 or len(self.home.right) != 7:
             raise ValueError("each arm home pose must contain seven joints")
