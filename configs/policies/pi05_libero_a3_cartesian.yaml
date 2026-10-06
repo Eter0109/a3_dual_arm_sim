@@ -26,8 +26,23 @@
 # keys, in LIBERO's order.  Swapping them is not detectable -- the shapes match -- it just
 # hands the policy a wrist view where it expects a room.
 #
-# `execute: 10` is what the published LIBERO evaluation uses: the queue replays ten rows of
-# one predicted chunk before re-planning.  `chunk: 50` is the model's own horizon.
+# `execute` is 50, because that is what this checkpoint says it executes.  The manifest
+# used to run 10, on the strength of a comment claiming that was "what the published LIBERO
+# evaluation uses" -- and nothing in the repository or in the installed reference supported
+# that.  The checkpoint's own `config.json` carries `n_action_steps: 50` next to
+# `chunk_size: 50`, lerobot's `PI0Config` defaults to 50, and `select_action` queues
+# `predict_action_chunk(batch)[:, :n_action_steps]`, i.e. the whole plan.
+#
+# The difference is not cosmetic.  A 50-row chunk is a *plan*: the early rows are the
+# approach and the later ones are the placement, and running only the first ten rows means
+# the second half of every plan is thrown away and the model is asked to re-plan five times
+# as often.  Every re-plan draws fresh flow-matching noise, so `execute: 10` puts a
+# stochastic kick into the trajectory every 0.5 s where the reference has one every 2.5 s.
+# That is a candidate for both halves of what a recording shows: motion that shakes, and a
+# motion that never gets past its own opening.
+#
+# The 40-run baseline in `logs/libero_props_n40.log` was measured under `execute: 10`, and
+# is the arm of that comparison; `git show` recovers the setting if it is needed again.
 #
 # What a result here can and cannot mean
 # --------------------------------------
@@ -90,7 +105,7 @@ action:
   space: cartesian_delta
   dim: 14
   chunk: 50
-  execute: 10
+  execute: 50
   dt: 0.05
   normalize:
     # The checkpoint's postprocessor already inverted MEAN_STD with LIBERO's own
