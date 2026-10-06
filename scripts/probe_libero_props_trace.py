@@ -41,18 +41,19 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import mujoco  # noqa: E402
 import numpy as np  # noqa: E402
 
+from a3_dual_arm_sim.props import (  # noqa: E402
+    BOWL_MESH_BODY,
+    EEF_SITE,
+    FINGERTIPS,
+    PLATE_MESH_BODY,
+    prop_frame,
+    prop_geoms,
+    prop_points,
+    robot_bodies,
+    touching,
+)
+
 PROJECT = Path(__file__).resolve().parents[1]
-
-#: The bowl's mesh body, not the wrapper the prop was placed at.  LIBERO authors every
-#: object as a wrapper body with a mesh body nested 100 mm inside it (`pos="0 -0.1 0"`),
-#: so the geometry -- and therefore the bowl a camera sees and a gripper can touch -- is
-#: nowhere near the number in the scene config.
-BOWL_MESH_BODY = "libero_bowl_object"
-PLATE_MESH_BODY = "libero_plate_object"
-FINGERTIPS = ("L_finger_inner_touch", "L_finger_outer_touch")
-
-#: The site the IK solves for, so "where the arm went" is the point the policy controls.
-EEF_SITE = "L_eef"
 
 #: One unit of action, under the scene's `cartesian_translation_scale_m`.
 ACTION_UNIT_M = 0.05
@@ -61,101 +62,6 @@ ACTION_UNIT_M = 0.05
 #: rather than held or airborne.  The table is rigid and the bowl does not deform, so this
 #: is a noise allowance rather than a physical tolerance.
 RESTING_TOL_M = 0.005
-
-#: The eight corners of a box, for turning a geom's axis-aligned extent into world points.
-_CORNERS = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
-
-
-def _under(model, root_id: int, body: int) -> bool:
-    """Is ``body`` the body ``root_id`` or one of its descendants?  Bodies form a tree."""
-
-    node = body
-    while True:
-        if node == root_id:
-            return True
-        if node == 0:
-            return root_id == 0
-        node = int(model.body_parentid[node])
-
-
-def _prop_geoms(model, body_id: int) -> list[int]:
-    """The geoms carried by a prop's body and everything under it."""
-
-    return [index for index in range(model.ngeom)
-            if _under(model, body_id, int(model.geom_bodyid[index]))]
-
-
-def _prop_points(model, data, body_id: int) -> np.ndarray:
-    """Every corner of a prop's geometry, in world coordinates.
-
-    LIBERO props are a visual mesh *plus* forty-odd convex pieces from a collision
-    decomposition of the same surface, so both have to be walked or the footprint is half
-    an object.  Two traps are worth naming, because this probe fell into both of them and
-    each one made the policy look worse than it was:
-
-    * For a **mesh** geom, ``geom_aabb`` and ``geom_size`` hold the *unscaled* mesh
-      extents.  The XML's ``scale="0.7 0.7 0.7"`` is already baked into the compiled
-      vertex array, so ``mesh_vert`` is the only honest source -- reading the extents and
-      scaling them again puts the bowl's rim at 39 mm when it is at 56.
-    * LIBERO's objects all declare the same three sites: ``bottom_site`` at z=-0.06,
-      ``top_site`` at +0.04, ``horizontal_radius_site`` at (0.025, 0.025).  Those are a
-      template copied into every object, not a measurement of it: they describe a bowl
-      100 mm tall with a 35 mm radius, while the mesh shipping beside them is 53 mm tall
-      and 56 mm in radius.
-    """
-
-    points = []
-    for index in _prop_geoms(model, body_id):
-        if model.geom_type[index] == int(mujoco.mjtGeom.mjGEOM_MESH):
-            start = int(model.mesh_vertadr[model.geom_dataid[index]])
-            count = int(model.mesh_vertnum[model.geom_dataid[index]])
-            local = np.asarray(model.mesh_vert[start:start + count])
-        else:
-            local = (np.asarray(model.geom_aabb[index][:3])
-                     + _CORNERS * np.asarray(model.geom_aabb[index][3:]))
-        points.append(data.geom_xpos[index]
-                      + local @ data.geom_xmat[index].reshape(3, 3).T)
-    return np.vstack(points)
-
-
-def _prop_frame(model, data, body_id: int) -> tuple[np.ndarray, float, np.ndarray]:
-    """A prop's centre, horizontal radius and overall size, all measured off its geometry.
-
-    Measured rather than written down, so that "the bowl is over the plate" is answered
-    against this scene's plate instead of a number remembered from somewhere else.
-    """
-
-    points = _prop_points(model, data, body_id)
-    low, high = points.min(axis=0), points.max(axis=0)
-    centre = (low + high) / 2.0
-    radius = float(np.linalg.norm(points[:, :2] - centre[:2], axis=1).max())
-    return centre, radius, (high - low)
-
-
-def _robot_bodies(model) -> set[int]:
-    """Every body of the arm, found by walking down from its base rather than by name."""
-
-    base = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
-    if base < 0:
-        raise SystemExit("no base_link; the contact check needs the arm's bodies")
-    return {body for body in range(model.nbody) if _under(model, base, body)}
-
-
-def _touching(model, data, prop_geoms: set[int], bodies: set[int]) -> bool:
-    """Is the prop in contact with any geom whose body is in ``bodies``, right now?
-
-    Read from MuJoCo's own contact list rather than inferred from proximity.  A fingertip
-    3 mm from a wall is a different thing from a fingertip pressing on it, and only one of
-    those is evidence that the policy ever got hold of anything -- or ever let go.
-    """
-
-    for index in range(data.ncon):
-        contact = data.contact[index]
-        first, second = int(contact.geom1), int(contact.geom2)
-        for near, far in ((first, second), (second, first)):
-            if near in prop_geoms and int(model.geom_bodyid[far]) in bodies:
-                return True
-    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -265,10 +171,10 @@ def main() -> int:
 
         # `geom_xpos` is derived, and a fresh reset has not necessarily been forwarded yet.
         mujoco.mj_forward(model, env.data)
-        bowl_start, bowl_radius_m, bowl_size_m = _prop_frame(model, env.data, bowl)
-        plate_centre, plate_radius_m, _ = _prop_frame(model, env.data, plate)
-        bowl_geoms = set(_prop_geoms(model, bowl))
-        arm_bodies = _robot_bodies(model)
+        bowl_start, bowl_radius_m, bowl_size_m = prop_frame(model, env.data, bowl)
+        plate_centre, plate_radius_m, _ = prop_frame(model, env.data, plate)
+        bowl_geoms = set(prop_geoms(model, bowl))
+        arm_bodies = robot_bodies(model)
         bowl_top_z = float(bowl_start[2] + bowl_size_m[2] / 2.0)
         # The task direction, as a unit vector on the table.  Every "the bowl moved N mm"
         # figure this probe has printed is a magnitude, and a magnitude whose *sign along
@@ -304,7 +210,7 @@ def main() -> int:
             # its first three entries as metres is a factor of about fifty out.
             command = gateway.metrics.get("libero_command") or [0.0] * 7
 
-            points = _prop_points(model, env.data, bowl)
+            points = prop_points(model, env.data, bowl)
             bowl_centre = (points.min(axis=0) + points.max(axis=0)) / 2.0
             fingertips = [np.asarray(env.data.site_xpos[t]) for t in tips]
             gap = min(float(np.linalg.norm(tip - bowl_centre)) for tip in fingertips)
@@ -338,8 +244,8 @@ def main() -> int:
                     "above_rim_mm": above_rim * 1000.0,
                     # MuJoCo's own contact list, not a proximity threshold, so "the arm
                     # touched the bowl" and "the bowl was on the table" are observations.
-                    "touch_arm": float(_touching(model, env.data, bowl_geoms, arm_bodies)),
-                    "touch_table": float(_touching(model, env.data, bowl_geoms, {0})),
+                    "touch_arm": float(touching(model, env.data, bowl_geoms, arm_bodies)),
+                    "touch_table": float(touching(model, env.data, bowl_geoms, {0})),
                     "bowl_mm": float(np.linalg.norm(bowl_centre - bowl_start)) * 1000.0,
                     # The two numbers that decide whether the task happened at all, and
                     # which displacement alone cannot: where the bowl is against the plate,
