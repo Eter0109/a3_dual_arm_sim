@@ -174,6 +174,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _grasp_timing(trace: dict[str, np.ndarray]) -> str:
+    """Did the gripper close while it was on the bowl, or after it had left it?
+
+    The order matters more than either number on its own.  A policy that shuts on the
+    object and one that shuts a hundred steps after walking away from it produce the same
+    grip-rate and the same "it touched the bowl" summary, while being different failures
+    with different causes -- so the sequence is reported as a sentence rather than left to
+    be reconstructed from two column maxima.
+    """
+
+    contact = np.flatnonzero(trace["touch_arm"] > 0)
+    closed = np.flatnonzero(trace["gripper"] < 0.05)
+    if not len(contact):
+        return "the bowl was never touched"
+    first_touch, last_touch = int(contact.min()), int(contact.max())
+    if not len(closed):
+        return f"touched on steps {first_touch}-{last_touch}, and the gripper never closed"
+    first_close = int(closed[0])
+    if first_close < first_touch:
+        return "the gripper was already shut when it arrived"
+    if first_close <= last_touch:
+        return (f"the gripper closed on step {first_close}, while it was still on the bowl"
+                f" (touched {first_touch}-{last_touch})")
+    return (f"touched on steps {first_touch}-{last_touch}, but the gripper did not close "
+            f"until step {first_close} -- {first_close - last_touch} steps after it had "
+            f"left")
+
+
 def _verdict(trace: dict[str, np.ndarray], plate_radius_m: float) -> tuple[bool, str]:
     """Was the bowl put on the plate, and if not, which part of it missed?
 
@@ -325,7 +353,8 @@ def main() -> int:
             f"{trace['bowl_plate_mm'][-1]:.1f} mm (best "
             f"{trace['bowl_plate_mm'].min():.1f}), height "
             f"{trace['bowl_height_mm'].max():+.1f} peak / "
-            f"{trace['bowl_height_mm'][-1]:+.1f} at the end  ->  {reason}",
+            f"{trace['bowl_height_mm'][-1]:+.1f} at the end  ->  {reason}\n"
+            f"        {_grasp_timing(trace)}",
             flush=True,
         )
 
