@@ -197,6 +197,7 @@ def infer(model: dict[str, Any], request: Any) -> dict[str, Any]:
     # from LIBERO's.
     raw_low = float(chunk.min())
     raw_high = float(chunk.max())
+    raw_first_row = chunk[0].copy()
     chunk = chunk.clip(-1.0, 1.0)
     model["raw_low"] = min(model.get("raw_low", raw_low), raw_low)
     model["raw_high"] = max(model.get("raw_high", raw_high), raw_high)
@@ -238,5 +239,11 @@ def infer(model: dict[str, Any], request: Any) -> dict[str, Any]:
             "libero_chunk_available": int(chunk.shape[0]),
             "libero_raw_low": round(float(model.get("raw_low", 0.0)), 3),
             "libero_raw_high": round(float(model.get("raw_high", 0.0)), 3),
+            # The model's own first row, before clipping.  Exposed because the bridge hands
+            # the caller *joint targets* -- `gateway.act` returns the post-IK 16-wide
+            # vector -- so a caller that wants to know how big a Cartesian step the model
+            # asked for has no other way to see it, and reading `act`'s first three
+            # entries as metres is a factor of about fifty out.
+            "libero_command": [round(float(v), 4) for v in raw_first_row],
         },
     }
