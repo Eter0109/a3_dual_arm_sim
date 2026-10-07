@@ -239,8 +239,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             self.config.home.grippers[1],
         ]
         self._apply_controls(home_action)
-        for _ in range(100):
-            mujoco.mj_step(self.model, self.data)
+        self.settle()
         self.data.time = 0.0
         self._max_recorded_gripper_force = 0.0
         self._last_applied_action = np.asarray(home_action, dtype=np.float64)
@@ -361,19 +360,29 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
         return command
 
-    def _torque_hold(self) -> None:
-        """Stop a torque-driven arm moving during the steps a reset runs.
+    def settle(self, steps: int = 100) -> None:
+        """Run ``steps`` of physics while **holding** the pose, as a reset does.
 
-        The reset path hands the deployment home's joint angles to `_apply_controls`, which is
-        the right thing for a position servo and the wrong thing for a motor; see
-        `osc.OperationalSpaceAdapter.hold`.
+        A torque-driven arm cannot be left to a one-shot bias force.  Balancing gravity exactly
+        is a *neutral* equilibrium with no restoring term -- it neither holds the pose nor
+        returns to it, so any numerical perturbation is free to grow.  Measured at LIBERO's
+        home: the arm ended 8.48 degrees out with the bias force, and **44.7** when that force
+        was recomputed from the pose it was actually holding, which is the wrong direction for
+        a better force and the right one for no force at all.
+
+        What holds a pose is a controller.  So the operational-space loop is closed here, one
+        control step at a time, with a zero delta -- which asks for exactly "stay where you
+        are".  A position-servo arm needs none of this: its servo is already a restoring term.
         """
 
-        if not isinstance(self._ik, OperationalSpaceAdapter):
-            return
-        hold = self._ik.hold(self.data)
-        for index, name in enumerate(LEFT_JOINTS):
-            self.data.ctrl[self._actuator_ids[name]] = hold[index]
+        close_the_loop = isinstance(self._ik, OperationalSpaceAdapter)
+        zero = np.zeros(CARTESIAN_ACTION_DIM, dtype=np.float64)
+        for _ in range(steps):
+            if close_the_loop:
+                hold = self._ik.convert(self.data, zero)
+                for index, name in enumerate(LEFT_JOINTS):
+                    self.data.ctrl[self._actuator_ids[name]] = hold[index]
+            mujoco.mj_step(self.model, self.data)
 
     def _apply_controls(self, canonical: np.ndarray) -> None:
         arm_values = np.r_[canonical[:7], canonical[8:15]]

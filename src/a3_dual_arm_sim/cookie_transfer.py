@@ -526,12 +526,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
                 self.data.qvel[self.model.jnt_dofadr[joint_id]] = 0.0
         self._last_applied_action = home.copy()
         self._apply_controls(home)
-        # A torque-driven arm is handed its bias force instead, or the settling steps walk it
-        # away from the pose it was just put in.  See `A3DualArmEnv._torque_hold`.
-        self._torque_hold()
-        mujoco.mj_forward(self.model, self.data)
-        for _ in range(100):
-            mujoco.mj_step(self.model, self.data)
+        self.settle()
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
             # The layout is expressed in the source bin's own frame, so the bin's
             # drawn pose carries the Cookies: rotate about the bin centre first,
