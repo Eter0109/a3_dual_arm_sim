@@ -1504,6 +1504,18 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         # workspace would be one more thing to collide with, and `L_eef` has to be the
         # Panda's grasp point anyway or the state would name a frame the pictures do not.
         panda_joints = _add_libero_panda(root, world, config)
+        # The **right** arm stays a mechanism -- its joints drive the fourteen-wide interface,
+        # its wrist camera is one of the three this harness requires -- and leaves the picture
+        # and the contact list.  LIBERO's own pictures contain one arm, and a second one is the
+        # largest thing in this scene's agentview that LIBERO's policy has never seen: measured,
+        # the arm occupies the middle of the frame at every point of the episode.
+        hidden = base.find(f"body[@name='{source_joints[RIGHT_JOINTS[0]].child}']")
+        if hidden is None:
+            raise RuntimeError("the right arm's root body is not where it was expected")
+        for geom in hidden.iter("geom"):
+            geom.set("rgba", "0 0 0 0")
+            geom.set("contype", "0")
+            geom.set("conaffinity", "0")
     else:
         add_chain(base, source_joints[LEFT_JOINTS[0]], "left")
 
