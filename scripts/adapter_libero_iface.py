@@ -31,19 +31,30 @@ cleanly, and three choices had to be made:
   is that difference, so the policy sees its familiar hover pose at rest.  A pure
   translation is the right operation for this, because the action is a world-frame delta
   and a translation does not change world-frame directions.
-* **Orientation is reported relative to the hover pose.**  This used to be passed through
-  unchanged, on the argument that the two grippers are mounted differently and that hiding
-  the difference would make the state look right while the *images* still showed this robot.
-  The second half of that is true and remains true -- no state convention makes a Robotiq
-  look like a Panda.  The first half was a guess, and it was wrong: LIBERO's end-effector
-  frame is **world-aligned at hover**, measured at 3.2 degrees, so the policy has only ever
-  seen this input read about zero at rest.  This arm's reads **120.0 degrees**.  Every
-  rollout therefore began by telling the policy its gripper was facing a direction it had
-  never been trained on -- while the *position* half of the same state was already being
-  translated to LIBERO's hover exactly, an asymmetry nobody had noticed.
+* **Orientation is reported in LIBERO's end-effector frame.**  This has now been got wrong
+  twice, in opposite directions, and both times the *numbers looked plausible*.
 
-  So the orientation is now expressed the same way: see `home_referenced_axis_angle`.  It is
-  a constant built from one measurement, not a calibration, and it costs three multiplies.
+  First it was passed through unchanged -- this arm's frame has no relation to LIBERO's, so
+  it read 120 degrees at rest.  Then it was expressed relative to this arm's own home, on
+  the argument that "LIBERO's frame is world-aligned at hover, measured at 3.2 degrees, so
+  the policy has only ever seen this input read about zero at rest".  That argument rested
+  on reading LIBERO's quaternion as ``(w, x, y, z)``.  `LiberoProcessorStep._quat2axisangle`
+  takes ``(x, y, z, w)`` -- its own docstring says so -- and read correctly LIBERO's
+  **starting** orientation is ``(3.1409, -0.0028, -0.0877)``: **180.03 degrees about world
+  +x**.  So the second version replaced a 120 degree error with a 180 degree one, and it
+  looked like a fix, because both readings are "a rotation" and only one of them is what the
+  policy was trained on.
+
+  There is a second trap in the same three numbers: the position half is
+  `site_xpos[gripper0_grip_site]` while the orientation half is `get_body_xquat` of
+  `robot0_right_hand` -- a *different* body, 97 mm above the grip point.  One state vector,
+  two frames, and neither of them named in the observation.
+
+  What belongs here is the constant relating the two arms' end-effector frames, measured at
+  their homes by `scripts/measure_state_convention.py`: 121.8 degrees, carrying this arm's
+  tool axis (+y) onto LIBERO's approach axis (+z).  With it the eight-wide state equals
+  LIBERO's at the start of an episode, position and orientation both.  See
+  `libero_frame_axis_angle` and the `state_rotation_reference` config key.
 * **The gripper is scaled into metres and mirrored.**  LIBERO's `gripper_qpos` is two
   finger joints in metres, mirrored about zero (`[+0.04, −0.04]` fully open); this arm
   reports one normalised opening in `[0, 1]`.  `gripper_scale` converts, because the
@@ -62,6 +73,10 @@ Config (``--config key=value``)
 ``ckpt``           checkpoint, default ``lerobot/pi05_libero_finetuned``
 ``state_offset``   ``x,y,z`` translation from A3's eef frame into LIBERO's
 ``gripper_scale``  metres per unit of A3 jaw opening, default 0.04
+``state_rotation_reference``  ``home`` | ``absolute`` | ``w,x,y,z`` -- which frame the three
+orientation numbers are measured from.  ``home`` is this arm's home inverted, i.e. the
+behaviour every run before this key existed was measured under; four numbers are the
+constant that makes the reading equal LIBERO's.
 ``device``         ``cuda`` (default) or ``cpu``
 ``cameras``        request slot names in LIBERO's order: agentview first, wrist second
 """
@@ -126,20 +141,56 @@ def quaternion_product(a: tuple, b: tuple) -> tuple[float, float, float, float]:
     )
 
 
-def home_referenced_axis_angle(quaternion: tuple) -> list[float]:
-    """An end-effector orientation as LIBERO reports it: relative to the hover pose.
+def libero_frame_axis_angle(quaternion: tuple, reference: tuple) -> list[float]:
+    """An end-effector orientation in LIBERO's own frame: ``current * reference``.
 
-    ``current * home^-1`` -- a *right* multiplication, so that a rotation applied in world
-    axes is reported about those world axes.  The left-multiplied form ``home^-1 * current``
-    also reads zero at hover, and it is wrong: it reports a turn about world z as a turn
-    about whatever direction z happens to lie along in the home frame, which here is 120
-    degrees away.  Verified by feeding it a known 90 degree world rotation and checking that
-    the report comes back as 90 degrees about world z, rather than about world -y.
+    A *right* multiplication, so that a rotation applied in world axes is reported about
+    those world axes; the left-multiplied form reports a turn about world z as a turn about
+    whatever direction z happens to lie along in the reference frame, which here is 120
+    degrees away.  Verified by feeding it a known 90 degree world rotation.
+
+    ``reference`` is what the three numbers are measured *from*, and it is not a free
+    choice.  It used to be this arm's own home quaternion inverted, on the argument that
+    LIBERO's report is also about zero at its hover -- which rested on reading LIBERO's
+    quaternion as ``(w, x, y, z)`` when `LiberoProcessorStep._quat2axisangle` documents and
+    reads ``(x, y, z, w)``.  Read correctly, LIBERO's **starting** orientation is
+    ``(3.1409, -0.0028, -0.0877)`` -- 180.03 degrees about world +x -- and this arm was
+    reporting ``(0, 0, 0)``.  Half a turn, on the first input the policy sees.
+
+    What belongs here is the constant relating the two arms' end-effector frames, measured
+    at their homes by `scripts/measure_state_convention.py`: for this arm it is a 121.8
+    degree rotation that carries the tool axis (+y here) onto LIBERO's approach axis (+z
+    there), and applying it makes the eight-wide state equal LIBERO's at the start of an
+    episode -- both halves, not just the position.
     """
 
-    inverse = (HOME_QUATERNION[0], -HOME_QUATERNION[1],
-               -HOME_QUATERNION[2], -HOME_QUATERNION[3])
-    return axis_angle_from_wxyz(quaternion_product(quaternion, inverse))
+    return axis_angle_from_wxyz(quaternion_product(quaternion, reference))
+
+
+def rotation_reference(text: str) -> tuple[float, float, float, float]:
+    """Parse ``state_rotation_reference``: ``home``, ``absolute``, or ``w,x,y,z``.
+
+    ``home`` is this arm's home quaternion **inverted** -- what the previous version of this
+    adapter always used, kept so manifests that do not name a reference keep the behaviour
+    their numbers were measured under.  ``absolute`` reports the frame itself, which is what
+    a robot whose end-effector frame already is LIBERO's wants.  Four numbers are a
+    right-multiplied constant, which is the general form.
+    """
+
+    value = text.strip()
+    if not value or value.lower() == "home":
+        return (HOME_QUATERNION[0], -HOME_QUATERNION[1],
+                -HOME_QUATERNION[2], -HOME_QUATERNION[3])
+    if value.lower() == "absolute":
+        return (1.0, 0.0, 0.0, 0.0)
+    parts = tuple(float(v) for v in value.split(",") if v.strip())
+    if len(parts) != 4:
+        raise ValueError(
+            "state_rotation_reference wants 'home', 'absolute' or a (w, x, y, z) "
+            f"quaternion; got {text!r}"
+        )
+    return parts
+
 
 #: Fully-open finger travel of LIBERO's Panda gripper, in metres, and its sign flip: the
 #: two fingers are mirrored, so an open gripper reads `[+0.04, -0.04]`.
@@ -186,6 +237,7 @@ def load(config: dict[str, Any]) -> dict[str, Any]:
     device = str(config.get("device", "cuda"))
     offset = parse_vector(str(config.get("state_offset", "-0.3114,-0.2610,0.2541")), 3, "state_offset")
     gripper_scale = float(config.get("gripper_scale", PANDA_FINGER_TRAVEL_M))
+    reference = rotation_reference(str(config.get("state_rotation_reference", "home")))
     names = [n.strip() for n in str(config.get("cameras", ",".join(DEFAULT_CAMERAS))).split(",") if n.strip()]
     if len(names) != 2:
         raise ValueError(f"cameras wants two names (agentview, eye-in-hand), got {names}")
@@ -206,6 +258,7 @@ def load(config: dict[str, Any]) -> dict[str, Any]:
         "checkpoint": checkpoint,
         "offset": np.asarray(offset, dtype=np.float64),
         "gripper_scale": gripper_scale,
+        "rotation_reference": reference,
         "cameras": tuple(names),
         "calls": 0,
     }
@@ -254,9 +307,11 @@ def infer(model: dict[str, Any], request: Any) -> dict[str, Any]:
     eef = np.asarray(request.vector("eef_pose"), dtype=np.float64)  # left arm pos + quat(wxyz)
     opening = float(np.asarray(request.vector("gripper"), dtype=np.float64).reshape(-1)[0])
     position = eef[:3] + model["offset"]
-    # Relative to this arm's home pose, so that at hover it reads about zero the way LIBERO's
-    # does.  See `THIS_ARM_HOME_ROTATION`.
-    rotation = home_referenced_axis_angle(tuple(float(v) for v in eef[3:7]))
+    # Expressed in LIBERO's frame, from whatever constant relates the two end-effector
+    # frames.  See `libero_frame_axis_angle`.
+    rotation = libero_frame_axis_angle(
+        tuple(float(v) for v in eef[3:7]), model["rotation_reference"]
+    )
     fingers = model["gripper_scale"] * opening
     state = np.r_[position, rotation, fingers, -fingers].astype(np.float32)
     batch["observation.state"] = torch.from_numpy(state).unsqueeze(0).to(model["device"])

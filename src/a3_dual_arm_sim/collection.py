@@ -918,26 +918,21 @@ def libero_props_scene(
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
         if matched_cameras:
             loaded = replace(loaded, cameras=_libero_matched_cameras(loaded.cameras))
-            # The arm starts where LIBERO's arm starts, because the state and the picture are
-            # one observation and they have to describe the same hand.  This is the one scene
-            # reproducing a LIBERO episode; the sibling `a3_libero_props` keeps the A3
-            # deployment home its previous numbers were measured under.
+            # **The arm is deliberately left at the A3 deployment home, and that is a
+            # measurement rather than an omission.**  LIBERO starts every episode with its
+            # end effector at (-0.2112, -0.0111, 1.1742) and this arm starts 362 mm away, so
+            # `scripts/solve_libero_home.py` was written to move it there -- and the closest
+            # reachable pose is **26 mm** short with the tool 6 degrees off vertical (102 mm
+            # short, if the orientation is held as well), because `L_WRIST_P` spans only
+            # +/-40 degrees.  Doing it anyway cost the task: the fingers got over the bowl in
+            # **4 of 40** episodes against **39 of 40** from the A3 home, and placements went
+            # from 3 to 1.  A pose that rides the shoulder-roll limit is not a better place to
+            # start from than a pose the arm was built for.
             #
-            # **`deployment_home`, not `home`.**  `A3CookieTransferEnv.reset` calls the scene's
-            # reset -- which does write `config.home` -- and then overwrites the arm's qpos
-            # with `cookie_transfer.deployment_home`, so an edit to `home` is thrown away at
-            # the top of every episode.  Writing the wrong one of those two costs a full run
-            # and looks exactly like "the arm cannot reach that pose": measured, the two
-            # different `home` values produced the *same* settled joint angles to three
-            # decimals, which is what gave it away.
+            # `deployment_home` is what `A3CookieTransferEnv.reset` actually applies -- it
+            # writes `config.home` first and then overwrites the arm's qpos from here, so an
+            # edit to `home` is thrown away at the top of every episode.  That cost a run too.
             deployment = loaded.cookie_transfer.deployment_home
-            loaded = replace(
-                loaded,
-                cookie_transfer=replace(
-                    loaded.cookie_transfer,
-                    deployment_home=tuple(LIBERO_MATCHED_HOME_RAD) + tuple(deployment[7:]),
-                ),
-            )
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
