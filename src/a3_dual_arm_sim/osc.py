@@ -14,21 +14,26 @@ pose* in task space and applies joint **torques** to reach it.
 
 What this is, and what it is not
 --------------------------------
-It is the law robosuite applies, with robosuite's own numbers read out of the controller
-LIBERO configures -- `kp = 150`, `damping_ratio = 1`, `output_max = [0.05 x3, 0.5 x3]`,
-`control_delta = True`, `uncouple_pos_ori = True`:
+It is robosuite's law with robosuite's own numbers, read back off the controller LIBERO
+configures -- `kp = 150` (six-vector), `kd = 2 sqrt(kp) damping_ratio` = 24.4949,
+`output_max = [0.05 x3, 0.5 x3]`, `control_delta = True`, `uncoupling = True`,
+`impedance_mode = "fixed"`, no interpolation:
 
-    tau = J^T ( kp * e_pos + kp * e_rot - kd * J qvel ) + qfrc_bias
+    desired_force  = kp * (goal_pos - pos) - kd * J_pos qvel
+    desired_torque = kp * ori_error       - kd * J_ori qvel
+    wrench         = [ (J_pos M^-1 J_pos^T)^-1 desired_force ;
+                       (J_ori M^-1 J_ori^T)^-1 desired_torque ]
+    tau            = J^T wrench + qfrc_bias + N^T M (kp_n (q0 - q) - kd_n qvel)
 
-with `kd = 2 sqrt(kp) damping_ratio`, `e_rot` the axis-angle of `R_goal R_current^T`, and the
-goal orientation composed as `R_err R_current` -- the world-frame composition robosuite's
-`set_goal_orientation` performs, and the same one `CartesianDeltaAdapter` implements.
+with `ori_error` the axis-angle of `R_goal R_current^T`, the goal orientation composed as
+`R_err R_current` (the world-frame composition `set_goal_orientation` performs, and the same
+one `CartesianDeltaAdapter` implements), and `N = I - Jbar J` the dynamic nullspace projector.
 
-It is **not** robosuite's dynamically consistent inverse: robosuite multiplies the task force
-through `Lambda = (J M^-1 J^T)^-1`, and this uses the plain Jacobian transpose.  Same control
-law, same gains, same goals, same `control_delta` semantics; the difference is a weighting
-inside the loop, and it is stated here rather than hidden.  `ramp_ratio` (robosuite's soft
-start) is not implemented either.
+The position and orientation halves are weighted **separately** because that is what
+`uncouple_pos_ori = True` means; a single 6x6 `Lambda` was tried and is measurably not the
+same loop.  The nullspace term is the third piece robosuite adds and the first version of
+this file did not, and the reference arm's step response is not reproducible without it.
+`ramp_ratio` (robosuite's soft start) does not exist in the version LIBERO pins.
 
 The goal is set from the **current** measurement every control step, which is what
 `control_delta = True` means: a delta is a request relative to where the arm is, not a
@@ -48,6 +53,23 @@ from .contracts import LEFT_JOINTS, RIGHT_JOINTS
 #: robosuite's `OSC_POSE` gains, from the controller LIBERO configures for its Panda.
 KP = 150.0
 DAMPING_RATIO = 1.0
+
+#: The nullspace posture goal, and its gains.
+#:
+#: robosuite adds a third term this file used to leave out: joint torques that pull the arm
+#: towards a reference posture with the gains `joint_kp = 10`, `joint_kv = 2 sqrt(10)`,
+#: projected into the task's null space.  Measured on the live controller LIBERO builds at
+#: reset, `initial_joint` is the constant below -- it is set when the controller is
+#: constructed (`self.initial_joint = self.joint_pos`) and nothing in robosuite or LIBERO
+#: ever calls `update_initial_joints`, so it stays the model's own home rather than the
+#: episode's start pose.
+#:
+#: It matters because the arm is redundant: seven joints for a six-dimensional task leaves
+#: one direction in which the posture can drift without moving the tool, and without this
+#: term nothing pulls it back.  It is also part of why the reference arm's step response is
+#: the shape it is, so it is copied rather than approximated.
+INITIAL_JOINT_RAD = (0.0, -0.161, 0.0, -2.4446, 0.0, 2.2268, 0.7854)
+JOINT_KP = 10.0
 
 
 class OperationalSpaceAdapter:
@@ -70,17 +92,37 @@ class OperationalSpaceAdapter:
         self._left_qpos = tuple(self._qpos_address(name) for name in LEFT_JOINTS)
         self._left_dof = tuple(self._dof_address(name) for name in LEFT_JOINTS)
         self._right_qpos = tuple(self._qpos_address(name) for name in RIGHT_JOINTS)
+        self._actuators = tuple(
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_motor")
+            for name in LEFT_JOINTS
+        )
         self._limits = np.asarray(
-            [
-                model.actuator_ctrlrange[
-                    mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_motor")
-                ]
-                for name in LEFT_JOINTS
-            ],
+            [model.actuator_ctrlrange[actuator] for actuator in self._actuators],
             dtype=np.float64,
         )
         self.kp = KP
         self.kd = 2.0 * math.sqrt(KP) * DAMPING_RATIO
+        self._initial_joint = np.asarray(INITIAL_JOINT_RAD, dtype=np.float64)
+        # The latched goal.  robosuite's `SingleArm.control` sets the goal **once per policy
+        # step** and then calls `run_controller` on **every physics substep**:
+        #
+        #     if policy_step:
+        #         self.controller.set_goal(arm_action)
+        #     torques = self.controller.run_controller()
+        #
+        # so the arm is inside a 500 Hz feedback loop during the twenty-five substeps of a
+        # control step, with a goal that only moves at 20 Hz.  Computing the torque once and
+        # holding it for the whole control step -- which is what this harness did -- is a
+        # different, open-loop-between-steps system, and measurably a faster one: 3.9 mm on
+        # the first step against the reference's 2.8, 64 mm against 52 over ten.
+        self._goal_position: np.ndarray | None = None
+        self._goal_rotation: np.ndarray | None = None
+        self._goal_gripper = 0.5
+        if self._initial_joint.shape != (len(LEFT_JOINTS),):
+            raise RuntimeError(
+                f"the nullspace goal needs one angle per arm joint, got "
+                f"{self._initial_joint.shape}"
+            )
         self._jacobian_position = np.zeros((3, model.nv), dtype=np.float64)
         self._jacobian_rotation = np.zeros((3, model.nv), dtype=np.float64)
 
@@ -95,12 +137,20 @@ class OperationalSpaceAdapter:
         return int(self.model.jnt_dofadr[joint])
 
     def convert(self, data: mujoco.MjData, action: np.ndarray) -> np.ndarray:
+        # Make `data` describe the state the arm is actually in before reading the pose the
+        # goal is built from.  robosuite's `set_goal` opens with `self.update()`, which calls
+        # `sim.forward()` for exactly this reason.  Without it the goal is latched from
+        # whatever `site_xpos` last held -- and a reset that writes `qpos` and goes straight
+        # into settling leaves it holding the *previous* scene's pose: measured, the arm
+        # drove **9.1 degrees** away from the home it had just been given, and sat there.
+        mujoco.mj_forward(self.model, data)
         delta = np.asarray(action, dtype=np.float64).reshape(2, 7)[0]
         position = np.asarray(data.site_xpos[self._site], dtype=np.float64).copy()
         rotation = np.asarray(data.site_xmat[self._site], dtype=np.float64).reshape(3, 3).copy()
 
-        goal_position = position + delta[:3] * self.config.cartesian_translation_scale_m
-        goal_rotation = rotation.copy()
+        self._goal_gripper = (float(delta[6]) + 1.0) / 2.0
+        self._goal_position = position + delta[:3] * self.config.cartesian_translation_scale_m
+        self._goal_rotation = rotation.copy()
         if np.any(np.abs(delta[3:6]) > 1e-4):
             # `mju_quatIntegrate` composes about the *tool's* axes; expressing the delta in
             # those axes makes it `exp(delta) @ q`, which is the world-frame composition
@@ -116,8 +166,36 @@ class OperationalSpaceAdapter:
             # a rendering failure.
             flat = np.empty(9, dtype=np.float64)
             mujoco.mju_quat2Mat(flat, goal_quaternion)
-            goal_rotation = flat.reshape(3, 3)
+            self._goal_rotation = flat.reshape(3, 3)
 
+        return self._control(data)
+
+    def retorque(self, data: mujoco.MjData) -> None:
+        """Recompute the arm's torques for the latched goal and write them to `ctrl`.
+
+        Call this before **every** physics substep of a control step, which is what
+        robosuite does: the goal is held, the loop is not.  The caller is responsible for
+        making `data` current first (`mj_forward`), for the same reason robosuite calls
+        `sim.forward()` at the top of each substep.
+        """
+
+        if self._goal_position is None:
+            raise RuntimeError("retorque needs a goal; call convert() first")
+        for actuator, torque in zip(self._actuators, self._arm_torque(data), strict=True):
+            data.ctrl[actuator] = torque
+
+    def _control(self, data: mujoco.MjData) -> np.ndarray:
+        torque = self._arm_torque(data)
+        right = np.asarray([data.qpos[address] for address in self._right_qpos], dtype=np.float64)
+        return np.ascontiguousarray(
+            np.r_[torque, self._goal_gripper, right, 1.0], dtype=np.float64
+        )
+
+    def _arm_torque(self, data: mujoco.MjData) -> np.ndarray:
+        assert self._goal_position is not None and self._goal_rotation is not None
+        position = np.asarray(data.site_xpos[self._site], dtype=np.float64).copy()
+        rotation = np.asarray(data.site_xmat[self._site], dtype=np.float64).reshape(3, 3).copy()
+        goal_position, goal_rotation = self._goal_position, self._goal_rotation
         mujoco.mj_jacSite(
             self.model, data, self._jacobian_position, self._jacobian_rotation, self._site
         )
@@ -135,34 +213,54 @@ class OperationalSpaceAdapter:
         mujoco.mju_subQuat(rotation_error, goal_quaternion, current_quaternion)
 
         velocity = data.qvel[np.asarray(self._left_dof, dtype=np.int32)]
-        task_velocity = jacobian @ velocity
-        error = np.r_[
-            self.kp * (goal_position - position),
-            self.kp * rotation_error,
-        ]
-        # **The dynamically consistent inverse, which is what makes the gains mean what
-        # robosuite says they mean.**  The plain Jacobian transpose was tried first and is not
-        # equivalent: a full +x command moved the tool **124 mm** where robosuite's
-        # `output_max` is 50, because an unweighted task force on a light arm is an
-        # acceleration the gains were never scaled for.  robosuite multiplies the task force
-        # through `Lambda = (J M^-1 J^T)^-1`, so the loop behaves as the second-order system
-        # `kp` and `damping_ratio` describe whatever the arm's inertia is.
+        position_velocity = self._jacobian_position[:, self._left_dof] @ velocity
+        rotation_velocity = self._jacobian_rotation[:, self._left_dof] @ velocity
+        # robosuite's `run_controller`, term for term:
+        #
+        #     desired_force  = kp * position_error  + kd * (-ee_pos_vel)
+        #     desired_torque = kp * ori_error       + kd * (-ee_ori_vel)
+        #
+        # with `kp` and `kd` six-vectors and `kd = 2 sqrt(kp) damping_ratio`.
+        desired_force = self.kp * (goal_position - position) - self.kd * position_velocity
+        desired_torque = self.kp * rotation_error - self.kd * rotation_velocity
+
         dofs = np.asarray(self._left_dof, dtype=np.int32)
         mass = np.zeros((self.model.nv, self.model.nv), dtype=np.float64)
         mujoco.mj_fullM(self.model, mass, data.qM)
         arm_mass = mass[np.ix_(dofs, dofs)]
-        lam = jacobian @ np.linalg.inv(arm_mass) @ jacobian.T
-        lam = np.linalg.inv(lam + 1e-9 * np.eye(6))
-        torque = jacobian.T @ (lam @ (error - self.kd * task_velocity))
+        arm_mass_inv = np.linalg.inv(arm_mass)
+        # **`uncouple_pos_ori=True`, which is what LIBERO configures.**  robosuite weights
+        # the position force through `Lambda_pos = (J_pos M^-1 J_pos^T)^-1` and the
+        # orientation torque through `Lambda_ori` *separately*, not through one 6x6
+        # `Lambda_full`.  Measured, this is the difference between the arm delivering 7.6 mm
+        # of a 25 mm command per control step and 6.0 mm; the coupling between the position
+        # and orientation halves is what the reference arm does not have.
+        lambda_pos = np.linalg.pinv(
+            self._jacobian_position[:, self._left_dof] @ arm_mass_inv
+            @ self._jacobian_position[:, self._left_dof].T
+        )
+        lambda_ori = np.linalg.pinv(
+            self._jacobian_rotation[:, self._left_dof] @ arm_mass_inv
+            @ self._jacobian_rotation[:, self._left_dof].T
+        )
+        decoupled = np.r_[lambda_pos @ desired_force, lambda_ori @ desired_torque]
+        torque = jacobian.T @ decoupled
         # Gravity and Coriolis, so the loop only has to do the tracking.  This is the term
         # the joint-position servo got for free from being a servo.
         torque = torque + data.qfrc_bias[dofs]
-        torque = np.clip(torque, self._limits[:, 0], self._limits[:, 1])
-
-        right = np.asarray([data.qpos[address] for address in self._right_qpos], dtype=np.float64)
-        return np.ascontiguousarray(
-            np.r_[torque, (delta[6] + 1.0) / 2.0, right, 1.0], dtype=np.float64
+        # The nullspace term.  `nullspace_matrix = I - Jbar J`, with
+        # `Jbar = M^-1 J^T Lambda_full` -- the full 6x6 Lambda, unlike the task term above,
+        # because this is the projector and not the control.
+        lambda_full = np.linalg.pinv(jacobian @ arm_mass_inv @ jacobian.T)
+        jacobian_bar = arm_mass_inv @ jacobian.T @ lambda_full
+        nullspace = np.eye(len(dofs)) - jacobian_bar @ jacobian
+        posture = arm_mass @ (
+            JOINT_KP
+            * (self._initial_joint - data.qpos[np.asarray(self._left_qpos, dtype=np.int32)])
+            - 2.0 * math.sqrt(JOINT_KP) * velocity
         )
+        torque = torque + nullspace.T @ posture
+        return np.clip(torque, self._limits[:, 0], self._limits[:, 1])
 
     def hold(self, data: mujoco.MjData) -> np.ndarray:
         """The torques that hold the arm where it already is, for a reset's settling steps.

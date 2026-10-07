@@ -73,9 +73,21 @@ class ActionBridge:
             # joint-position servo does not survive that swap, measured both ways round --
             # see `osc.OperationalSpaceAdapter`.
             if getattr(env.config, "left_arm", "a3") == "panda":
-                self._ik = OperationalSpaceAdapter(
-                    env.model, env.config, site="gripper0_grip_site"
-                )
+                # **Share the environment's controller, do not build a second one.**  The
+                # adapter latches a goal, and the environment's substep loop re-computes the
+                # arm's torques for *its* adapter's goal every 2 ms -- which is the whole
+                # point of the 500 Hz loop.  Two adapters would mean two goals, and the
+                # environment's (latched at reset) would silently overwrite every command
+                # this bridge converts: measured, the arm did not move at all, 0.00 mm for a
+                # command worth 25.
+                shared = getattr(env, "ik", None)
+                if isinstance(shared, OperationalSpaceAdapter):
+                    self._ik = shared
+                else:
+                    self._ik = OperationalSpaceAdapter(
+                        env.model, env.config, site="gripper0_grip_site"
+                    )
+                    env.ik = self._ik
             else:
                 self._ik = CartesianDeltaAdapter(env.model, env.config)
             if spec.dim != CARTESIAN_ACTION_DIM:

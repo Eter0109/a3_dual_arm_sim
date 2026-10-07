@@ -316,6 +316,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             applied = self._limit_joint_action(canonical)
             self._apply_controls(applied)
             for _ in range(self.config.substeps):
+                self._refresh_operational_space()
                 mujoco.mj_step(self.model, self.data)
                 if not np.all(np.isfinite(self.data.qpos)) or not np.all(
                     np.isfinite(self.data.qvel)
@@ -404,10 +405,58 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         zero = np.zeros(CARTESIAN_ACTION_DIM, dtype=np.float64)
         for _ in range(steps):
             if close_the_loop:
-                hold = self._ik.convert(self.data, zero)
-                for index, name in enumerate(LEFT_JOINTS):
-                    self.data.ctrl[self._actuator_ids[name]] = hold[index]
+                # Latch the goal at the current pose, then hold it for a whole control
+                # step's worth of substeps -- the same shape as `step`, so the settling is
+                # the same loop the policy will drive.
+                self._ik.convert(self.data, zero)
+                for _ in range(self.config.substeps):
+                    self._refresh_operational_space()
+                    mujoco.mj_step(self.model, self.data)
+                continue
             mujoco.mj_step(self.model, self.data)
+
+    @property
+    def ik(self):
+        """The left arm's Cartesian controller, so the bridge can share this one.
+
+        One controller and therefore one goal.  The substep loop re-computes the arm's
+        torques from **this** adapter's latched goal every 2 ms; a bridge holding its own
+        adapter would latch a goal nobody reads, and every command it converted would be
+        overwritten before the first physics step.
+        """
+
+        return self._ik
+
+    @ik.setter
+    def ik(self, value) -> None:
+        self._ik = value
+
+    def _refresh_operational_space(self) -> None:
+        """Recompute the operational-space torque for the goal this control step latched.
+
+        robosuite's `SingleArm.control` sets the goal **once per policy step** and then calls
+        `run_controller` on **every physics substep**:
+
+            if policy_step:
+                self.controller.set_goal(arm_action)
+            torques = self.controller.run_controller()
+
+        so its arm sits in a 500 Hz feedback loop for the twenty-five substeps of a control
+        step, with a goal that only moves at 20 Hz.  Computing the torque once and holding it
+        for the whole control step -- what this harness did until now -- is a different
+        system, and measurably a quicker one: 3.9 mm on the first step of a 25 mm command
+        against the reference's 2.8, and 64 mm against 52 over ten steps.
+
+        `mj_forward` first: after `mj_step` the derived quantities still describe the state
+        at the *start* of that step, and the torque has to be computed from the state the arm
+        is actually in.  robosuite does exactly this, with `sim.forward()` at the top of each
+        substep.
+        """
+
+        if not isinstance(self._ik, OperationalSpaceAdapter):
+            return
+        mujoco.mj_forward(self.model, self.data)
+        self._ik.retorque(self.data)
 
     def _apply_controls(self, canonical: np.ndarray) -> None:
         arm_values = np.r_[canonical[:7], canonical[8:15]]
