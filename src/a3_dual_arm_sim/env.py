@@ -135,9 +135,34 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 for joint_id in self._finger_joints[side]
             )
             self._finger_sign[side] = tuple(
-                1.0 if float(self.model.jnt_range[joint_id][1]) >= 0.0 else -1.0
+                # The sign of the joint coordinate at the **travel** end of its range: the
+                # end with the larger magnitude.  Not `upper >= 0`, which is what this was,
+                # and which silently gave the Panda's outer jaw +1 -- its range is
+                # [-0.04, 0], so its upper bound *is* zero.  The jaw was then commanded out
+                # of its own control range, clipped to zero, and never moved: one jaw of a
+                # two-jaw gripper, with the state reporting half an opening (0.486 against
+                # LIBERO's 0.97 at the same pose) because only one of the two `|q|` was ever
+                # nonzero.
+                1.0
+                if abs(float(self.model.jnt_range[joint_id][1]))
+                >= abs(float(self.model.jnt_range[joint_id][0]))
+                else -1.0
                 for joint_id in self._finger_joints[side]
             )
+        # Which end of the travel is "open" is a property of the mechanism, and the two
+        # grippers in this scene disagree about it.  The A3's jaws read **zero when they are
+        # apart** and close towards their travel; robosuite's Panda reads zero when they are
+        # *together* and opens to +/-0.04.  Each is self-consistent, so the formula below is
+        # right for exactly one of them -- and it cannot be inferred from the ranges, because
+        # the A3's joints are one-signed ([0, 0.0425]) while the Panda's are mirrored
+        # ([0, 0.04] and [-0.04, 0]).  So it is stated, not guessed.
+        #
+        # Getting it wrong is not cosmetic: `opening` is what the eight-wide state reports,
+        # and with the Panda's jaws held closed the state told the policy they were open --
+        # the exact opposite of LIBERO's `robot0_gripper_qpos`, which is [0.0387, -0.0387]
+        # at the start of every one of its episodes.
+        panda_left = getattr(self.config, "left_arm", "a3") == "panda"
+        self._finger_open_at_zero = {"L": not panda_left, "R": True}
         self._eef_sites = (
             self._id(mujoco.mjtObj.mjOBJ_SITE, "L_eef"),
             self._id(mujoco.mjtObj.mjOBJ_SITE, "R_eef"),
@@ -225,7 +250,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             limits = self.model.jnt_range[joint_id]
             self.data.qpos[self._qpos_ids[name]] = np.clip(value, limits[0], limits[1])
         for side, opening in zip(("L", "R"), self.config.home.grippers, strict=True):
-            physical = (1.0 - np.clip(opening, 0.0, 1.0)) * self._finger_travel[side]
+            physical = self._finger_travel_fraction(side, opening) * self._finger_travel[side]
             for sign, joint_id in zip(
                 self._finger_sign[side], self._finger_joints[side], strict=True
             ):
@@ -389,11 +414,20 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):
             self.data.ctrl[self._actuator_ids[name]] = value
         for side, opening in zip(("L", "R"), (canonical[7], canonical[15]), strict=True):
-            value = (1.0 - float(opening)) * self._finger_travel[side]
+            value = self._finger_travel_fraction(side, opening) * self._finger_travel[side]
             for sign, actuator_id in zip(
                 self._finger_sign[side], self._finger_actuators[side], strict=True
             ):
                 self.data.ctrl[actuator_id] = sign * value
+
+    def _finger_travel_fraction(self, side: str, opening: float) -> float:
+        """The fraction of the jaw travel that ``opening`` commands.
+
+        One definition, shared by the reset, the servo and the state read, so the polarity
+        in `_finger_open_at_zero` cannot drift between the three places it matters.
+        """
+        value = float(np.clip(opening, 0.0, 1.0))
+        return (1.0 - value) if self._finger_open_at_zero[side] else value
 
     def _current_joint_action(self) -> np.ndarray:
         left = [self.data.qpos[self._qpos_ids[name]] for name in LEFT_JOINTS]
@@ -409,8 +443,12 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             velocities.append(self.data.qvel[self.model.jnt_dofadr[joint_id]])
         travel = self._finger_travel[side]
         signs = self._finger_sign[side]
-        opening = 1.0 - np.mean([abs(p) for p in positions]) / travel
-        rate = -np.mean([sign * v for sign, v in zip(signs, velocities, strict=True)]) / travel
+        fraction = np.mean([abs(p) for p in positions]) / travel
+        drift = np.mean([sign * v for sign, v in zip(signs, velocities, strict=True)]) / travel
+        if self._finger_open_at_zero[side]:
+            opening, rate = 1.0 - fraction, -drift
+        else:
+            opening, rate = fraction, drift
         return (float(opening), float(rate))
 
     def _sensor(self, name: str) -> np.ndarray:
@@ -462,6 +500,28 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         validate_observation(observation)
         return observation
 
+    @staticmethod
+    def _reference_orientation(image: np.ndarray) -> np.ndarray:
+        """Mirror a camera image the way the reference stack does.
+
+        LeRobot wraps LIBERO's ``OffScreenRenderEnv`` and rotates every camera
+        image 180 degrees before the policy sees it -- ``lerobot/envs/libero.py``
+        line 227: ``image = image[::-1, ::-1]  # flip both H and W``.  LIBERO's own
+        buffer is bottom-up (``obs["agentview_image"]`` is its ``sim.render`` byte
+        for byte -- measured MSE 0.0 against all four orientations), so that
+        ``[::-1]`` restores the upright orientation and the ``[:, ::-1]`` is a
+        horizontal mirror *on top of* it.  The checkpoint was both trained and
+        evaluated through that wrapper, so the image it expects is the horizontal
+        mirror of the true camera view: measured against a frame of the official
+        eval video, ``raw[::-1, ::-1]`` scores MSE 505 where ``raw`` scores 6190.
+
+        ``mujoco.Renderer`` already hands back the upright image, so only the
+        second of those two flips has to happen here.  Feeding the unmirrored view
+        shows the policy a scene with left and right swapped, which is worth about
+        twice the lateral offset of whatever it has been asked to reach.
+        """
+        return np.ascontiguousarray(image[:, ::-1])
+
     def _render_camera(self, name: str) -> np.ndarray:
         if not self.render_cameras:
             return np.zeros((self.config.image_height, self.config.image_width, 3), dtype=np.uint8)
@@ -473,7 +533,9 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
         self._renderer.update_scene(self.data, camera=self._camera_ids[name])
         self._apply_render_flags(self._renderer.scene)
-        return np.ascontiguousarray(self._renderer.render(), dtype=np.uint8)
+        return self._reference_orientation(
+            np.ascontiguousarray(self._renderer.render(), dtype=np.uint8)
+        )
 
     def _apply_render_flags(self, scene: Any) -> None:
         """Force the configured light passes on every frame.
@@ -524,7 +586,11 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             self._view_renderers[(height, width)] = renderer
         renderer.update_scene(self.data, camera=self._camera_ids[camera])
         self._apply_render_flags(renderer.scene)
-        return np.ascontiguousarray(renderer.render(), dtype=np.uint8)
+        # Same mirror as the policy cameras: a human comparing a recording against
+        # LIBERO's own eval videos is looking at the pixels the policy was served.
+        return self._reference_orientation(
+            np.ascontiguousarray(renderer.render(), dtype=np.uint8)
+        )
 
     def _ensure_viewer(self) -> None:
         if self._viewer is None:

@@ -232,27 +232,38 @@ class Composer:
         frame.paste(chart.render(), (0, self.height - self.chart_height))
 
         # The text sits over the scene view only, so it never covers the policy cameras or
-        # the chart; each line gets its own black plate rather than one shared sheet, so a
-        # short line does not black out scene it does not use.  One size for all of them,
-        # chosen from the longest, so the block reads as a block.
+        # the chart, and each line gets its own plate rather than one shared sheet, so a short
+        # line does not dim scene it does not use.  One size for all of them, chosen from the
+        # longest, so the block reads as a block.
+        # Lay the text out along the **bottom** of the scene view, over a semi-transparent
+        # plate.
+        #
         draw = ImageDraw.Draw(frame)
         body_width = (self.view_size or self.width) - 16
         heading = fits(list(title), self._hud_font.size, body_width)
         body = fits(lines, max(11, self._hud_font.size - 6), body_width)
-        y = 4
-        for index, line in enumerate(title):
-            box = draw.textbbox((0, 0), line, font=heading)
-            draw.rectangle((0, y, min(body_width + 16, box[2] + 14),
-                            y + (box[3] - box[1]) + 8), fill=(0, 0, 0))
-            draw.text((8, y + 3), line, font=heading,
-                      fill=(120, 255, 160) if index == 0 else (215, 215, 215))
-            y += (box[3] - box[1]) + 10
-        for line in lines:
-            box = draw.textbbox((0, 0), line, font=body)
-            draw.rectangle((0, y, min(body_width + 16, box[2] + 14),
-                            y + (box[3] - box[1]) + 6), fill=(0, 0, 0))
-            draw.text((8, y + 2), line, font=body, fill=(255, 255, 255))
-            y += (box[3] - box[1]) + 8
+        entries = [
+            (line, heading, (120, 255, 160) if index == 0 else (215, 215, 215))
+            for index, line in enumerate(title)
+        ] + [(line, body, (255, 255, 255)) for line in lines]
+        heights = [draw.textbbox((0, 0), text, font=font)[3] + 8 for text, font, _ in entries]
+        block = sum(heights)
+        top = max(0, (self.view_size or self.height) - block - 6)
+
+        sheets = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        brush = ImageDraw.Draw(sheets)
+        y = top
+        for (text, font, _), height in zip(entries, heights, strict=True):
+            width = min(body_width + 16, draw.textbbox((0, 0), text, font=font)[2] + 14)
+            brush.rectangle((0, y, width, y + height), fill=(0, 0, 0, 135))
+            y += height
+        frame = Image.alpha_composite(frame.convert("RGBA"), sheets).convert("RGB")
+
+        draw = ImageDraw.Draw(frame)
+        y = top
+        for (text, font, colour), height in zip(entries, heights, strict=True):
+            draw.text((8, y + 2), text, font=font, fill=colour)
+            y += height
         return np.asarray(frame, dtype=np.uint8)
 
 

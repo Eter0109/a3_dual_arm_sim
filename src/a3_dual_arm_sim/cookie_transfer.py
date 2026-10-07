@@ -44,6 +44,11 @@ def _rotate_xy(vector: np.ndarray, yaw: float) -> np.ndarray:
     )
 
 
+#: Jaw opening at the start of a LIBERO episode, in metres.  LIBERO's own
+#: `robot0_gripper_qpos` is [0.0387, -0.0387], read from the reset its evaluation uses.
+LIBERO_PANDA_FINGER_OPEN_M = 0.0387
+
+
 @dataclass(frozen=True)
 class CookieTransferTaskConfig:
     cookie_count: int = 80
@@ -520,9 +525,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):
             self.data.qpos[self._qpos_ids[name]] = value
             self.data.qvel[self._dof_ids[name]] = 0.0
+        # Every one of LIBERO's own episodes starts with the jaws **open**: its
+        # `robot0_gripper_qpos` is [0.0387, -0.0387] at the reset its evaluation uses.  This
+        # reset used to zero them, which is closed for robosuite's gripper and open for the
+        # A3's -- the two grippers disagree about which end of the travel zero is.  A policy
+        # told the gripper is already shut plans a different first move; with the Panda that
+        # was a hand driven down onto the bowl, jaws never closing on it.
         for side in ("L", "R"):
-            for joint_id in self._finger_joints[side]:
-                self.data.qpos[self.model.jnt_qposadr[joint_id]] = 0.0
+            for sign, joint_id in zip(
+                self._finger_sign[side], self._finger_joints[side], strict=True
+            ):
+                travelled = self._finger_open_at_zero[side]
+                value = 0.0 if travelled else sign * LIBERO_PANDA_FINGER_OPEN_M
+                self.data.qpos[self.model.jnt_qposadr[joint_id]] = value
                 self.data.qvel[self.model.jnt_dofadr[joint_id]] = 0.0
         self._last_applied_action = home.copy()
         self._apply_controls(home)

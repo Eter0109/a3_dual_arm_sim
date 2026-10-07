@@ -944,6 +944,23 @@ def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) ->
                 "<worldbody>; the loader was written for LIBERO's single-wrapper layout"
             )
         body = wrappers[0]
+        # robosuite's object loader gives every **visual** geom `mass="1e-8"`, so a scanned
+        # object weighs what its hand-built collision geoms weigh and not what its
+        # high-resolution display mesh weighs -- `robosuite/models/objects/objects.py:418`,
+        # `vis_element.set("mass", "1e-8")`.  That step was missing here, and it is not
+        # cosmetic: the bowl arrived at **0.0459 kg** where LIBERO's is 0.0056, eight times
+        # heavier, with the same eight-times inertia.  Verified by applying exactly this rule
+        # to LIBERO's own XML and reading the mass back: 0.0459 -> 0.005591 for the bowl and
+        # 0.0305 -> 0.011522 for the plate, against LIBERO's measured 0.0056 and 0.0115.
+        #
+        # A policy trained on a 5.6 g bowl cannot carry a 46 g one: measured over 40 episodes,
+        # the jaws reached the bowl in all 40 and lifted it above 20 mm in 32, but only 3
+        # carried it anywhere near the plate and none placed it.  The failure looked like a
+        # grasping bug and was a mass.
+        for element in body.iter("geom"):
+            if element.get("group") == "1":
+                element.attrib.pop("density", None)
+                element.set("mass", "1e-8")
         # LIBERO's outer wrapper is usually anonymous, and an unnamed body cannot be
         # looked up by name -- which turns a missing prop into `mj_name2id` returning -1
         # and every later query silently reading the *last* body in the model instead.
@@ -1204,6 +1221,43 @@ def _find_body(root: ET.Element, name: str) -> ET.Element | None:
         if element.get("name") == name:
             return element
     return None
+
+
+def _hide_leftover_geometry(model: mujoco.MjModel) -> None:
+    """Take the A3 scene's leftovers out of the picture, once the model exists.
+
+    Two of them cannot be hidden in the XML tree, and the first attempt to do it there is
+    the reason this function exists at all.  `stand_mast` and its bracket are merged into
+    the scene *after* the arm is built, so a sweep over the tree at that point does not see
+    them; and the Panda's collision hulls only acquire their `*_collision` names in a later
+    renaming pass.  Both sweeps therefore matched nothing and the only visible effect was
+    none at all -- the black post and the green shells stayed, with the visible geom count
+    unchanged at 127.  By the time this runs every name is final, so matching works.
+
+    What was wrong, measured rather than assumed: the post stands 1.1 m tall at x=-0.35,
+    which is exactly where the Panda's shoulder is, so it renders as a black slab across the
+    agentview and its collision box passes through the robot; and robosuite's collision hulls
+    are being drawn here (each link wrapped in a green shell that interpenetrates its own
+    visual mesh -- the speckled flicker) where LIBERO's own renders rely on the group flag to
+    keep them out.
+
+    Alpha is the only channel touched.  The contact flags are what the arm stands and grasps
+    with, so they are left exactly as they are; the two stand geoms are pure decoration and
+    lose their collision as well.
+    """
+    hidden = {"stand": 0, "collision": 0}
+    for geom in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom) or ""
+        if name in {"stand_mast", "stand_bracket"}:
+            model.geom_rgba[geom][3] = 0.0
+            model.geom_contype[geom] = 0
+            model.geom_conaffinity[geom] = 0
+            hidden["stand"] += 1
+        elif name.startswith(("robot0_", "gripper0_")) and name.endswith("_collision"):
+            model.geom_rgba[geom][3] = 0.0
+            hidden["collision"] += 1
+    if not all(hidden.values()):
+        raise RuntimeError(f"leftover geometry not found to hide: {hidden}")
 
 
 def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
@@ -1509,13 +1563,29 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         # and the contact list.  LIBERO's own pictures contain one arm, and a second one is the
         # largest thing in this scene's agentview that LIBERO's policy has never seen: measured,
         # the arm occupies the middle of the frame at every point of the episode.
-        hidden = base.find(f"body[@name='{source_joints[RIGHT_JOINTS[0]].child}']")
-        if hidden is None:
+        arm_root = source_joints[RIGHT_JOINTS[0]].child
+        if base.find(f"body[@name='{arm_root}']") is None:
             raise RuntimeError("the right arm's root body is not where it was expected")
-        for geom in hidden.iter("geom"):
-            geom.set("rgba", "0 0 0 0")
-            geom.set("contype", "0")
-            geom.set("conaffinity", "0")
+        # The A3 scene brings more than an arm: its own base (`base_link`) and the
+        # cookie-transfer props.  Neither belongs in a LIBERO reproduction, and the base is
+        # not merely extra furniture -- it sits at z=1.1, between the camera and the table,
+        # which is where the Panda's shoulder now is, so the two sets of surfaces
+        # interpenetrate.  Measured: a flickering z-fight and a translucent blue collision
+        # box (rgba 0.25 0.3 0.34 0.2) tinting the arm.  Same treatment as the arm, for the
+        # same reason: still addressable by name, out of the picture and out of the contact
+        # list.
+        leftovers = [body for body in base.iter("body")
+                     if (body.get("name") or "") in {arm_root, "base_link", "source_bin",
+                                                     "target_bin"}
+                     or (body.get("name") or "").startswith("cookie")]
+        for body in leftovers:
+            for geom in body.iter("geom"):
+                geom.set("rgba", "0 0 0 0")
+                geom.set("contype", "0")
+                geom.set("conaffinity", "0")
+        # The A3 post the arm used to hang from, and the Panda's collision hulls, cannot be
+        # dealt with in this tree at all -- see `_hide_leftover_geometry`, which runs once
+        # the model exists and every name is final.
     else:
         add_chain(base, source_joints[LEFT_JOINTS[0]], "left")
 
@@ -1651,9 +1721,15 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
                 "position",
                 name=f"L_finger_{finger}_position",
                 joint=name,
-                kp=str(config.cookie_transfer.left_gripper_kp),
+                # LIBERO's own jaws, read off its compiled model:
+                # `gripper0_gripper_finger_joint{1,2}` carry kp=1000, kv=1000 (MuJoCo gives a
+                # `position` actuator the same value for both when only `kp` is named) and
+                # forcerange -20 20.  This harness had been closing at 1200 and ±40, twice the
+                # force the checkpoint's grasps were made with, on a task whose failure mode is
+                # now "reaches the bowl, shoves it 274 mm, does not hold it".
+                kp="1000",
                 ctrlrange=joint.get("range", "0 0.04"),
-                forcerange="-40 40",
+                forcerange="-20 20",
             )
 
     sensors = ET.SubElement(root, "sensor")
@@ -1686,6 +1762,8 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         path.name: path.read_bytes() for path in mesh_dir.iterdir() if path.suffix.lower() == ".stl"
     }
     model = mujoco.MjModel.from_xml_string(xml, assets=binary_assets)
+    if config.left_arm == "panda":
+        _hide_leftover_geometry(model)
     return ModelBundle(model=model, xml=xml, source_joints=tuple(source_joints.values()))
 
 
