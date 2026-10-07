@@ -11,6 +11,7 @@ from gymnasium import spaces
 
 from .actions import CartesianDeltaAdapter
 from .config import SimConfig, load_config
+from .osc import OperationalSpaceAdapter
 from .contracts import (
     ARM_JOINTS,
     CARTESIAN_ACTION_DIM,
@@ -88,9 +89,24 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._dof_ids = {
             name: int(self.model.jnt_dofadr[jid]) for name, jid in self._joint_ids.items()
         }
-        self._actuator_ids = {
-            name: self._id(mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}_position") for name in ARM_JOINTS
-        }
+        def _arm_actuator(name: str) -> int:
+            """``{name}_position``, or ``{name}_motor`` where the arm is torque driven.
+
+            A scene that uses robosuite's robot is driven by operational-space control, so its
+            actuators are motors with the robot's own torque ranges; see
+            `osc.OperationalSpaceAdapter`.  `_apply_controls` writes `ctrl` either way, and the
+            actuator's own control range is what bounds the value.
+            """
+
+            for suffix in ("_position", "_motor"):
+                identifier = mujoco.mj_name2id(
+                    self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"{name}{suffix}"
+                )
+                if identifier >= 0:
+                    return identifier
+            raise ValueError(f"model has no position or motor actuator for {name}")
+
+        self._actuator_ids = {name: _arm_actuator(name) for name in ARM_JOINTS}
         self._finger_joints = {
             side: tuple(
                 self._id(mujoco.mjtObj.mjOBJ_JOINT, f"{side}_finger_{finger}_joint")
@@ -130,7 +146,17 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             name: self._id(mujoco.mjtObj.mjOBJ_CAMERA, name)
             for name in ("front", "left_wrist", "right_wrist")
         }
-        self._ik = CartesianDeltaAdapter(self.model, self.config)
+        if getattr(self.config, "left_arm", "a3") == "panda":
+            # LIBERO drives this arm with robosuite's operational-space controller, so this
+            # scene does too -- see `osc.OperationalSpaceAdapter` for why a joint-position
+            # servo does not survive the swap.  The site is **robosuite's own grasp site**,
+            # which is the frame its controller tracks, and not `L_eef`, which carries the
+            # two frames LIBERO's *state* is reported in.
+            self._ik = OperationalSpaceAdapter(
+                self.model, self.config, site="gripper0_grip_site"
+            )
+        else:
+            self._ik = CartesianDeltaAdapter(self.model, self.config)
         self._arm_ranges = np.asarray(
             [self.model.jnt_range[self._joint_ids[name]] for name in ARM_JOINTS],
             dtype=np.float64,
@@ -299,6 +325,14 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         current = self._last_applied_action
         arm_command = np.r_[command[:7], command[8:15]]
         arm_current = np.r_[current[:7], current[8:15]]
+        if isinstance(self._ik, OperationalSpaceAdapter):
+            # The left arm's seven entries are **torques**, not joint targets: there is no
+            # trajectory to rate-limit and no joint range to clip them to, and doing either
+            # would destroy them.  Their motors' own control ranges bound them, which is where
+            # robosuite's torque limits live.  The right arm is still a joint-target arm here,
+            # and it is inert.
+            right = np.clip(arm_command[7:], self._arm_ranges[7:, 0], self._arm_ranges[7:, 1])
+            return np.r_[arm_command[:7], command[7], right, command[15]]
         arm_command = np.clip(arm_command, self._arm_ranges[:, 0], self._arm_ranges[:, 1])
         if self.action_mode == "cartesian_delta":
             arm_delta = arm_command - arm_current

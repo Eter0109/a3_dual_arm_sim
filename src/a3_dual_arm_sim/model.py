@@ -1590,15 +1590,15 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
             forcerange=f"{-joint.effort} {joint.effort}",
         )
     for name, effort, limits in panda_joints or ():
+        # **Motors, not position servos.**  This arm is driven by robosuite's operational-space
+        # controller, which computes joint torques; a motor's `ctrlrange` is its torque range,
+        # which is where robosuite's own 80/80/80/80/80/12/12 N.m comes from.
         ET.SubElement(
             actuators,
-            "position",
-            name=f"{name}_position",
+            "motor",
+            name=f"{name}_motor",
             joint=name,
-            kp=str(_servo_kp(effort, config)),
-            kv=str(_servo_kv(effort, config)),
-            ctrlrange=_vec(limits),
-            forcerange=f"{-effort} {effort}",
+            ctrlrange=f"{-effort} {effort}",
         )
     for prefix in ("L", "R"):
         if panda_joints is not None and prefix == "L":

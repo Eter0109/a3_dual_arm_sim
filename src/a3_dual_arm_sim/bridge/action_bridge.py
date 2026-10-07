@@ -67,8 +67,17 @@ class ActionBridge:
             # and the rest of this package must stay importable on a host whose CPU
             # cannot run it (see the note in the package ``__init__``).
             from ..actions import CartesianDeltaAdapter
+            from ..osc import OperationalSpaceAdapter
 
-            self._ik: CartesianDeltaAdapter | None = CartesianDeltaAdapter(env.model, env.config)
+            # robosuite's own controller for a scene that uses robosuite's robot: a
+            # joint-position servo does not survive that swap, measured both ways round --
+            # see `osc.OperationalSpaceAdapter`.
+            if getattr(env.config, "left_arm", "a3") == "panda":
+                self._ik = OperationalSpaceAdapter(
+                    env.model, env.config, site="gripper0_grip_site"
+                )
+            else:
+                self._ik = CartesianDeltaAdapter(env.model, env.config)
             if spec.dim != CARTESIAN_ACTION_DIM:
                 raise BridgeError(
                     f"cartesian_delta actions are {CARTESIAN_ACTION_DIM}-dimensional, but the "
