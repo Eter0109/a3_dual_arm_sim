@@ -43,6 +43,7 @@ running sum of requests, so a missed command is not accumulated forever.
 from __future__ import annotations
 
 import math
+import os
 
 import mujoco
 import numpy as np
@@ -70,6 +71,20 @@ DAMPING_RATIO = 1.0
 #: the shape it is, so it is copied rather than approximated.
 INITIAL_JOINT_RAD = (0.0, -0.161, 0.0, -2.4446, 0.0, 2.2268, 0.7854)
 JOINT_KP = 10.0
+
+#: How often the torque is recomputed for a latched goal.  This is robosuite's structure --
+#: a goal that moves at the control rate, a torque that is re-solved every physics step --
+#: and it is what the arm was tuned against.  The knob exists so that the alternative can be
+#: measured rather than argued about: `once` computes a torque when the goal is set and
+#: holds it for the whole control step, which is what this harness did before, and which
+#: lets the arm overshoot the goal and stop further inside the bowl than the goal asked for.
+#:
+#: Measured, that overshoot is not a defect of the old loop so much as a source of depth the
+#: policy does not command: `once` put the fingertip 2.3 mm from the bowl's axis (the
+#: reference's own 1.0 mm, and three placements in forty episodes), while `always` stops at
+#: 25.9 mm and never places.  An environment variable rather than a config key because it is
+#: a property of the experiment, not of the scene, and nothing that ships should set it.
+RETORQUE_EVERY_SUBSTEP = os.environ.get("A3_OSC_RETORQUE", "always").strip().lower() != "once"
 
 
 class OperationalSpaceAdapter:

@@ -275,18 +275,28 @@ def _image_tensor(frame: Any, torch) -> Any:
     import numpy as np
 
     tensor = torch.from_numpy(np.array(frame, dtype=np.uint8))
-    # **Vertical flip only.**  robosuite's `sim.render` returns the renderer's rows in
-    # OpenGL's bottom-up order and LIBERO hands that to the policy unchanged -- measured:
-    # LIBERO's own `pixels/image` differs from `sim.render(...)` by 0.00, from `[::-1]` by
-    # 55.7 and from a 180-degree flip by 70.3.  This environment renders through
-    # `mujoco.Renderer`, which flips them back (`out[:] = np.flipud(out)`, in its own
-    # source), so the whole of the difference between the two pipelines is that one flip.
+    # **No flip here.  The environment already hands over the policy's orientation.**
     #
-    # This used to flip both axes.  A 180-degree flip is a vertical flip *and* a horizontal
-    # one, and no camera pose can produce a horizontal mirror of a scene, so for the whole
-    # of this investigation the policy was being shown a left-right mirrored world: it could
-    # see how far away the bowl was and could not see which side of it it was on.
-    tensor = torch.flip(tensor, dims=[0])  # H only, still HWC
+    # This is the one place the whole chain can be checked, so here it is.  LIBERO's camera
+    # buffer is bottom-up: `obs["agentview_image"]` equals `sim.render()` byte for byte
+    # (measured, MSE 0.0), and `LiberoProcessorStep` -- the step the checkpoint was trained
+    # and evaluated through -- then does `torch.flip(img, dims=[2, 3])`, both axes.  So the
+    # image the policy is given is the *horizontal mirror* of the upright view:
+    #
+    #     LIBERO:  obs = U[::-1]  ->  flip both  ->  U[:, ::-1]
+    #
+    # `mujoco.Renderer` returns `U` (it flips the rows back itself, `np.flipud(out)` in its
+    # own source), and `A3DualArmEnv._reference_orientation` mirrors it, so this env's
+    # `observation.images.*` is already `U[:, ::-1]` -- the same thing.  Nothing further is
+    # needed, and anything further is a bug.
+    #
+    # Two were.  This function used to flip rows, on the argument that LIBERO's buffer is
+    # bottom-up and ours is not, so one flip made up the difference -- but the difference to
+    # make up was the *mirror*, not the vertical flip, and `U[::-1]` is the one thing the
+    # policy never sees.  Adding the mirror in the environment on top of that left the policy
+    # being handed `U[::-1, ::-1]`: the world, rotated 180 degrees.  Measured against the
+    # image LIBERO's own evaluation feeds, as-is beat every alternative; rendered, the robot
+    # came into frame from the bottom.
     tensor = tensor.permute(2, 0, 1).float().div_(255.0)
     return tensor.unsqueeze(0)
 

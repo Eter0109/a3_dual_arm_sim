@@ -1245,7 +1245,18 @@ def _hide_leftover_geometry(model: mujoco.MjModel) -> None:
     with, so they are left exactly as they are; the two stand geoms are pure decoration and
     lose their collision as well.
     """
-    hidden = {"stand": 0, "collision": 0}
+    hidden = {"stand": 0, "collision": 0, "site": 0}
+    for site in range(model.nsite):
+        # **Every site invisible, because that is how LIBERO renders.**  robosuite turns site
+        # visibility off for its scenes (`Robot.visualize` -> `set_sites_visibility`), and its
+        # compiled model carries 31 sites with not one of them showing.  This scene kept the
+        # ones its own model declares: a **green cylinder** at the grip point, two red
+        # spheres, and a red burner marker -- all of them rendered into the agentview image
+        # the policy sees, in every frame, at the centre of the action.  Nothing in LIBERO's
+        # pictures has them.  Alpha only; a site's pose is what the interface reads.
+        if model.site_rgba[site][3] > 0.0:
+            model.site_rgba[site][3] = 0.0
+            hidden["site"] += 1
     for geom in range(model.ngeom):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom) or ""
         if name in {"stand_mast", "stand_bracket"}:
@@ -1273,6 +1284,13 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         autolimits="true",
         balanceinertia="true",
     )
+    #: Is this scene a reproduction of LIBERO's own robot in LIBERO's own task?  If so the
+    #: physics has to be LIBERO's, not the Cookie task's: the two disagree about the contact
+    #: model the robot's geoms inherit and about whether multi-contact CCD is on, and both of
+    #: those are invisible in a picture and loud in a grasp.
+    libero_robotics = (
+        config.libero_fidelity and getattr(config, "left_arm", "a3") == "panda"
+    )
     option = ET.SubElement(
         root,
         "option",
@@ -1286,9 +1304,20 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         noslip_iterations="0" if config.libero_fidelity else (
             "5" if scene == "cookie_transfer" else "0"
         ),
+        # Inert without a fluid, but LIBERO's compiled model carries it and this one carried
+        # zero, and "every field but one matches" is a weaker statement than it sounds.
     )
-    if scene == "cookie_transfer":
-        # Flat beveled meshes need a contact patch, not a single rocking point.
+    if libero_robotics:
+        # The medium's density and viscosity, which LIBERO's arena declares and this scene
+        # did not.  Both only act through a fluid, so neither does anything here -- but they
+        # were the last two fields of `mjOption` that disagreed, and leaving them disagreed
+        # would make "the physics is the same" an approximation rather than a measurement.
+        option.set("density", "1.2")
+        option.set("viscosity", "2e-05")
+    if scene == "cookie_transfer" and not libero_robotics:
+        # Flat beveled meshes need a contact patch, not a single rocking point.  Not for the
+        # LIBERO scene: that flag is the *Cookie* task's, and LIBERO runs with it off --
+        # measured, `enableflags` 16 against 0.
         ET.SubElement(option, "flag", multiccd="enable")
     ET.SubElement(root, "size", nconmax="400", njmax="1000")
     visual = ET.SubElement(root, "visual")
@@ -1308,8 +1337,17 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         damping=str(config.joint_damping),
         armature=str(config.joint_armature),
     )
-    if scene == "cookie_transfer":
+    if scene == "cookie_transfer" and not libero_robotics:
         ET.SubElement(default, "geom", solref="0.04 0.85", solimp="0.75 0.97 0.002 0.5 2")
+    elif libero_robotics:
+        # **LIBERO's own contact model for the robot's geoms**, which robosuite's Panda does
+        # not declare and therefore inherits: a 0.02 s time constant at a damping ratio of 1
+        # with `solimp` 0.9 0.95 0.001.  This default class was written for the Cookie task's
+        # beveled meshes -- 0.04 s at 0.85, `solimp` 0.75 0.97 0.002 -- and the LIBERO scene
+        # inherited all of it, so every link and every jaw touched the world through a
+        # contact half as stiff with a third of the impedance range.  Measured against
+        # LIBERO's compiled model: 70 robot geoms in, 70 out, every one of them off.
+        ET.SubElement(default, "geom", solref="0.02 1", solimp="0.9 0.95 0.001")
     else:
         ET.SubElement(default, "geom", solref="0.01 1", solimp="0.9 0.95 0.001")
 

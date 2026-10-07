@@ -12,6 +12,7 @@ from gymnasium import spaces
 from .actions import CartesianDeltaAdapter
 from .config import SimConfig, load_config
 from .osc import OperationalSpaceAdapter
+from . import osc as retorque
 from .contracts import (
     ARM_JOINTS,
     CARTESIAN_ACTION_DIM,
@@ -454,6 +455,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         """
 
         if not isinstance(self._ik, OperationalSpaceAdapter):
+            return
+        if not retorque.RETORQUE_EVERY_SUBSTEP:
+            # The isolation experiment: torque solved once per control step, at the moment
+            # the goal is latched, and held for the substeps that follow.
             return
         mujoco.mj_forward(self.model, self.data)
         self._ik.retorque(self.data)
