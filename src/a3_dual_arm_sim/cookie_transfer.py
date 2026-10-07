@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -559,7 +560,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._randomized_deployment_home if randomize_scene else self.DEPLOYMENT_HOME,
             dtype=np.float64,
         ).copy()
-        if self._libero_init_states and seed is not None:
+        # The default, and the value the ablation switch falls back to: LIBERO's own half-open
+        # start, which is what the state's last two numbers report.
+        jaw_opening = LIBERO_PANDA_FINGER_OPEN_M
+        if (self._libero_init_states and seed is not None
+                and os.environ.get("A3_LIBERO_INIT", "1").strip() != "0"):
             # LIBERO's robot, LIBERO's start pose: one per episode, out of the file its own
             # evaluation reads.  Nothing here is invented, and nothing is jittered on top --
             # a randomised start would only move this arm away from where the policy expects

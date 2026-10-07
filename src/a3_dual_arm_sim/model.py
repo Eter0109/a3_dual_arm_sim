@@ -957,10 +957,11 @@ def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) ->
         # the jaws reached the bowl in all 40 and lifted it above 20 mm in 32, but only 3
         # carried it anywhere near the plate and none placed it.  The failure looked like a
         # grasping bug and was a mass.
-        for element in body.iter("geom"):
-            if element.get("group") == "1":
-                element.attrib.pop("density", None)
-                element.set("mass", "1e-8")
+        if os.environ.get("A3_VISUAL_MASS", "correct").strip().lower() != "keep":
+            for element in body.iter("geom"):
+                if element.get("group") == "1":
+                    element.attrib.pop("density", None)
+                    element.set("mass", "1e-8")
         # LIBERO's outer wrapper is usually anonymous, and an unnamed body cannot be
         # looked up by name -- which turns a missing prop into `mj_name2id` returning -1
         # and every later query silently reading the *last* body in the model instead.
@@ -1245,8 +1246,10 @@ def _hide_leftover_geometry(model: mujoco.MjModel) -> None:
     with, so they are left exactly as they are; the two stand geoms are pure decoration and
     lose their collision as well.
     """
+    hide_sites = os.environ.get("A3_HIDE_SITES", "1").strip() != "0"
+    hide_geom = os.environ.get("A3_HIDE_GEOM", "1").strip() != "0"
     hidden = {"stand": 0, "collision": 0, "site": 0}
-    for site in range(model.nsite):
+    for site in range(model.nsite) if hide_sites else ():
         # **Every site invisible, because that is how LIBERO renders.**  robosuite turns site
         # visibility off for its scenes (`Robot.visualize` -> `set_sites_visibility`), and its
         # compiled model carries 31 sites with not one of them showing.  This scene kept the
@@ -1267,6 +1270,11 @@ def _hide_leftover_geometry(model: mujoco.MjModel) -> None:
         elif name.startswith(("robot0_", "gripper0_")) and name.endswith("_collision"):
             model.geom_rgba[geom][3] = 0.0
             hidden["collision"] += 1
+    if not hide_sites:
+        hidden.pop("site")
+    if not hide_geom:
+        hidden.pop("stand")
+        hidden.pop("collision")
     if not all(hidden.values()):
         raise RuntimeError(f"leftover geometry not found to hide: {hidden}")
 
@@ -1289,7 +1297,9 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
     #: model the robot's geoms inherit and about whether multi-contact CCD is on, and both of
     #: those are invisible in a picture and loud in a grasp.
     libero_robotics = (
-        config.libero_fidelity and getattr(config, "left_arm", "a3") == "panda"
+        config.libero_fidelity
+        and getattr(config, "left_arm", "a3") == "panda"
+        and os.environ.get("A3_PHYSICS_LEGACY", "0").strip() != "1"
     )
     option = ET.SubElement(
         root,

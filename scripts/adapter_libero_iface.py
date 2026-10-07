@@ -83,6 +83,7 @@ constant that makes the reading equal LIBERO's.
 
 from __future__ import annotations
 
+import os
 import math
 import sys
 from typing import Any
@@ -275,7 +276,16 @@ def _image_tensor(frame: Any, torch) -> Any:
     import numpy as np
 
     tensor = torch.from_numpy(np.array(frame, dtype=np.uint8))
-    # **No flip here.  The environment already hands over the policy's orientation.**
+    # **An ablation knob, and nothing that ships sets it.**  `none` is the correct value;
+    # `h`, `w` and `hw` re-introduce the historical errors so that "what did that fix
+    # actually buy" can be measured instead of argued about.
+    legacy = os.environ.get("A3_ADAPTER_FLIP", "none").strip().lower()
+    if legacy in ("h", "hw"):
+        tensor = torch.flip(tensor, dims=[0])
+    if legacy in ("w", "hw"):
+        tensor = torch.flip(tensor, dims=[1])
+    # **No flip in the shipped configuration.  The environment already hands over the
+    # policy's orientation.**
     #
     # This is the one place the whole chain can be checked, so here it is.  LIBERO's camera
     # buffer is bottom-up: `obs["agentview_image"]` equals `sim.render()` byte for byte

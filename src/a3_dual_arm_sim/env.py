@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
@@ -164,6 +165,16 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         # at the start of every one of its episodes.
         panda_left = getattr(self.config, "left_arm", "a3") == "panda"
         self._finger_open_at_zero = {"L": not panda_left, "R": True}
+        if os.environ.get("A3_GRIPPER_LEGACY", "0").strip() == "1":
+            # Ablation: the three defects this harness had before they were found.  The
+            # outer jaw's sign came from `upper >= 0` on a range of `[-0.04, 0]`, so it was
+            # commanded out of its own control range and never moved; the opening read with
+            # the A3's polarity; and every reset started with the jaws shut.
+            self._finger_sign["L"] = tuple(
+                1.0 if float(self.model.jnt_range[j][1]) >= 0.0 else -1.0
+                for j in self._finger_joints["L"]
+            )
+            self._finger_open_at_zero["L"] = True
         self._eef_sites = (
             self._id(mujoco.mjtObj.mjOBJ_SITE, "L_eef"),
             self._id(mujoco.mjtObj.mjOBJ_SITE, "R_eef"),
@@ -574,6 +585,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         shows the policy a scene with left and right swapped, which is worth about
         twice the lateral offset of whatever it has been asked to reach.
         """
+        if os.environ.get("A3_IMAGE_MIRROR", "1").strip() == "0":
+            # Ablation: hand the policy the unmirrored view, i.e. the one LIBERO's camera
+            # never produces.  Nothing that ships sets this.
+            return np.ascontiguousarray(image)
         return np.ascontiguousarray(image[:, ::-1])
 
     def _render_camera(self, name: str) -> np.ndarray:
