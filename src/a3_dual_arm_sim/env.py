@@ -105,6 +105,23 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
             for side in ("L", "R")
         }
+        # Finger travel and drive sign, **read from the model rather than assumed**.  The A3
+        # gripper's jaws share a travel and are driven with the same sign, because their
+        # joint axes are opposed.  robosuite's Panda gripper gives both jaws the *same* axis
+        # and two mirrored ranges -- `[-0.04, 0]` and `[0, 0.04]` -- so its jaws need
+        # opposite signs, and its state has to read the same way the A3's does or the
+        # opening a policy sees would depend on which robot is driving.
+        self._finger_travel = {}
+        self._finger_sign = {}
+        for side in ("L", "R"):
+            self._finger_travel[side] = max(
+                abs(float(self.model.jnt_range[joint_id][1]))
+                for joint_id in self._finger_joints[side]
+            )
+            self._finger_sign[side] = tuple(
+                1.0 if float(self.model.jnt_range[joint_id][1]) >= 0.0 else -1.0
+                for joint_id in self._finger_joints[side]
+            )
         self._eef_sites = (
             self._id(mujoco.mjtObj.mjOBJ_SITE, "L_eef"),
             self._id(mujoco.mjtObj.mjOBJ_SITE, "R_eef"),
@@ -182,9 +199,11 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             limits = self.model.jnt_range[joint_id]
             self.data.qpos[self._qpos_ids[name]] = np.clip(value, limits[0], limits[1])
         for side, opening in zip(("L", "R"), self.config.home.grippers, strict=True):
-            physical = (1.0 - np.clip(opening, 0.0, 1.0)) * self.GRIPPER_RANGE_M
-            for joint_id in self._finger_joints[side]:
-                self.data.qpos[self.model.jnt_qposadr[joint_id]] = physical
+            physical = (1.0 - np.clip(opening, 0.0, 1.0)) * self._finger_travel[side]
+            for sign, joint_id in zip(
+                self._finger_sign[side], self._finger_joints[side], strict=True
+            ):
+                self.data.qpos[self.model.jnt_qposadr[joint_id]] = sign * physical
         self._randomize_objects(enabled=(options or {}).get("randomize_objects", True))
         mujoco.mj_forward(self.model, self.data)
         home_action = np.r_[
@@ -313,9 +332,11 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):
             self.data.ctrl[self._actuator_ids[name]] = value
         for side, opening in zip(("L", "R"), (canonical[7], canonical[15]), strict=True):
-            value = (1.0 - float(opening)) * self.GRIPPER_RANGE_M
-            for actuator_id in self._finger_actuators[side]:
-                self.data.ctrl[actuator_id] = value
+            value = (1.0 - float(opening)) * self._finger_travel[side]
+            for sign, actuator_id in zip(
+                self._finger_sign[side], self._finger_actuators[side], strict=True
+            ):
+                self.data.ctrl[actuator_id] = sign * value
 
     def _current_joint_action(self) -> np.ndarray:
         left = [self.data.qpos[self._qpos_ids[name]] for name in LEFT_JOINTS]
@@ -329,10 +350,11 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         for joint_id in self._finger_joints[side]:
             positions.append(self.data.qpos[self.model.jnt_qposadr[joint_id]])
             velocities.append(self.data.qvel[self.model.jnt_dofadr[joint_id]])
-        return (
-            float(1.0 - np.mean(positions) / self.GRIPPER_RANGE_M),
-            float(-np.mean(velocities) / self.GRIPPER_RANGE_M),
-        )
+        travel = self._finger_travel[side]
+        signs = self._finger_sign[side]
+        opening = 1.0 - np.mean([abs(p) for p in positions]) / travel
+        rate = -np.mean([sign * v for sign, v in zip(signs, velocities, strict=True)]) / travel
+        return (float(opening), float(rate))
 
     def _sensor(self, name: str) -> np.ndarray:
         sensor_id = self._id(mujoco.mjtObj.mjOBJ_SENSOR, name)

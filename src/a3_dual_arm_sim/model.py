@@ -1002,6 +1002,190 @@ def _prop_xml(prop: "LiberoPropConfig", directory: Path) -> Path:
     return candidates[0]
 
 
+#: LIBERO's own robot and where LIBERO puts it, measured off its compiled model rather than
+#: assumed.  `robot0_base` sits at **(-0.66, 0, 0.912)** with an identity orientation -- on
+#: the near edge of the table, whose top is at 0.900 -- which is why placing the arm by the
+#: world offset alone put its hand 1.13 m from where LIBERO's hand is.  Base + offset
+#: reproduces LIBERO's start pose to 0.1 mm.
+LIBERO_PANDA_BASE_POS_M = (0.2135 - 0.66, -0.0720, -0.1500 + 0.912)
+LIBERO_PANDA_BASE_QUAT_WXYZ = (1.0, 0.0, 0.0, 0.0)
+#: LIBERO's own eye-in-hand: `pos="0.05 0 0"` on `robot0_right_hand`, quaternion
+#: `(0, 0.70711, 0.70711, 0)` (w x y z), 75 degrees.
+LIBERO_PANDA_WRIST_POS_M = (0.05, 0.0, 0.0)
+LIBERO_PANDA_WRIST_QUAT_WXYZ = (0.0, 0.7071067811865476, 0.7071067811865476, 0.0)
+
+
+def _servo_kp(effort: float, config: SimConfig) -> float:
+    """Position gain for a joint, from its force limit.  One rule, two callers."""
+
+    return (600.0 if effort >= 60 else (400.0 if effort >= 30 else 200.0)) * (
+        config.arm_servo_bandwidth
+    )
+
+
+def _servo_kv(effort: float, config: SimConfig) -> float:
+    """Velocity gain for a joint.  ``kp / 14`` is the critically damped ratio."""
+
+    return (40.0 if effort >= 60 else (30.0 if effort >= 30 else 15.0)) * (
+        config.arm_actuator_damping * config.arm_servo_bandwidth
+    )
+
+
+def _add_libero_panda(
+    root: ET.Element, world: ET.Element, config: SimConfig
+) -> list[tuple[str, float, tuple[float, float], float]]:
+    """Put LIBERO's own Panda where LIBERO puts it, and hand back what to drive it with.
+
+    Why the robot is allowed to be a variable
+    -----------------------------------------
+    Everything else in this scene has been reproduced to a measurement: the two cameras to
+    0.01 px, the objects to 0.8 mm, the fixtures and the lighting to theirs.  The arm is the
+    one part that cannot be, and it is not a near miss.  LIBERO's policy starts every episode
+    with its end effector at (-0.2112, -0.0111, 1.1742) -- shoulder height, 0.365 m in front
+    of the base, tool hanging straight down -- and `scripts/solve_libero_home.py` shows the
+    closest pose this arm can reach with the tool still pointing down is **26 mm** away and 6
+    degrees off vertical, or 102 mm away if the orientation is held.  The gate is the wrist:
+    `L_WRIST_P` spans +/-40 degrees.  Forcing the arm there anyway cost the task, measured:
+    the fingers got over the bowl in 4 of 40 episodes against 39 of 40 from the A3 home.
+
+    So the question "is the remaining gap this arm?" can only be answered by removing the arm
+    from the comparison, which is what this is for.
+
+    What robosuite gives, and the three things that have to be true of it
+    --------------------------------------------------------------------
+    `Panda().merge(PandaGripper(), merge_body="robot0_right_hand").get_xml()` is a complete
+    MJCF: one `robot0_base` tree, seven arm joints, two jaw joints, 63 meshes whose paths are
+    already absolute, 50 materials, and **no `class=` or `default=` attributes** -- which is
+    what makes moving it into this model a copy rather than a translation.  With the asset
+    declarations moved across and the tree appended there are no name collisions at all
+    (measured: 113 declarations, zero clashes).
+
+    *Where the base goes.*  LIBERO's `robot0_base` is at **(-0.66, 0, 0.912)** with an identity
+    orientation -- on the near edge of the table, not at the origin, which is worth stating
+    because placing the arm by the world offset alone put its hand 1.13 m from where LIBERO's
+    hand is.  Base + world offset reproduces LIBERO's start pose to **0.1 mm**.
+
+    *What this repository's names are.*  `env.py` looks its model up by name, so the seven
+    joints become `LEFT_JOINTS`, the jaws become the finger joints, and `gripper0_grip_site`
+    becomes `L_eef`.  The last of those is exact in both halves rather than convenient: LIBERO
+    reports the state's position as that site and its orientation as `robot0_right_hand`'s
+    frame, and the site's own frame **is** the hand's frame -- measured, both
+    `[[1,0,0],[0,-1,0],[0,0,-1]]` -- so one site carries the pair LIBERO reports.
+
+    *What drives it.*  The arm joints get the same servo as the A3's counterpart at the same
+    index, taken from the URDF's effort class, so the servo is deliberately **not** a
+    variable.  The jaws get the signs their mirrored ranges require, which `A3DualArmEnv`
+    now reads from the model.
+
+    Returns one tuple per arm joint: name, actuator force range, joint limits, kp scale.
+    """
+
+    from robosuite.models.grippers import PandaGripper
+    from robosuite.models.robots import Panda
+
+    robot = Panda(idn=0)
+    robot.merge(PandaGripper(idn=0), merge_body="robot0_right_hand")
+    source = ET.fromstring(robot.get_xml())
+
+    assets = root.find("asset")
+    if assets is None:
+        raise RuntimeError("model assets must exist before adding LIBERO's Panda")
+    for element in list(source.find("asset")):
+        assets.append(element)
+
+    names = {
+        **{
+            panda: ours
+            for panda, ours in zip(
+                (f"robot0_joint{i}" for i in range(1, 8)), LEFT_JOINTS, strict=True
+            )
+        },
+        "gripper0_finger_joint1": "L_finger_inner_joint",
+        "gripper0_finger_joint2": "L_finger_outer_joint",
+    }
+    for element in source.iter():
+        name = element.get("name")
+        if name in names:
+            element.set("name", names[name])
+
+    base = list(source.find("worldbody"))[0]
+    base.set("pos", _vec(LIBERO_PANDA_BASE_POS_M))
+    base.set("quat", _vec(LIBERO_PANDA_BASE_QUAT_WXYZ))
+    world.append(base)
+
+    # The two fingertip touch sites the trace probe measures clearance with, the wrist force
+    # site the sensors hang off, and LIBERO's own eye-in-hand camera -- copied rather than
+    # re-derived, `pos="0.05 0 0"` on the hand with its own quaternion at its own 75 degrees.
+    touching = {
+        "gripper0_finger_joint1_tip": "L_finger_inner_touch",
+        "gripper0_finger_joint2_tip": "L_finger_outer_touch",
+    }
+    for body_name, site_name in touching.items():
+        body = _find_body(source, body_name)
+        if body is None:
+            raise RuntimeError(f"LIBERO's Panda has no {body_name} body")
+        ET.SubElement(body, "site", name=site_name, pos="0 0 0", size="0.006", rgba="0 0 0 0")
+    hand = _find_body(source, "robot0_right_hand")
+    if hand is None:
+        raise RuntimeError("LIBERO's Panda has no robot0_right_hand body")
+    ET.SubElement(hand, "site", name="L_wrist_ft", pos="0 0 0", size="0.012", rgba="0 0 0 0")
+    # **The state's two halves come from two different frames, and they are easy to mistake
+    # for one.**  LIBERO reports the position as `site_xpos[gripper0_grip_site]` and the
+    # orientation as `get_body_xquat("robot0_right_hand")`.  Measured at LIBERO's own home
+    # pose, `gripper0_eef`'s frame does agree with the grip site's -- and the hand's does not:
+    # the site is a 180 degree turn about (1,1,0)/sqrt(2) from the world, the hand is one about
+    # +x.  So one site is built that carries both halves at once: attached to the hand, at the
+    # grasp point, with the hand's own frame.  The offset is the grasp point in the hand's
+    # frame, measured as (0, 0, +0.0964) -- on the hand's +z, which is the approach
+    # direction, 96.4 mm out.  (The sign is worth stating: the hand's local +z points *down*
+    # in the world at LIBERO's home, so "96.4 mm along +z" is 96.4 mm below the hand.)
+    ET.SubElement(hand, "site", name="L_eef", pos="0 0 0.096400", size="0.008", rgba="0 0 0 0")
+    # `A3CookieTransferEnv` measures the grasp width from the jaws' *collision* geoms, by
+    # name, so each jaw hands its colliding geom this repository's name for it.  Robosuite
+    # ships both a visual and a collision mesh per jaw, which is why this picks by `contype`
+    # rather than taking the first child: naming a visual mesh would measure the gap between
+    # two surfaces that never touch anything.
+    for body_name, geom_name in (
+        ("gripper0_leftfinger", "L_finger_inner_geom"),
+        ("gripper0_rightfinger", "L_finger_outer_geom"),
+    ):
+        jaw = _find_body(source, body_name)
+        if jaw is None:
+            raise RuntimeError(f"LIBERO's Panda has no {body_name} body")
+        geoms = list(jaw.findall("geom"))
+        if not geoms:
+            raise RuntimeError(f"LIBERO's {body_name} carries no geom to name")
+        chosen = next((g for g in geoms if g.get("contype", "1") != "0"), geoms[0])
+        chosen.set("name", geom_name)
+    ET.SubElement(
+        hand,
+        "camera",
+        name="left_wrist",
+        mode="fixed",
+        pos=_vec(LIBERO_PANDA_WRIST_POS_M),
+        quat=_vec(LIBERO_PANDA_WRIST_QUAT_WXYZ),
+        fovy=f"{config.cameras.wrist_fovy_deg:.10g}",
+    )
+
+    source_joints = _source()[1]
+    driven = []
+    for name in LEFT_JOINTS:
+        joint = next(element for element in source.iter("joint") if element.get("name") == name)
+        limits = _floats(joint.get("range"), 2)
+        # The A3's force limit for the joint at the same index: the servo is deliberately not
+        # a variable here, so the only thing this scene changes is which arm is driving.
+        effort = source_joints[name].effort
+        driven.append((name, effort, limits))
+    return driven
+
+
+def _find_body(root: ET.Element, name: str) -> ET.Element | None:
+    for element in root.iter("body"):
+        if element.get("name") == name:
+            return element
+    return None
+
+
 def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
     if scene not in ("sandbox", "cookie_transfer"):
         raise ValueError(f"unsupported scene: {scene}")
@@ -1293,19 +1477,38 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         else:
             add_chain(body, next_joint, side)
 
-    add_chain(base, source_joints[LEFT_JOINTS[0]], "left")
     add_chain(base, source_joints[RIGHT_JOINTS[0]], "right")
+    panda_joints: list[tuple[str, float, tuple[float, float]]] | None = None
+    if config.left_arm == "panda":
+        # The A3's left arm is *replaced*, not hidden: a second arm standing in the same
+        # workspace would be one more thing to collide with, and `L_eef` has to be the
+        # Panda's grasp point anyway or the state would name a frame the pictures do not.
+        panda_joints = _add_libero_panda(root, world, config)
+    else:
+        add_chain(base, source_joints[LEFT_JOINTS[0]], "left")
 
     if scene == "cookie_transfer":
         # Ideal model-based gravity compensation for the prototype arm servos.
         # Route compensation through actuators so joint force limits still apply.
-        for body in base.iter("body"):
-            body.set("gravcomp", "1")
-        for joint in base.iter("joint"):
-            joint.set("actuatorgravcomp", "true")
-            source = source_joints.get(joint.attrib.get("name"))
-            effort = source.effort if source is not None else 40
-            joint.set("actuatorfrcrange", f"{-effort} {effort}")
+        def compensate(tree: ET.Element, *, through_actuators: bool) -> None:
+            for body in tree.iter("body"):
+                body.set("gravcomp", "1")
+            if not through_actuators:
+                return
+            for joint in tree.iter("joint"):
+                joint.set("actuatorgravcomp", "true")
+                source = source_joints.get(joint.attrib.get("name"))
+                effort = source.effort if source is not None else 40
+                joint.set("actuatorfrcrange", f"{-effort} {effort}")
+
+        compensate(base, through_actuators=True)
+        # LIBERO's robot gets **no gravity compensation**, and that is a measurement rather
+        # than an omission.  Body `gravcomp` is tuned against this repository's own inertias;
+        # applied to robosuite's bodies it ends the hundred settling steps of a reset
+        # **110 degrees** off home, with and without the actuator routing, on a 2 ms step.
+        # Without it the arm sags 3.75 degrees at the elbow instead, which is 42 mm at the
+        # tool -- so the scene compensates with a stiffer servo (`arm_servo_bandwidth`) rather
+        # than with a force this model cannot balance.
 
     if scene == "cookie_transfer":
         _add_cookie_scene(root, world, config)
@@ -1336,13 +1539,14 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
 
     actuators = ET.SubElement(root, "actuator")
     for joint in source_joints.values():
+        if panda_joints is not None and joint.name in LEFT_JOINTS:
+            continue
         # ``arm_servo_bandwidth`` scales both gains, so the ratio -- and with it the
         # overshoot -- is unchanged while the servo responds sooner.  ``arm_actuator_damping``
         # scales only the velocity gain, which is what changes the ratio, and is the knob to
         # reach for when a controller is tuned around a *soft* response rather than a fast
         # one.
-        kp = (600.0 if joint.effort >= 60 else (
-            400.0 if joint.effort >= 30 else 200.0)) * config.arm_servo_bandwidth
+        kp = _servo_kp(joint.effort, config)
         # Velocity feedback on the arm position servos.  Without it a position
         # command that moves faster than the joint can track is answered by
         # overshoot and a sustained ring, because nothing but the joint's own
@@ -1354,9 +1558,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         # the ratio MuJoCo's own position actuator documents as critically
         # damped, and ``arm_actuator_damping`` scales it because the two-box
         # relay's right-arm controllers are tuned for the undamped response.
-        kv = (
-            40.0 if joint.effort >= 60 else (30.0 if joint.effort >= 30 else 15.0)
-        ) * config.arm_actuator_damping * config.arm_servo_bandwidth
+        kv = _servo_kv(joint.effort, config)
         ET.SubElement(
             actuators,
             "position",
@@ -1367,7 +1569,20 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
             ctrlrange=_vec(joint.limits),
             forcerange=f"{-joint.effort} {joint.effort}",
         )
+    for name, effort, limits in panda_joints or ():
+        ET.SubElement(
+            actuators,
+            "position",
+            name=f"{name}_position",
+            joint=name,
+            kp=str(_servo_kp(effort, config)),
+            kv=str(_servo_kv(effort, config)),
+            ctrlrange=_vec(limits),
+            forcerange=f"{-effort} {effort}",
+        )
     for prefix in ("L", "R"):
+        if panda_joints is not None and prefix == "L":
+            continue
         for finger in ("inner", "outer"):
             name = f"{prefix}_finger_{finger}"
             ET.SubElement(
@@ -1385,9 +1600,34 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
                 ctrlrange=f"0 {ROBOTIQ_2F85_JAW_TRAVEL_M}",
                 forcerange="-40 40",
             )
+    if panda_joints is not None:
+        # The jaws, driven through their own mirrored ranges.  robosuite gives both jaws the
+        # same axis and opposite range signs, so one command is a positive target for one and
+        # a negative one for the other; `A3DualArmEnv` reads the signs from the model, so the
+        # opening a policy sees means the same thing on either gripper.  Gain and force range
+        # are the A3's, again so that the arm is the only variable.
+        for finger in ("inner", "outer"):
+            name = f"L_finger_{finger}_joint"
+            joint = next(
+                (element for element in world.iter("joint") if element.get("name") == name),
+                None,
+            )
+            if joint is None:
+                raise RuntimeError(f"LIBERO's Panda has no {name}")
+            ET.SubElement(
+                actuators,
+                "position",
+                name=f"L_finger_{finger}_position",
+                joint=name,
+                kp=str(config.cookie_transfer.left_gripper_kp),
+                ctrlrange=joint.get("range", "0 0.04"),
+                forcerange="-40 40",
+            )
 
     sensors = ET.SubElement(root, "sensor")
     for prefix in ("L", "R"):
+        if panda_joints is not None and prefix == "L":
+            continue
         ET.SubElement(sensors, "force", name=f"{prefix}_wrist_force", site=f"{prefix}_wrist_ft")
         ET.SubElement(sensors, "torque", name=f"{prefix}_wrist_torque", site=f"{prefix}_wrist_ft")
         for finger in ("inner", "outer"):
@@ -1396,6 +1636,16 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
                 "touch",
                 name=f"{prefix}_finger_{finger}_touch_sensor",
                 site=f"{prefix}_finger_{finger}_touch",
+            )
+    if panda_joints is not None:
+        ET.SubElement(sensors, "force", name="L_wrist_force", site="L_wrist_ft")
+        ET.SubElement(sensors, "torque", name="L_wrist_torque", site="L_wrist_ft")
+        for finger in ("inner", "outer"):
+            ET.SubElement(
+                sensors,
+                "touch",
+                name=f"L_finger_{finger}_touch_sensor",
+                site=f"L_finger_{finger}_touch",
             )
 
     xml = ET.tostring(root, encoding="unicode")

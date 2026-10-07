@@ -393,6 +393,14 @@ class SimConfig:
     # `physics_hz: 500` alongside this.
     libero_fidelity: bool = False
     max_joint_step_rad: float = 0.05
+    #: Which robot drives the left arm: ``a3`` (the URDF this repository ships) or
+    #: ``panda`` (robosuite's own Panda, the arm LIBERO's policies were trained on).
+    #: The right arm is the A3 in both cases and stays inert, so the fourteen-wide action
+    #: interface does not change.  See `model._add_libero_panda` for why the robot is a
+    #: variable at all: it is the one part of a LIBERO episode that cannot be reproduced
+    #: on the A3 -- the start pose alone is 26 mm out of reach, measured -- so the scene can
+    #: either keep the arm that is wrong or borrow the one that is right.
+    left_arm: str = "a3"
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025
     cartesian_rotation_scale_rad: float = 0.10

@@ -830,6 +830,14 @@ LIBERO_MATCHED_HOME_RAD = (
     1.028929, 1.569900, -1.365162, -1.198814, -0.596119, 0.228400, -1.489687,
 )
 
+#: LIBERO's own initial joint configuration for its Panda, read from `qpos` at the reset its
+#: evaluation uses.  With LIBERO's robot in the scene this is the only home that makes sense:
+#: the whole point is that the arm stops being a difference, and a home invented here would
+#: put the hand somewhere the policy has never started from.
+LIBERO_PANDA_HOME_RAD = (
+    -0.000131, -0.170836, -0.024106, -2.452567, -0.006121, 2.225902, 0.767745,
+)
+
 
 def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     """The camera geometry that reproduces LIBERO's own framing on this arm.
@@ -888,7 +896,7 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
 
 
 def libero_props_scene(
-    *, visual_style: str = "plain", matched_cameras: bool = False
+    *, visual_style: str = "plain", matched_cameras: bool = False, panda: bool = False
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
 
@@ -933,6 +941,25 @@ def libero_props_scene(
             # writes `config.home` first and then overwrites the arm's qpos from here, so an
             # edit to `home` is thrown away at the top of every episode.  That cost a run too.
             deployment = loaded.cookie_transfer.deployment_home
+            if panda:
+                # LIBERO's robot, LIBERO's start pose, and -- because the scene's own assets
+                # arrive with it -- nothing else to do.  The arm's angles are LIBERO's, read
+                # from its reset; the gripper entries are left as they are (1.0, fully open),
+                # which is also how LIBERO starts.
+                loaded = replace(loaded, left_arm="panda")
+                loaded = replace(
+                    loaded,
+                    cookie_transfer=replace(
+                        loaded.cookie_transfer,
+                        deployment_home=tuple(LIBERO_PANDA_HOME_RAD) + tuple(deployment[7:]),
+                    ),
+                )
+                # **The servo is deliberately left at the A3's tuning.**  A stiffer one was
+                # tried and is worse than useless here: `arm_servo_bandwidth` at 4.0 -- kp
+                # 2400 on a 2 ms step -- sends this arm 26.8 degrees off home over the
+                # settling steps, because the A3's gains and the A3's integrator step were
+                # chosen together.  At 1.0 the arm sags 3.75 degrees at the elbow instead,
+                # 42 mm at the tool, and holds.
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
@@ -991,6 +1018,12 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # must not be compared, and a name is the only thing that survives into a report.
         "a3_libero_props_matched": lambda **kwargs: libero_props_scene(
             matched_cameras=True, **kwargs
+        ),
+        # LIBERO's cameras, LIBERO's objects, LIBERO's fixtures -- and LIBERO's own robot on
+        # the left arm.  The one scene where a failure cannot be about the arm, because the
+        # arm is the reference one; see `model._add_libero_panda`.
+        "a3_libero_panda": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, panda=True, **kwargs
         ),
     }
 
