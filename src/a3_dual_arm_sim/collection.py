@@ -776,13 +776,29 @@ def cookie_single_piece_scene(
     )
 
 
-#: LIBERO's agentview, expressed **relative to the object it is there to look at** -- the
-#: only form in which it can be reproduced in a scene whose table is 220 mm lower and whose
-#: robot has a different base.  Measured off LIBERO's compiled model by
-#: `scripts/compare_libero_environment.py`, which prints both sides of every one of these.
-LIBERO_AGENTVIEW_DISTANCE_M = 0.96
-LIBERO_AGENTVIEW_ELEVATION_DEG = 39.83   # above the bowl, i.e. looking down by this much
-LIBERO_AGENTVIEW_BEARING_DEG = 163.43    # in the table plane, against the world +x axis
+#: LIBERO's agentview, **copied** rather than re-derived.  It is a *fixed* camera -- it
+#: points one way for the whole episode -- so a camera reconstructed to aim *at* the bowl
+#: reproduces the distance, the elevation, the bearing and the field of view and still
+#: frames the shot differently: centred, where LIBERO's has the bowl off to one side.  The
+#: previous version of this did exactly that, and its elevation was 2.6 degrees flatter and
+#: 60 mm closer on top of the aim difference.  Measured off LIBERO's compiled model by
+#: `scripts/compare_libero_environment.py`.
+LIBERO_AGENTVIEW_POS_M = (0.6586, 0.0, 1.6104)
+LIBERO_AGENTVIEW_QUAT_WXYZ = (0.6380, 0.3048, 0.3048, 0.6380)
+
+#: LIBERO world -> this world, as **one translation**: measured at the centre of the bowl
+#: the task picks up, which sits at (-0.0635, 0.2020, 0.9247) there and (0.1500, 0.1300,
+#: 0.7747) here.  The two worlds share their axes -- LIBERO's bearing to its own camera
+#: comes back within 0.9 degrees either way, and every object placed through this offset
+#: lands on its LIBERO position to a millimetre -- so no rotation belongs in the map, and
+#: the camera's quaternion transfers unchanged.  Everything LIBERO-side in this file is
+#: expressed through it, which is what makes "restore LIBERO's scene" a single number.
+LIBERO_WORLD_OFFSET_M = (0.2135, -0.0720, -0.1500)
+
+LIBERO_AGENTVIEW_MATCHED_POS_M = tuple(
+    measured + offset
+    for measured, offset in zip(LIBERO_AGENTVIEW_POS_M, LIBERO_WORLD_OFFSET_M)
+)
 LIBERO_AGENTVIEW_FOVY_DEG = 45.0
 
 #: Where the bowl actually is, after settling: the scene config's spawn position plus the
@@ -831,24 +847,18 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     and 75 degrees matches the field of view.
     """
 
-    elevation = np.radians(LIBERO_AGENTVIEW_ELEVATION_DEG)
-    bearing = np.radians(LIBERO_AGENTVIEW_BEARING_DEG)
-    focus = np.asarray(LIBERO_MATCHED_FOCUS_M, dtype=np.float64)
-    # Placed on a sphere around the object it is there to look at, at LIBERO's own distance,
-    # elevation and bearing -- measured off LIBERO's compiled model rather than guessed from
-    # a millimetres-per-pixel figure, because that scalar is the product of a distance and a
-    # field of view and pins neither.  The earlier version of this function equalised
-    # millimetres per pixel by moving the camera alone, and left the projection at 54 degrees
-    # where LIBERO's is 45: the wrong perspective, matched in scale.
-    horizontal = LIBERO_AGENTVIEW_DISTANCE_M * np.cos(elevation)
-    matched_front = focus - np.array([np.cos(bearing), np.sin(bearing), 0.0]) * horizontal
-    matched_front[2] = focus[2] + LIBERO_AGENTVIEW_DISTANCE_M * np.sin(elevation)
     return replace(
         cameras,
-        front_position_m=tuple(float(value) for value in matched_front),
+        # Transferred, not reconstructed: position through the one world offset, orientation
+        # unchanged because the offset is a translation.  Three attempts preceded this one --
+        # a millimetres-per-pixel match, then a sphere at LIBERO's measured distance and
+        # elevation -- and each pinned a scalar while leaving the direction wrong, because
+        # LIBERO's camera is not aimed at the object at all.
+        front_position_m=LIBERO_AGENTVIEW_MATCHED_POS_M,
+        front_quat_wxyz=LIBERO_AGENTVIEW_QUAT_WXYZ,
         front_fovy_deg=LIBERO_AGENTVIEW_FOVY_DEG,
-        # The camera aims at a target body, so the target has to move to the object as well
-        # or the framing is right and the direction is not.
+        # Inert while the camera is fixed -- MuJoCo reads a target only in `targetbody`
+        # mode -- but left on the bowl so the scene still records what the shot is about.
         workspace_target_m=LIBERO_MATCHED_FOCUS_M,
         left_wrist_position_m=(0.0, LIBERO_MATCHED_WRIST_AXIAL_M, 0.0),
         left_wrist_target_m=(

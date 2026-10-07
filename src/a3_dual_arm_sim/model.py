@@ -873,41 +873,65 @@ def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) ->
 
     for prop in props:
         directory = Path(prop.directory).expanduser()
-        candidates = sorted(directory.glob("*.xml"))
-        if len(candidates) != 1:
-            raise ValueError(
-                f"{prop.name}: {directory} holds {len(candidates)} XML files "
-                f"({[path.name for path in candidates]}); a LIBERO object directory holds "
-                "exactly one, and picking one of several silently would decide which "
-                "object this scene gets"
-            )
-        source = ET.parse(candidates[0]).getroot()
+        source_file = _prop_xml(prop, directory)
+        source = ET.parse(source_file).getroot()
         source_assets = source.find("asset")
         source_world = source.find("worldbody")
         if source_assets is None or source_world is None:
-            raise ValueError(f"{prop.name}: {candidates[0]} has no <asset> or <worldbody>")
+            raise ValueError(f"{prop.name}: {source_file} has no <asset> or <worldbody>")
 
         prefix = f"libero_{prop.name}"
         # Declarations first, so the reference pass below has a complete map to consult.
-        renames = {}
+        renames: dict[str, str] = {}
+        used: set[str] = set()
+
+        def unique(old: str) -> str:
+            """``prefix_old``, numbered if that name is already spoken for.
+
+            LIBERO's own files are not unique-name clean: ``flat_stove.xml`` declares a
+            ``tex-stove_knob`` twice, pointing at two different images.  MuJoCo treats a
+            duplicate name as a compile error rather than as a shadow, so the second one gets
+            a suffix -- and `renames` keeps pointing at the *first*, which is the one both
+            materials name.  The alternative, letting the second win, would repaint the
+            burner knobs with the button texture and say nothing about it.
+            """
+
+            candidate = f"{prefix}_{old}"
+            suffix = 2
+            while candidate in used:
+                candidate = f"{prefix}_{old}__{suffix}"
+                suffix += 1
+            used.add(candidate)
+            return candidate
+
+        renamed: set[int] = set()
         for element in source_assets:
+            renamed.add(id(element))
             old = element.get("name")
             if old:
-                renames[old] = f"{prefix}_{old}"
+                if old in renames:
+                    element.set("name", unique(old))
+                else:
+                    renames[old] = unique(old)
+                    element.set("name", renames[old])
             path = element.get("file")
             if path:
                 absolute = (directory / path).resolve()
                 if not absolute.is_file():
                     raise FileNotFoundError(
-                        f"{prop.name}: {candidates[0]} names {path}, which is not at "
+                        f"{prop.name}: {source_file} names {path}, which is not at "
                         f"{absolute}"
                     )
                 element.set("file", str(absolute))
 
+        # Names outside `<asset>` need prefixing too -- LIBERO's plate and bowl both name a
+        # body ``object`` -- but the reference rewrite has to run over the asset elements as
+        # well, because a material's `texture=` is a reference like any other.
         for element in source.iter():
-            name = element.get("name")
-            if name:
-                element.set("name", f"{prefix}_{name}")
+            if id(element) not in renamed:
+                name = element.get("name")
+                if name:
+                    element.set("name", unique(name))
             for attribute in ("mesh", "material", "texture"):
                 target = element.get(attribute)
                 if target in renames:
@@ -916,7 +940,7 @@ def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wrappers = list(source_world)
         if len(wrappers) != 1:
             raise ValueError(
-                f"{prop.name}: {candidates[0]} has {len(wrappers)} bodies under "
+                f"{prop.name}: {source_file} has {len(wrappers)} bodies under "
                 "<worldbody>; the loader was written for LIBERO's single-wrapper layout"
             )
         body = wrappers[0]
@@ -928,10 +952,54 @@ def _add_libero_props(root: ET.Element, world: ET.Element, config: SimConfig) ->
         body.set("pos", _vec(tuple(float(v) for v in prop.position_m)))
         half = math.radians(float(prop.yaw_deg)) / 2.0
         body.set("quat", _vec((math.cos(half), 0.0, 0.0, math.sin(half))))
-        body.insert(0, ET.Element("freejoint", name=f"{prefix}_free"))
+        if prop.static:
+            # Scenery: welded to the world with its joints dissolved and its geoms out of
+            # collision.  A free joint would let a cabinet fall through a table it was
+            # placed for the *other* table's height, and a colliding one would be one more
+            # thing for an arm with different proportions to hit.  Neither can change the
+            # picture, which is the only thing these are here for.
+            for parent in body.iter():
+                for child in list(parent):
+                    if child.tag in ("joint", "freejoint"):
+                        parent.remove(child)
+                    elif child.tag == "geom":
+                        child.set("contype", "0")
+                        child.set("conaffinity", "0")
+            for element in body.iter("geom"):
+                element.set("contype", "0")
+                element.set("conaffinity", "0")
+        else:
+            body.insert(0, ET.Element("freejoint", name=f"{prefix}_free"))
         world.append(body)
         for element in list(source_assets):
             assets.append(element)
+
+
+def _prop_xml(prop: "LiberoPropConfig", directory: Path) -> Path:
+    """Which XML file a prop means.
+
+    LIBERO's ``stable_scanned_objects`` hold one object per directory, so a glob is the
+    whole answer there -- and a glob is the safer default, because picking one of several
+    silently would decide which object the scene gets.  ``articulated_objects`` is the
+    opposite: a dozen fixtures sharing one folder, where a glob can only ever raise.  A
+    ``xml`` on the prop names the file, and naming one that is not there is an error rather
+    than a fallback.
+    """
+
+    if prop.xml:
+        chosen = directory / prop.xml
+        if not chosen.is_file():
+            raise FileNotFoundError(f"{prop.name}: no such XML file: {chosen}")
+        return chosen
+    candidates = sorted(directory.glob("*.xml"))
+    if len(candidates) != 1:
+        raise ValueError(
+            f"{prop.name}: {directory} holds {len(candidates)} XML files "
+            f"({[path.name for path in candidates]}); a LIBERO object directory holds "
+            "exactly one, and picking one of several silently would decide which "
+            "object this scene gets -- name one with `xml` instead"
+        )
+    return candidates[0]
 
 
 def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
@@ -1150,15 +1218,25 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         pos=_vec(config.cameras.workspace_target_m),
     )
     ET.SubElement(target, "site", size="0.005", rgba="0 0 0 0")
-    ET.SubElement(
-        world,
-        "camera",
-        name="front",
-        mode="targetbody",
-        target="workspace_target",
-        pos=_vec(config.cameras.front_position_m),
-        fovy=f"{config.cameras.front_fovy_deg:.10g}",
-    )
+    # Two kinds of front camera, and the difference is a model input rather than a taste.
+    # Aimed at `workspace_target` (mode `targetbody`) is what this scene has always had and
+    # what `CameraConfig`'s prototype pose was measured for.  A configured quaternion makes
+    # the camera **fixed**, which is what LIBERO's own `agentview` is -- it points one way
+    # for the whole episode and the object is off-centre in its frame.  A camera rebuilt to
+    # look *at* the object matches the distance and the field of view and still frames the
+    # shot differently, so a policy trained on one is handed the other.
+    front = {
+        "name": "front",
+        "pos": _vec(config.cameras.front_position_m),
+        "fovy": f"{config.cameras.front_fovy_deg:.10g}",
+    }
+    if config.cameras.front_quat_wxyz:
+        front["mode"] = "fixed"
+        front["quat"] = _vec(config.cameras.front_quat_wxyz)
+    else:
+        front["mode"] = "targetbody"
+        front["target"] = "workspace_target"
+    ET.SubElement(world, "camera", **front)
 
     base = ET.SubElement(world, "body", name="base_link", pos=f"-0.35 0 {base_height}")
     _add_inertial(base, links["base_link"])

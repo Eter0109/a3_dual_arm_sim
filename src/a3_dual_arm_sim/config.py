@@ -62,6 +62,15 @@ class CameraConfig:
     calibration_status: str = "prototype_estimate"
     workspace_target_m: tuple[float, ...] = (0.15, 0.23, 0.81)
     front_position_m: tuple[float, ...] = (0.7076, -0.4232, 1.5748)
+    #: Orientation of the front camera as a MuJoCo ``w x y z`` quaternion.  **Empty means
+    #: aim at the target body**, which is what every scene written before this field did.
+    #: Setting it makes the camera *fixed*, which is what LIBERO's own ``agentview`` is:
+    #: LIBERO's camera does not look at the object it is there to show, it looks in one
+    #: direction for the whole episode, so the object sits off-centre in its frame.  A
+    #: camera re-derived to aim *at* the object reproduces LIBERO's distance and field of
+    #: view and still frames the shot differently -- centred where LIBERO's is off-axis --
+    #: and this is a policy input, so that difference is not cosmetic.
+    front_quat_wxyz: tuple[float, ...] = ()
     front_fovy_deg: float = 54.0
     left_wrist_position_m: tuple[float, ...] = (0.0, 0.045, 0.085)
     left_wrist_target_m: tuple[float, ...] = (0.0, 0.245, 0.085)
@@ -94,11 +103,25 @@ class LiberoPropConfig:
     #: and collision files it names.  Absolute, because these live in the HuggingFace
     #: cache rather than in this repository.
     directory: str
-    #: World position of the object's own origin, in metres.
+    #: World position of the object's own origin, in metres.  The object is *dropped*
+    #: from here and settles, so a couple of centimetres of clearance costs nothing and
+    #: an interpenetrating spawn costs the first hundred steps.
     position_m: tuple[float, ...] = (0.0, 0.0, 0.0)
     #: Rotation about world z, in degrees.  LIBERO authors its objects upright, so one
     #: angle is the whole orientation.
     yaw_deg: float = 0.0
+    #: The XML file, when the directory holds more than one.
+    #: ``directory`` plus a glob is the right thing for LIBERO's
+    #: ``stable_scanned_objects``, which are one object per directory, and the wrong thing
+    #: for ``articulated_objects``, which is a dozen fixtures sharing one folder.
+    xml: str = ""
+    #: Static scenery: welded to the world and switched out of collision.
+    #: LIBERO's task scenes carry fixtures -- a cabinet, a stove -- that are part of what
+    #: a policy sees and are nowhere near what it manipulates.  They are restored here for
+    #: the picture, with their joints dissolved and their geoms non-colliding, because this
+    #: arm is not a Panda and its base is not where LIBERO's is: a welded body cannot be
+    #: knocked over and cannot block a joint, so the only thing it can change is the image.
+    static: bool = False
 
 
 @dataclass(frozen=True)
@@ -524,6 +547,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         front_position_m=_float_tuple(
             camera_raw, "front_position_m", CameraConfig().front_position_m
         ),
+        front_quat_wxyz=_float_tuple(
+            camera_raw, "front_quat_wxyz", CameraConfig().front_quat_wxyz
+        ),
         front_fovy_deg=float(
             camera_raw.get("front_fovy_deg", CameraConfig().front_fovy_deg)
         ),
@@ -670,6 +696,8 @@ def _libero_props(values: dict[str, Any]) -> tuple[LiberoPropConfig, ...]:
                 directory=str(entry["directory"]),
                 position_m=tuple(float(v) for v in entry["position_m"]),
                 yaw_deg=float(entry.get("yaw_deg", 0.0)),
+                xml=str(entry.get("xml", "")),
+                static=bool(entry.get("static", False)),
             )
         )
     return tuple(props)

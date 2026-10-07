@@ -179,3 +179,37 @@ cookie_transfer:
     - name: ramekin
       directory: /root/.cache/libero/assets/stable_scanned_objects/glazed_rim_porcelain_ramekin
       position_m: [0.016, 0.117, 0.780]
+    # The last three of the scene's five objects and three fixtures, and the reason the
+    # prompt can be LIBERO's own.  `libero_spatial` task 0's BDDL lists exactly:
+    #
+    #   objects  akita_black_bowl_1, akita_black_bowl_2, plate_1, cookies_1,
+    #            glazed_rim_porcelain_ramekin_1
+    #   fixtures main_table, wooden_cabinet_1, flat_stove_1
+    #
+    # and every position below is LIBERO's measured body position from its own compiled
+    # scene under init state 0, moved through the one world offset in `collection.py`
+    # (`LIBERO_WORLD_OFFSET_M`, +0.2135 / -0.0720 / -0.1500):
+    #
+    #   cookies_1          LIBERO ( 0.0579,  0.0264, 0.9094)  ->  ( 0.2714, -0.0456, 0.7594)
+    #   wooden_cabinet_1   LIBERO ( 0.0356, -0.2776, 0.9050)  ->  ( 0.2491, -0.3496, 0.7550)
+    #   flat_stove_1       LIBERO (-0.4171, -0.1311, 0.9050)  ->  (-0.2036, -0.2031, 0.7550)
+    #
+    # `cookies_1` is a real object the policy can see and the reference scene contains, so
+    # it is dropped and settles like the rest.  The cabinet and the stove are scenery: they
+    # are welded to the world with their joints dissolved and their geoms out of collision,
+    # because this arm is not a Panda and its base is not where LIBERO's is -- a welded body
+    # cannot be knocked over and cannot block a joint, so the only thing it can change is the
+    # image, which is exactly the thing that was still missing.
+    - name: cookies
+      directory: /root/.cache/libero/assets/stable_hope_objects/cookies
+      position_m: [0.2714, -0.0456, 0.7894]
+    - name: cabinet
+      directory: /root/.cache/libero/assets/articulated_objects
+      xml: wooden_cabinet.xml
+      position_m: [0.2491, -0.3496, 0.7550]
+      static: true
+    - name: stove
+      directory: /root/.cache/libero/assets/articulated_objects
+      xml: flat_stove.xml
+      position_m: [-0.2036, -0.2031, 0.7550]
+      static: true
