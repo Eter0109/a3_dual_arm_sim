@@ -813,6 +813,23 @@ LIBERO_MATCHED_WRIST_AXIAL_M = 0.045
 LIBERO_MATCHED_WRIST_LOOKAHEAD_M = 0.200
 LIBERO_MATCHED_WRIST_FOVY_DEG = 75.0
 
+#: Where LIBERO's own policy expects to find the hand, on this arm's joints.  Solved by
+#: `scripts/solve_libero_home.py`, which also prints why it is a *nearest* pose rather than
+#: the pose itself: LIBERO's policy starts every episode with the end effector at
+#: (-0.2112, -0.0111, 1.1742) -- at the height of the shoulder, 0.365 m in front of it, tool
+#: hanging straight down -- and this arm cannot stand there.  The wrist pitch spans +/-40
+#: degrees and that pose needs more bend than it has, so the closest reachable pose with the
+#: tool still pointing down lands **26 mm** away, six degrees off vertical.  Held at the
+#: full orientation instead, it lands 102 mm away.
+#:
+#: That residual is the measurement this is here to make.  The scene's camera, its objects
+#: and its lighting are LIBERO's to a millimetre; the arm is the part that cannot be
+#: reproduced, and this is how much of it cannot be, in metres, at the one pose an episode
+#: starts from.
+LIBERO_MATCHED_HOME_RAD = (
+    1.028929, 1.569900, -1.365162, -1.198814, -0.596119, 0.228400, -1.489687,
+)
+
 
 def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     """The camera geometry that reproduces LIBERO's own framing on this arm.
@@ -901,6 +918,26 @@ def libero_props_scene(
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
         if matched_cameras:
             loaded = replace(loaded, cameras=_libero_matched_cameras(loaded.cameras))
+            # The arm starts where LIBERO's arm starts, because the state and the picture are
+            # one observation and they have to describe the same hand.  This is the one scene
+            # reproducing a LIBERO episode; the sibling `a3_libero_props` keeps the A3
+            # deployment home its previous numbers were measured under.
+            #
+            # **`deployment_home`, not `home`.**  `A3CookieTransferEnv.reset` calls the scene's
+            # reset -- which does write `config.home` -- and then overwrites the arm's qpos
+            # with `cookie_transfer.deployment_home`, so an edit to `home` is thrown away at
+            # the top of every episode.  Writing the wrong one of those two costs a full run
+            # and looks exactly like "the arm cannot reach that pose": measured, the two
+            # different `home` values produced the *same* settled joint angles to three
+            # decimals, which is what gave it away.
+            deployment = loaded.cookie_transfer.deployment_home
+            loaded = replace(
+                loaded,
+                cookie_transfer=replace(
+                    loaded.cookie_transfer,
+                    deployment_home=tuple(LIBERO_MATCHED_HOME_RAD) + tuple(deployment[7:]),
+                ),
+            )
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
