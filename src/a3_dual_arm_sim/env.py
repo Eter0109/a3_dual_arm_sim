@@ -565,8 +565,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         validate_observation(observation)
         return observation
 
-    @staticmethod
-    def _reference_orientation(image: np.ndarray) -> np.ndarray:
+    def _reference_orientation(self, image: np.ndarray) -> np.ndarray:
         """Mirror a camera image the way the reference stack does.
 
         LeRobot wraps LIBERO's ``OffScreenRenderEnv`` and rotates every camera
@@ -585,9 +584,18 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         shows the policy a scene with left and right swapped, which is worth about
         twice the lateral offset of whatever it has been asked to reach.
         """
-        if os.environ.get("A3_IMAGE_MIRROR", "1").strip() == "0":
-            # Ablation: hand the policy the unmirrored view, i.e. the one LIBERO's camera
-            # never produces.  Nothing that ships sets this.
+        # **Opt-in per scene, because the two halves of this repository live on opposite
+        # conventions.**  Every A3 dataset and every checkpoint fine-tuned on one was recorded
+        # through this environment with the images unmirrored; every LIBERO checkpoint was
+        # trained on a mirrored view.  Applying the mirror globally broke the first group to
+        # fix the second -- measured against `datasets/a3_cookie_adv_1000_merged`, whose front
+        # camera puts the source bin on the right, and a mirrored render puts it on the left.
+        mirror = self.config.cameras.reference_mirror
+        if os.environ.get("A3_IMAGE_MIRROR", "").strip() == "0":
+            mirror = False
+        elif os.environ.get("A3_IMAGE_MIRROR", "").strip() == "1":
+            mirror = True
+        if not mirror:
             return np.ascontiguousarray(image)
         return np.ascontiguousarray(image[:, ::-1])
 

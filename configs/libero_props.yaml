@@ -33,6 +33,14 @@
 # Check the wiring without loading anything:
 #   a3-sim inspect --config configs/libero_props.yaml
 
+# LIBERO's policy is trained and evaluated on a **horizontally mirrored** view:
+# `LiberoProcessorStep` flips both axes of a bottom-up buffer, which is a mirror once the
+# vertical flip has restored the image.  A3's own scenes must not set this -- their
+# datasets were recorded unmirrored, and `datasets/a3_cookie_adv_1000_merged` proves it:
+# its front camera puts the source bin on the right, as the unmirrored render does.
+cameras:
+  reference_mirror: true
+
 physics_hz: 500
 control_hz: 20
 horizon: 6000

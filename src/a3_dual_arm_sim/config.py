@@ -59,6 +59,21 @@ class CameraConfig:
     a video.  Any comparison run under the previous pose has to be re-run.
     """
 
+    #: Mirror every camera image horizontally before it leaves the environment.
+    #:
+    #: False for A3's own scenes, and that is not a preference: every A3 dataset and every
+    #: checkpoint fine-tuned on one was recorded through this environment with the images
+    #: unmirrored, so mirroring now would feed those models a left-right swap of what they
+    #: were trained on.  Measured against the recordings in
+    #: `datasets/a3_cookie_adv_1000_merged`, whose front camera puts the source bin on the
+    #: right: the unmirrored render agrees with them and the mirrored one does not.
+    #:
+    #: True for the LIBERO reproduction, because the reference stack serves the policy a
+    #: mirrored view: `LiberoProcessorStep` flips both axes of a bottom-up buffer, which is a
+    #: horizontal mirror once the vertical flip has restored the image.  Measured against the
+    #: image LIBERO's own evaluation feeds, `U[:, ::-1]` scores MSE 5131 against 6078 for the
+    #: unmirrored frame.
+    reference_mirror: bool = False
     calibration_status: str = "prototype_estimate"
     workspace_target_m: tuple[float, ...] = (0.15, 0.23, 0.81)
     front_position_m: tuple[float, ...] = (0.7076, -0.4232, 1.5748)
@@ -572,6 +587,9 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         ),
         front_fovy_deg=float(
             camera_raw.get("front_fovy_deg", CameraConfig().front_fovy_deg)
+        ),
+        reference_mirror=bool(
+            camera_raw.get("reference_mirror", CameraConfig().reference_mirror)
         ),
         left_wrist_position_m=_float_tuple(
             camera_raw, "left_wrist_position_m", (0.0, 0.045, 0.085)
