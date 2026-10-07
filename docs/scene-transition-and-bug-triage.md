@@ -304,9 +304,26 @@ Small, and mostly assembly of things that already exist:
    round trip, and tracking (43% of a step per control step at the default damping, which is
    the number `probe_tracking.py` recorded).  It exits non-zero and prints
    `INVARIANT FAILED -- treat as a bug`.
-2. `scripts/replay_vs_dataset.py --root <dataset> --episode e --frames ...`
-   -- the teacher-forced comparison of §2.2 (channels 3 and 6), printing per-channel residuals
-   and the divergence curve.  **Not written yet**, and it is the one that covers the dynamics.
+2. `scripts/replay_vs_dataset.py --scene <name> --dataset <root> --episode e --frames ...`
+   -- the teacher-forced comparison of §2.2 (channels 3 and 6).  **Written.**  It loads a
+   recorded state, applies the recorded action for exactly one control step, and compares with
+   the recorded next state; the free-space residual is expressed as a fraction of one recorded
+   step, and the open loop that follows is reported as peak / settled peak / endpoint.
+   Measured, both datasets pairing with their own scene: **0.00** of a step
+   (`a3_cookie_single_piece`/`a3_cookie_one`) and **0.07** (`a3_cookie_batch`/
+   `a3_cookie_adv_1000_merged`), gripper 0.003 and 0.029, open loop exactly 0.0 and 0.021 rad.
+   The thresholds are measured rather than picked: allowing 0.5 of a step, where the *smallest
+   deliberate error* this channel can make -- dropping the recorded velocity from the initial
+   condition, `--rest-start` -- scores 0.76.
+
+   Two limits are part of the result and are printed with it.  **It does not certify the
+   scene**: the arm is the same robot in every scene here, so a deliberately wrong pairing also
+   scores 0.00 -- this channel certifies the action, state, unit and servo conventions, which
+   is where the mirrored image, the wrong picture and the legacy gripper all showed up as
+   fatal.  And **contact steps are reported separately and not judged**, because the dataset
+   does not record where the props were; on a scene whose props it cannot reproduce, the arm
+   can be teleported into one and the environment's own safety stop fires, which is an
+   `INVALID` verdict rather than a number (F1 in `bug-catalogue.md`).
 3. `logs/invariants/baseline.json`
    -- the recorded expectations, so drift is a diff and not a discussion.
 

@@ -334,6 +334,73 @@ The three above (C1, C2, C3) are this class.  One more rule covers them:
   whether that reference is the same thing on both sides.  The `top_site` fallback and the
   `PLACED` string are both "the two ends were not the same measurement".
 
+The four that `scripts/replay_vs_dataset.py` produced are worth keeping because **every one of
+them was wrong in the same direction**: they all reported "the scene's dynamics differ from the
+recording", which is the finding the tool exists to rule out.  A harness does not fail
+randomly; it fails toward the conclusion you built it to check.
+
+### F1. The arm that had stopped, reported as an arm that did not move
+
+*Symptom*: free-space residual 0.0391 rad, `4.45 of a recorded step`, `moved/expected median
+0.000` on `a3_cookie_batch` -- the largest number the tool had ever produced.
+
+*Cause*: nothing kinematic.  Writing the arm's state while letting `mj_resetData` drop the
+**props** onto the model's default pose put the arm inside a prop at frame 98; the solver
+ejected it at 97.88 rad/s, the environment's own safety stop fired ("joint velocity exceeded
+safety threshold"), and `step()` then applies `self._current_joint_action()` forever -- the arm
+holds position for the remaining hundred frames.  Every step after that is a zero delta against
+a moving recording, i.e. a wrong-dynamics verdict of exactly the size of the recorded motion.
+Restoring the props to their post-reset pose instead was no better: the arm dives into a
+stationary cookie on the frames where the recording is closing the gripper, and the same stop
+fires on the same frame.  The props are now left to our own physics.
+
+*Rule*: **a body that has stopped is not a body that did not move**, and a tool that reports a
+verdict must know which of the two it is looking at.  A safety stop is now an `INVALID` verdict
+with the frame and the reason, not a number.  Any environment with a latch needs its latch
+checked in the measurement loop, and the latch's *frame* is part of the result.
+
+### F2. A window that silently crossed an episode boundary
+
+*Symptom*: gripper error 0.75 while the arm channel reported nothing at all.
+
+*Cause*: episode 0 of `a3_cookie_one` is 190 frames and the tool asked for 200.  The reader
+indexed the dataset's global row index, so frames 190-199 were the first ten frames of episode
+1.  Teacher forcing **teleports the arm onto the recorded pose at every frame by
+construction**, so a step discontinuity in the recording is invisible in the arm channel -- and
+the gripper, which cannot teleport in one control step, was the only channel that could see it.
+
+*Rule*: an episode is a container, and a reader that takes a range must know its ends.  Asking
+for more frames than an episode has is an error, not a clamp.  This is also a general property
+of teacher forcing worth remembering: **it tests one-step faithfulness and hides every
+discontinuity the recording contains.**
+
+### F3. Half of a second-order initial condition
+
+*Symptom*: free-space residual 0.0033 rad = 0.76 of a recorded step, on a scene whose open-loop
+replay was **exactly 0.0 rad** for fifty steps.  That contradiction was the whole diagnosis: the
+same dynamics cannot both track perfectly and miss by three quarters of a step.
+
+*Cause*: teacher forcing wrote the recorded **position** and left the velocity at zero.  A
+trajectory is an initial value problem in `(position, velocity)`; the dataset records both
+(`observation.velocity`), and the only reason it was being dropped was that an earlier attempt
+had estimated the velocity by finite difference across one frame -- which is the interval
+*average*, not the instantaneous value -- and that estimate made things worse, so "no velocity"
+looked like the safe default.  Both were wrong; the recorded velocity is the right one and it
+drives the residual to 0.0000.
+
+*Rule*: when a check disagrees with another check of the same quantity, one of them is not
+measuring what you think.  Do not average two suspicions into a tolerance -- find the
+contradiction and read it.
+
+### F4. The gripper judged against the command instead of the recording
+
+*Symptom*: a gripper error of 0.69 on a scene where the gripper tracks the recording exactly.
+
+*Cause*: the achieved opening was compared with `action[7]`, the **commanded** opening, instead
+of with `state[7]`, the recorded achieved one.  It measures servo lag while looking exactly like
+a convention mismatch -- the same class as C2, with the same shape: one end is a command and the
+other is a measurement.
+
 ---
 
 ## G. Cross-scene leakage
