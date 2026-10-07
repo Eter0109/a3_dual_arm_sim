@@ -1107,6 +1107,14 @@ def _add_libero_panda(
         name = element.get("name")
         if name in names:
             element.set("name", names[name])
+        # **References too, not just declarations.**  The actuator block names its joints, and
+        # a rename that only touches `name` leaves those pointing at joints that no longer
+        # exist by that name -- which is silent: the torque limits this reads back came out as
+        # the A3's, because the lookup missed and fell through to the default.
+        for attribute in ("joint", "site", "body"):
+            reference = element.get(attribute)
+            if reference in names:
+                element.set(attribute, names[reference])
 
     base = list(source.find("worldbody"))[0]
     base.set("pos", _vec(LIBERO_PANDA_BASE_POS_M))
@@ -1168,13 +1176,25 @@ def _add_libero_panda(
     )
 
     source_joints = _source()[1]
+    # **Torque limits come from robosuite, not from the A3.**  The first version took the A3's
+    # force limit for the joint at the same index, on the argument that the servo should not
+    # be a variable.  It made one anyway, and a worse one: the A3's shoulder and elbow are
+    # rated 34 N.m where robosuite's Panda is rated 80, so this arm was driven with 40 percent
+    # of its torque and never reached the object -- 0 of 40 episodes put a fingertip within
+    # 56 mm of the bowl, against 39 of 40 on the A3.  A crippled actuator is not a controlled
+    # one.
+    torque = {}
+    for element in source.iter("motor"):
+        joint = element.get("joint")
+        span = (element.get("ctrlrange") or "").split()
+        if joint and len(span) == 2:
+            torque[joint] = max(abs(float(value)) for value in span)
+
     driven = []
     for name in LEFT_JOINTS:
         joint = next(element for element in source.iter("joint") if element.get("name") == name)
         limits = _floats(joint.get("range"), 2)
-        # The A3's force limit for the joint at the same index: the servo is deliberately not
-        # a variable here, so the only thing this scene changes is which arm is driving.
-        effort = source_joints[name].effort
+        effort = torque.get(name, source_joints[name].effort)
         driven.append((name, effort, limits))
     return driven
 
