@@ -254,6 +254,60 @@ def parse_perturbations(spec: str) -> list[str]:
     return names
 
 
+def _body_xy_z(data: Any, name: str) -> np.ndarray:
+    return np.asarray(data.get_body_xpos(name), dtype=np.float64).copy()
+
+
+def step_metrics(vec: Any) -> list[dict[str, float]]:
+    """The A3 probe's numbers, per environment, read from LIBERO's own simulator.
+
+    The A3 probe reports how far the nearest fingertip is from the bowl's *axis*, how far
+    it is above the *rim*, and how far the bowl has moved.  Those are the numbers the whole
+    investigation is phrased in, and on their own they are unreadable -- "58 mm from the
+    axis" is neither good nor bad until a run that succeeds says what the number looks
+    like.  This is that run: the score is 10/10 on this task, so whatever these say here is
+    the shape of working behaviour.
+    """
+
+    import mujoco
+
+    from a3_dual_arm_sim.props import prop_frame
+
+    out: list[dict[str, float]] = []
+    for sub in vec.envs:
+        env = _robosuite_env(sub)
+        model = env.sim.model._model
+        data = env.sim.data
+        bowl_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "akita_black_bowl_1_main")
+        if bowl_id < 0:
+            raise RuntimeError("the bowl's body is not in LIBERO's model under that name")
+        bowl = _body_xy_z(data, "akita_black_bowl_1_main")
+        plate, _r, _s = prop_frame(model, data, mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, "plate_1_main"))
+        tips = []
+        for name in ("gripper0_finger_joint1_tip", "gripper0_finger_joint2_tip"):
+            try:
+                tips.append(_body_xy_z(data, name))
+            except Exception:
+                tips.append(_body_xy_z(data, "gripper0_leftfinger"))
+        centre, _radius, size = prop_frame(model, data, bowl_id)
+        # The A3 probe's own definition of the rim, imported rather than restated: the top
+        # of the bowl's measured bounding box.  An earlier version of this function looked
+        # for a site named `akita_black_bowl_1_top_site`; LIBERO has no such site, so it
+        # silently fell back to the bowl body's origin -- 71 mm below the rim -- and every
+        # height it reported was off by that much.  Two measurements compared across the two
+        # simulators have to be the same measurement.
+        rim_z = float(centre[2] + size[2] / 2.0)
+        out.append({
+            "axis_mm": min(float(np.linalg.norm(tip[:2] - centre[:2])) for tip in tips) * 1000.0,
+            "rim_mm": min(float(tip[2] - rim_z) for tip in tips) * 1000.0,
+            "bowl": centre.round(6).tolist(),
+            "plate_over_mm": float(np.linalg.norm(centre[:2] - plate[:2])) * 1000.0,
+            "rim_z": rim_z,
+        })
+    return out
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", default="libero_spatial")
@@ -274,6 +328,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", type=Path,
                         default=Path("/root/autodl-tmp/logs/libero_reference.json"))
+    parser.add_argument("--trace", type=Path, default=None,
+                        help="record the A3 probe's own quantities -- the nearest fingertip's "
+                             "distance to the bowl's axis, its height against the rim, and how "
+                             "far the bowl has moved -- at every control step, so that a run "
+                             "that succeeds can be compared with one that does not.  Without "
+                             "it those numbers have no scale.")
     parser.add_argument("--perturb", default="none",
                         help="comma-separated single-axis rendering changes, applied to a "
                              "freshly built environment: " + ", ".join(PERTURBATIONS))
@@ -376,6 +436,10 @@ def main() -> int:
 
     perturbations = parse_perturbations(args.perturb)
     report: dict = {"suite": args.suite, "episodes_per_task": args.episodes, "runs": []}
+    #: Per-step fingertip and bowl measurements, when asked for.  Keyed by
+    #: `"{perturbation}:{task_id}"`; each entry is a list of steps, and each step holds one
+    #: dict per environment.
+    traces: dict[str, list[dict]] = {} if args.trace else None
 
     def run_one(perturbation: str, task_id: int) -> tuple[int, np.ndarray, dict]:
         """One task's episodes under one perturbation.  The environment is new each time.
@@ -411,6 +475,7 @@ def main() -> int:
             steps_taken = np.zeros(args.episodes, dtype=np.int64)
             actions: list[np.ndarray] = []
             replans: list[np.ndarray] = []
+            rows: list[dict] = [] if traces is not None else []
 
             for step in range(max_steps):
                 if bool(done.all()):
@@ -429,6 +494,11 @@ def main() -> int:
                 actions.append(action_np.copy())
 
                 observation, _, terminated, truncated, info = vec.step(action_np)
+                if traces is not None:
+                    # After `step`, not before: gymnasium's vector env resets a finished
+                    # sub-environment at the *start* of the next step (`NEXT_STEP`
+                    # autoreset), so the state returned here is still the episode's last.
+                    rows.append({"step": step, "points": step_metrics(vec)})
                 # A queue boundary is where `select_action` had an empty queue and really
                 # ran the network; the other nine steps replay its rows.
                 if "final_info" in info:
@@ -447,6 +517,18 @@ def main() -> int:
             steps_taken[steps_taken == 0] = max_steps
             executed = np.concatenate(actions, axis=0) if actions else np.zeros((0, 7))
             replan_rows = np.concatenate(replans, axis=0) if replans else np.zeros((0, 7))
+            if traces is not None and rows:
+                # The bowl's displacement is measured against wherever it started, which is
+                # per episode and only known once the episode has begun.
+                first = {}
+                for entry in rows:
+                    for index, point in enumerate(entry["points"]):
+                        first.setdefault(index, point["bowl"])
+                for entry in rows:
+                    for index, point in enumerate(entry["points"]):
+                        point["bowl_mm"] = float(np.linalg.norm(
+                            np.asarray(point["bowl"]) - np.asarray(first[index]))) * 1000.0
+                traces[f"{perturbation}:{task_id}"] = rows
             return int(successes.sum()), steps_taken, summarise(executed, replan_rows)
         finally:
             vec.close()
@@ -510,6 +592,10 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nJSON: {args.output}")
+    if traces is not None and args.trace is not None:
+        args.trace.parent.mkdir(parents=True, exist_ok=True)
+        args.trace.write_text(json.dumps(traces, ensure_ascii=False), encoding="utf-8")
+        print(f"trace: {args.trace}")
     return 0
 
 
