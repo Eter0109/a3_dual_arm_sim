@@ -361,6 +361,20 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
         return command
 
+    def _torque_hold(self) -> None:
+        """Stop a torque-driven arm moving during the steps a reset runs.
+
+        The reset path hands the deployment home's joint angles to `_apply_controls`, which is
+        the right thing for a position servo and the wrong thing for a motor; see
+        `osc.OperationalSpaceAdapter.hold`.
+        """
+
+        if not isinstance(self._ik, OperationalSpaceAdapter):
+            return
+        hold = self._ik.hold(self.data)
+        for index, name in enumerate(LEFT_JOINTS):
+            self.data.ctrl[self._actuator_ids[name]] = hold[index]
+
     def _apply_controls(self, canonical: np.ndarray) -> None:
         arm_values = np.r_[canonical[:7], canonical[8:15]]
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):

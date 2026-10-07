@@ -134,13 +134,44 @@ class OperationalSpaceAdapter:
             self.kp * (goal_position - position),
             self.kp * rotation_error,
         ]
-        torque = jacobian.T @ (error - self.kd * task_velocity)
+        # **The dynamically consistent inverse, which is what makes the gains mean what
+        # robosuite says they mean.**  The plain Jacobian transpose was tried first and is not
+        # equivalent: a full +x command moved the tool **124 mm** where robosuite's
+        # `output_max` is 50, because an unweighted task force on a light arm is an
+        # acceleration the gains were never scaled for.  robosuite multiplies the task force
+        # through `Lambda = (J M^-1 J^T)^-1`, so the loop behaves as the second-order system
+        # `kp` and `damping_ratio` describe whatever the arm's inertia is.
+        dofs = np.asarray(self._left_dof, dtype=np.int32)
+        mass = np.zeros((self.model.nv, self.model.nv), dtype=np.float64)
+        mujoco.mj_fullM(self.model, mass, data.qM)
+        arm_mass = mass[np.ix_(dofs, dofs)]
+        lam = jacobian @ np.linalg.inv(arm_mass) @ jacobian.T
+        lam = np.linalg.inv(lam + 1e-9 * np.eye(6))
+        torque = jacobian.T @ (lam @ (error - self.kd * task_velocity))
         # Gravity and Coriolis, so the loop only has to do the tracking.  This is the term
         # the joint-position servo got for free from being a servo.
-        torque = torque + data.qfrc_bias[np.asarray(self._left_dof, dtype=np.int32)]
+        torque = torque + data.qfrc_bias[dofs]
         torque = np.clip(torque, self._limits[:, 0], self._limits[:, 1])
 
         right = np.asarray([data.qpos[address] for address in self._right_qpos], dtype=np.float64)
         return np.ascontiguousarray(
             np.r_[torque, (delta[6] + 1.0) / 2.0, right, 1.0], dtype=np.float64
         )
+
+    def hold(self, data: mujoco.MjData) -> np.ndarray:
+        """The torques that hold the arm where it already is, for a reset's settling steps.
+
+        A reset writes the deployment home's **joint angles** into `ctrl`, which is right for
+        the position actuators this harness was built around and wrong for torque ones: the
+        arm was handed -2.45 N.m where zero was wanted and finished the hundred settling
+        steps **19.4 degrees** from LIBERO's home -- before the first policy step, in the
+        scene whose whole purpose is that the arm starts where LIBERO's starts.
+
+        What a torque-driven arm wants there is its bias force, which is gravity and
+        Coriolis, and nothing else: that is what makes it stay put.
+        """
+
+        dofs = np.asarray(self._left_dof, dtype=np.int32)
+        torque = np.clip(data.qfrc_bias[dofs], self._limits[:, 0], self._limits[:, 1])
+        right = np.asarray([data.qpos[address] for address in self._right_qpos], dtype=np.float64)
+        return np.ascontiguousarray(np.r_[torque, 1.0, right, 1.0], dtype=np.float64)
