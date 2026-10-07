@@ -67,16 +67,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_episode(dataset: Path, episode: int, frame: int) -> tuple[np.ndarray, np.ndarray, dict]:
-    """`(state, action, video_frame_locators)` for one frame of one episode."""
+def episode_meta(dataset: Path, episode: int) -> tuple[dict, dict, int]:
+    """`(meta row, camera locators, dataset_from_index)` for one episode."""
 
     import pyarrow.parquet as pq
 
-    meta_files = sorted((dataset / "meta" / "episodes").rglob("*.parquet"))
     meta = None
-    for path in meta_files:
-        table = pq.ParquetFile(path).read().to_pylist()
-        for row in table:
+    for path in sorted((dataset / "meta" / "episodes").rglob("*.parquet")):
+        for row in pq.ParquetFile(path).read().to_pylist():
             if int(row["episode_index"]) == episode:
                 meta = row
                 break
@@ -85,7 +83,6 @@ def read_episode(dataset: Path, episode: int, frame: int) -> tuple[np.ndarray, n
     if meta is None:
         raise SystemExit(f"episode {episode} is not in {dataset}/meta/episodes")
 
-    start = int(meta["dataset_from_index"])
     #: short camera name -> (feature name, chunk, file, timestamp).  The metadata calls it
     #: `observation.images.front` and the scene calls it `front`; both are needed, one for the
     #: path and one for the command line.
@@ -100,6 +97,88 @@ def read_episode(dataset: Path, episode: int, frame: int) -> tuple[np.ndarray, n
                 int(meta[f"videos/{feature}/file_index"]),
                 float(meta[f"videos/{feature}/from_timestamp"]),
             )
+    return meta, locators, int(meta["dataset_from_index"])
+
+
+def episode_bounds(dataset: Path, episode: int) -> tuple[int, int]:
+    """`(first, one past last)` row index of one episode inside `dataset`."""
+
+    meta, _locators, start = episode_meta(dataset, episode)
+    return start, int(meta["dataset_to_index"])
+
+
+def read_episode_frames(dataset: Path, episode: int, first: int, count: int
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(states, actions, velocities)`, each `(count, width)`, from `first`.
+
+    One parquet read for the whole range rather than one per frame: a teacher-forced replay
+    wants hundreds of consecutive frames and pyarrow re-reads the file each time otherwise.
+
+    The velocities are returned because **a teacher-forced replay is a second-order initial
+    value problem and the dataset records both halves of the initial condition.**  Starting
+    each step from rest is not a neutral simplification: measured on `a3_cookie_one` it put a
+    0.0033 rad residual on a scene that reproduces the recording bit-exactly from the
+    recorded velocity, and 0.0033 rad is three quarters of a recorded step there -- an error
+    of the same order as the signal, in the direction of "the dynamics differ".
+
+    **A window may not cross an episode boundary, and this refuses to.**  Episode 0 of
+    `a3_cookie_one` is 190 frames and asking for 200 silently appended the first ten frames of
+    episode 1: the gripper error jumped to 0.75 where the recording steps its jaw from 0.25 to
+    1.0, and the *arm* channel showed nothing at all, because teacher forcing teleports the arm
+    onto the recorded pose at every frame by construction.  A discontinuity that hides in one
+    channel and screams in another is exactly the kind of false finding this tool exists to
+    prevent, so the boundary is an error rather than a clamp.
+    """
+
+    import pyarrow.parquet as pq
+
+    _meta, _locators, start = episode_meta(dataset, episode)
+    _first, stop = episode_bounds(dataset, episode)
+    if first < 0 or count < 1:
+        raise SystemExit(f"cannot read {count} frames from frame {first}")
+    if start + first + count > stop:
+        raise SystemExit(
+            f"episode {episode} of {dataset} has {stop - start} frames; frames "
+            f"{first}..{first + count - 1} cross into the next episode "
+            f"(the boundary is at frame {stop - start})")
+    wanted = np.arange(start + first, start + first + count)
+    wanted_set = set(wanted.tolist())
+    states: dict[int, np.ndarray] = {}
+    actions: dict[int, np.ndarray] = {}
+    velocities: dict[int, np.ndarray] = {}
+    for path in sorted((dataset / "data").rglob("*.parquet")):
+        parquet = pq.ParquetFile(path)
+        for batch in parquet.iter_batches():
+            rows = batch.to_pylist()
+            if not rows:
+                continue
+            if int(rows[-1]["index"]) < wanted[0] or int(rows[0]["index"]) > wanted[-1]:
+                continue
+            for row in rows:
+                index = int(row["index"])
+                if index in wanted_set:
+                    states[index] = np.asarray(row["observation.state"], dtype=np.float64)
+                    actions[index] = np.asarray(row["action"], dtype=np.float64)
+                    velocities[index] = np.asarray(row["observation.velocity"],
+                                                   dtype=np.float64)
+        if len(states) == len(wanted):
+            break
+    missing = [int(i) for i in wanted if int(i) not in states]
+    if missing:
+        raise SystemExit(f"{len(missing)} frames of episode {episode} start at {first} are "
+                         f"missing from {dataset}/data (first missing index {missing[0]})")
+    ordered = [int(i) for i in wanted]
+    return (np.stack([states[i] for i in ordered]),
+            np.stack([actions[i] for i in ordered]),
+            np.stack([velocities[i] for i in ordered]))
+
+
+def read_episode(dataset: Path, episode: int, frame: int) -> tuple[np.ndarray, np.ndarray, dict]:
+    """`(state, action, video_frame_locators)` for one frame of one episode."""
+
+    import pyarrow.parquet as pq
+
+    meta, locators, start = episode_meta(dataset, episode)
 
     data_files = sorted((dataset / "data").rglob("*.parquet"))
     index = start + frame
