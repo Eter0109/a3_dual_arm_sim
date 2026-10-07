@@ -110,7 +110,13 @@ class OperationalSpaceAdapter:
             goal_quaternion = np.empty(4, dtype=np.float64)
             mujoco.mju_mat2Quat(goal_quaternion, rotation.reshape(9))
             mujoco.mju_quatIntegrate(goal_quaternion, local, 1.0)
-            mujoco.mju_quat2Mat(goal_rotation, goal_quaternion)
+            # `mju_quat2Mat` wants the *result* flat: a 3x3 view is rejected outright,
+            # which it was -- the first rotation command a policy ever sent killed the
+            # run at its first step, and the teardown noise in the log made it look like
+            # a rendering failure.
+            flat = np.empty(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(flat, goal_quaternion)
+            goal_rotation = flat.reshape(3, 3)
 
         mujoco.mj_jacSite(
             self.model, data, self._jacobian_position, self._jacobian_rotation, self._site
