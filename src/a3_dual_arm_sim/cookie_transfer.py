@@ -44,9 +44,43 @@ def _rotate_xy(vector: np.ndarray, yaw: float) -> np.ndarray:
     )
 
 
-#: Jaw opening at the start of a LIBERO episode, in metres.  LIBERO's own
-#: `robot0_gripper_qpos` is [0.0387, -0.0387], read from the reset its evaluation uses.
-LIBERO_PANDA_FINGER_OPEN_M = 0.0387
+#: Jaw opening at the start of a LIBERO episode, in metres.
+#:
+#: **Not** 0.0387, which is where the jaws end up after the first "open" command and what an
+#: earlier version of this file used.  It is 0.020833 -- half of the travel -- and it is the
+#: same in all fifty of LIBERO's initial states.  Measured on the delivered evaluation, the
+#: policy's first `observation.state` ends with `[0.020833, -0.020833]`: half open, and the
+#: state it is told about, not a detail of the mechanism.
+LIBERO_PANDA_FINGER_OPEN_M = 0.020833
+
+
+def libero_init_arm(path: str, seed: int) -> tuple[np.ndarray, float]:
+    """LIBERO's own start pose for episode `seed`: seven arm joints and the jaw opening.
+
+    Read from the `.pruned_init` archive LIBERO ships -- 50 states per task, one per episode
+    -- whose first row is laid out `[unused, seven arm joints, two jaws, objects...]`.  The
+    arm is *not* the same from one episode to the next: measured, each joint varies with a
+    standard deviation near a degree and a range of four to six, so a single fixed home is
+    not any of the poses the policy was evaluated from.  The jaws are constant at 0.020833 in
+    all fifty.
+
+    `torch` is imported here rather than at module scope: the archive is a Torch blob and the
+    rest of this package is importable without it.
+    """
+
+    import torch
+
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        from libero.libero import get_libero_path
+
+        resolved = Path(get_libero_path("init_states")) / resolved
+    path = str(resolved)
+    states = torch.load(path, weights_only=False)
+    row = np.asarray(states[int(seed) % len(states)], dtype=np.float64).ravel()
+    if row.size < 10:
+        raise ValueError(f"{path} holds {row.size} numbers; LIBERO's layout needs 10")
+    return row[1:8], float(row[8])
 
 
 @dataclass(frozen=True)
@@ -174,6 +208,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         self.COOKIE_RESET_Z = scene_config.cookie_reset_z_m
         self.DEPLOYMENT_HOME = np.asarray(scene_config.deployment_home, dtype=np.float64)
+        self._libero_init_states = str(getattr(scene_config, "libero_init_states", ""))
         #: Home for the current episode; `reset` replaces it when the scene
         #: randomises the start pose.  Initialised so a caller that never resets
         #: still reads a sane pose.
@@ -520,23 +555,39 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self._scene_offset = (
             self._apply_scene_randomization() if randomize_scene else np.zeros(2)
         )
-        home = self._randomized_deployment_home if randomize_scene else self.DEPLOYMENT_HOME
+        home = np.asarray(
+            self._randomized_deployment_home if randomize_scene else self.DEPLOYMENT_HOME,
+            dtype=np.float64,
+        ).copy()
+        if self._libero_init_states and seed is not None:
+            # LIBERO's robot, LIBERO's start pose: one per episode, out of the file its own
+            # evaluation reads.  Nothing here is invented, and nothing is jittered on top --
+            # a randomised start would only move this arm away from where the policy expects
+            # it, and the pose it expects already varies.
+            arm7, jaw_opening = libero_init_arm(self._libero_init_states, int(seed))
+            home[:7] = arm7
+            # Both the pose **and the command that holds it**.  `settle` closes the loop on
+            # the command, so setting only the state would be undone before the first
+            # observation: the jaws would be driven back to whichever opening slot 7 held,
+            # which is what the earlier version of this fix did -- measured, they ended at
+            # full open against LIBERO's half.
+            home[7] = jaw_opening / self._finger_travel["L"]
         arm_values = np.r_[home[:7], home[8:15]]
         for name, value in zip(ARM_JOINTS, arm_values, strict=True):
             self.data.qpos[self._qpos_ids[name]] = value
             self.data.qvel[self._dof_ids[name]] = 0.0
-        # Every one of LIBERO's own episodes starts with the jaws **open**: its
-        # `robot0_gripper_qpos` is [0.0387, -0.0387] at the reset its evaluation uses.  This
-        # reset used to zero them, which is closed for robosuite's gripper and open for the
-        # A3's -- the two grippers disagree about which end of the travel zero is.  A policy
-        # told the gripper is already shut plans a different first move; with the Panda that
-        # was a hand driven down onto the bowl, jaws never closing on it.
+        # LIBERO's own episodes start with the jaws **half open**: its first
+        # `robot0_gripper_qpos` is [0.020833, -0.020833].  This reset used to zero them, which
+        # is closed for robosuite's gripper and open for the A3's -- the two grippers disagree
+        # about which end of the travel zero is.  A policy told the wrong opening plans a
+        # different first move; with the Panda that was a hand driven down onto the bowl, jaws
+        # never closing on it.
         for side in ("L", "R"):
             for sign, joint_id in zip(
                 self._finger_sign[side], self._finger_joints[side], strict=True
             ):
                 travelled = self._finger_open_at_zero[side]
-                value = 0.0 if travelled else sign * LIBERO_PANDA_FINGER_OPEN_M
+                value = 0.0 if travelled else sign * jaw_opening
                 self.data.qpos[self.model.jnt_qposadr[joint_id]] = value
                 self.data.qvel[self.model.jnt_dofadr[joint_id]] = 0.0
         self._last_applied_action = home.copy()

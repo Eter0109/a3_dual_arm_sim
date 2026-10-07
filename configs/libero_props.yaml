@@ -132,6 +132,12 @@ cookie_transfer:
   target_bin_world_position_m: [-0.600, -1.400, 0.753]
   cookie_source_positions_m:
     - [-0.600, -1.200]
+  # The LIBERO initial states this scene mirrors: its own `pruned_init` archive holds 50
+  # start poses, one per episode, and LIBERO's evaluation gives episode `i` the `i`-th.
+  # The arm's seven joints vary about a degree between them and the jaws are half open,
+  # so a single fixed home is not the pose the policy was evaluated from.  Path is
+  # relative to LIBERO's `init_states` directory.
+  libero_init_states: libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate.pruned_init
   libero_props:
     # LIBERO's `akita_black_bowl`: the object every `libero_spatial` task picks up.  The
     # directory holds one MJCF that names a 4.6 MB visual mesh and a 12.8 MB texture, both

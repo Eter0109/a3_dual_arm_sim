@@ -190,6 +190,18 @@ class CookieSceneConfig:
     #: LIBERO props to place in this scene.  Empty by default, so every existing
     #: config and every existing number is unaffected.
     libero_props: tuple[LiberoPropConfig, ...] = ()
+    #: The LIBERO initial-state file this scene mirrors, `.pruned_init`.  Set only for the
+    #: scenes built around LIBERO's own robot, where it replaces the arm's start pose with
+    #: **LIBERO's own**, one entry per episode.  Empty by default; the A3 scenes drive the A3
+    #: and must not be moved.
+    #:
+    #: Why this matters: LIBERO does not start every episode from the same pose.  Its
+    #: `pruned_init` file holds 50 of them, each varying the arm's seven joints by about a
+    #: degree (range ~4-6 degrees) and the jaws are at `+/-0.020833` in all fifty.  Measured
+    #: on the delivered evaluation, that first eight-wide state -- position, axis-angle,
+    #: **and that jaw value** -- is exactly what the policy receives before it plans its first
+    #: move.
+    libero_init_states: str = ""
 
 
 @dataclass(frozen=True)
@@ -667,6 +679,7 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         ),
         deployment_home=_float_tuple(cookie_raw, "deployment_home", defaults.deployment_home),
         libero_props=_libero_props(cookie_raw),
+        libero_init_states=str(cookie_raw.get("libero_init_states", defaults.libero_init_states)),
     )
     return SimConfig(
         home=home,
