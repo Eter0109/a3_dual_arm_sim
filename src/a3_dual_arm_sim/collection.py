@@ -839,7 +839,34 @@ LIBERO_PANDA_HOME_RAD = (
 )
 
 
-def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
+def _look_at_quat_wxyz(eye: tuple[float, ...], target: tuple[float, ...]) -> tuple[float, ...]:
+    """A `(w, x, y, z)` orientation that puts a MuJoCo camera at ``eye`` on ``target``.
+
+    MuJoCo cameras look down their local **-z** with **+y** up in the image, so the frame
+    is built from the view direction and a world-up reference rather than from Euler
+    angles.  Used to *re-aim* the transferred agentview without touching its position or
+    its field of view, which is the only change this repository has measured a price for
+    in the other direction (the front camera's fovy costs 12-14 points of 50).
+    """
+
+
+    import mujoco
+
+    forward = np.asarray(target, dtype=np.float64) - np.asarray(eye, dtype=np.float64)
+    forward = forward / np.linalg.norm(forward)
+    z_axis = -forward
+    x_axis = np.cross(forward, np.array((0.0, 0.0, 1.0)))
+    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    rotation = np.stack((x_axis, y_axis, z_axis), axis=1).ravel()
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat, rotation)
+    return tuple(float(value) for value in quat)
+
+
+def _libero_matched_cameras(
+    cameras: CameraConfig, focus_m: tuple[float, ...] | None = None
+) -> CameraConfig:
     """The camera geometry that reproduces LIBERO's own framing on this arm.
 
     Why this touches the cameras and nothing else
@@ -880,7 +907,11 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
         # elevation -- and each pinned a scalar while leaving the direction wrong, because
         # LIBERO's camera is not aimed at the object at all.
         front_position_m=LIBERO_AGENTVIEW_MATCHED_POS_M,
-        front_quat_wxyz=LIBERO_AGENTVIEW_QUAT_WXYZ,
+        front_quat_wxyz=(
+            LIBERO_AGENTVIEW_QUAT_WXYZ
+            if focus_m is None
+            else _look_at_quat_wxyz(LIBERO_AGENTVIEW_MATCHED_POS_M, focus_m)
+        ),
         front_fovy_deg=LIBERO_AGENTVIEW_FOVY_DEG,
         # Inert while the camera is fixed -- MuJoCo reads a target only in `targetbody`
         # mode -- but left on the bowl so the scene still records what the shot is about.
@@ -920,6 +951,7 @@ def libero_props_scene(
     panda: bool = False,
     cookie_on_table: bool = False,
     a3_single_cookie: bool = False,
+    a3_layout_offset_m: tuple[float, float] = (0.0, 0.0),
     hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
@@ -948,8 +980,43 @@ def libero_props_scene(
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
+        # A3's own block, read once and up here because both the camera and the props need
+        # it and they are set in different branches below.
+        a3_transfer = (
+            _styled_config("configs/cookie_same_column.yaml", visual_style).cookie_transfer
+            if a3_single_cookie
+            else None
+        )
         if matched_cameras:
-            loaded = replace(loaded, cameras=_libero_matched_cameras(loaded.cameras))
+            # **In this branch the transferred agentview is aimed at nothing**, and it has to
+            # be re-aimed.  LIBERO's agentview is copied with its position *and* orientation
+            # (it is a fixed camera and its auto-aim target is inert in that mode), so it looks
+            # at the spot LIBERO's bowl used to occupy -- which in this scene is bare table,
+            # with A3's bin and box clipped into the bottom-left corner of the frame and the
+            # Cookie a few-pixel sliver at the edge.
+            #
+            # **Moving the layout instead was tried and does not work.**  A rigid translation
+            # of A3's whole arrangement into the frame is the smaller perturbation on paper --
+            # same internal geometry, camera untouched -- and its price was measured: with A3's
+            # own arm, which solves this scene 3 times in 3 with the layout where A3 puts it,
+            # the same expert solves it **0 in 3** at offsets (0.02, -0.12) and (0.02, -0.20).
+            # Where the arrangement sits is load-bearing for the task, so the camera is the
+            # axis that has to give.
+            #
+            # Only the **orientation** changes: position and fovy stay LIBERO's, so the one
+            # camera property this repository has priced (fovy, 12-14 points of 50) is held.
+            focus = None
+            if a3_transfer is not None:
+                source_xy = a3_transfer.cookie_source_positions_m[0]
+                box_xy = a3_transfer.target_bin_world_position_m[:2]
+                focus = (
+                    (source_xy[0] + box_xy[0]) / 2.0,
+                    (source_xy[1] + box_xy[1]) / 2.0,
+                    a3_transfer.cookie_model_z_m,
+                )
+            loaded = replace(
+                loaded, cameras=_libero_matched_cameras(loaded.cameras, focus)
+            )
             # **The arm is deliberately left at the A3 deployment home, and that is a
             # measurement rather than an omission.**  LIBERO starts every episode with its
             # end effector at (-0.2112, -0.0111, 1.1742) and this arm starts 362 mm away, so
@@ -1039,6 +1106,24 @@ def libero_props_scene(
             # runs it flat, and so does this.
             a3 = _styled_config("configs/cookie_same_column.yaml", visual_style)
             a3_transfer = a3.cookie_transfer
+            # **The offset exists to be measured, and it measured zero.**  Translating the
+            # whole layout into the camera's frame looked like the smaller change than
+            # re-aiming the camera -- same internal geometry, camera untouched -- and the
+            # reference controller rejected it: A3's own arm solves this scene **3 times in 3**
+            # with the layout where A3 puts it, and **0 in 3** at both (0.02, -0.12) and
+            # (0.02, -0.20).  Where the arrangement sits is load-bearing, so what gives is the
+            # camera's aim, in the `matched_cameras` branch above.  The parameter is kept so
+            # that result stays reproducible rather than becoming a memory.
+            #
+            # Written as explicit tuple literals rather than by adding tuples together:
+            # the first version of this added a shifted 2-tuple to a `(z,)` and left the
+            # trailing comma *inside* the parentheses, which silently produced
+            # `((x, y, z),)` -- a one-tuple where a three-tuple was meant -- and the same
+            # slip nested `cookie_source_positions_m` one level too deep.  Both surfaced
+            # only as `TypeError: unsupported format string passed to tuple.__format__`,
+            # which names neither the field nor the shape.
+            offset_x, offset_y = a3_layout_offset_m
+            a3_source = a3_transfer.cookie_source_positions_m[0]
             loaded = replace(
                 loaded,
                 cookie_transfer=replace(
@@ -1046,11 +1131,20 @@ def libero_props_scene(
                     libero_props=(),
                     box_lift_m=a3_transfer.box_lift_m,
                     box_tilt_deg=a3_transfer.box_tilt_deg,
-                    cookie_source_positions_m=(a3_transfer.cookie_source_positions_m[0],),
-                    source_bin_center_m=a3_transfer.source_bin_center_m,
+                    cookie_source_positions_m=(
+                        (a3_source[0] + offset_x, a3_source[1] + offset_y),
+                    ),
+                    source_bin_center_m=(
+                        a3_transfer.source_bin_center_m[0] + offset_x,
+                        a3_transfer.source_bin_center_m[1] + offset_y,
+                    ),
                     source_bin_half_size_m=a3_transfer.source_bin_half_size_m,
                     source_bin_wall_height_m=a3_transfer.source_bin_wall_height_m,
-                    target_bin_world_position_m=a3_transfer.target_bin_world_position_m,
+                    target_bin_world_position_m=(
+                        a3_transfer.target_bin_world_position_m[0] + offset_x,
+                        a3_transfer.target_bin_world_position_m[1] + offset_y,
+                        a3_transfer.target_bin_world_position_m[2],
+                    ),
                     target_bin_half_size_m=a3_transfer.target_bin_half_size_m,
                     target_bin_wall_height_m=a3_transfer.target_bin_wall_height_m,
                     target_slots_local_m=a3_transfer.target_slots_local_m,
