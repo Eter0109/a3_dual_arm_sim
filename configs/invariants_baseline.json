@@ -1,0 +1,48 @@
+{
+  "_comment": "Written by scripts/guard.py --record.  Edit by re-recording, not by hand.",
+  "seeds": "0,1,2,3,4,5,6,7,8,9",
+  "expected_placements": 9,
+  "invariants": {
+    "scene": "a3_cookie_single_piece",
+    "dataset": "/root/autodl-tmp/datasets/a3_cookie_one",
+    "images": {
+      "front": {
+        "best": "as_is",
+        "mse": 58.6,
+        "noise": 263.6,
+        "margin": 25.8916
+      },
+      "left_wrist": {
+        "best": "as_is",
+        "mse": 889.1,
+        "noise": 2038.3,
+        "margin": 2.8382
+      },
+      "right_wrist": {
+        "best": "as_is",
+        "mse": 5.2,
+        "noise": 130.5,
+        "margin": 242.0857
+      }
+    },
+    "state_max_abs_diff": 0.0,
+    "gripper": {
+      "open": 1.0,
+      "close": 0.0272
+    },
+    "tracking": 0.433
+  },
+  "replay": {
+    "a3_cookie_single_piece": {
+      "residual_over_step": 3.5114359675171173e-05,
+      "open_loop_peak_rad": 0.0,
+      "verdict": "DYNAMICS MATCH"
+    },
+    "a3_cookie_batch": {
+      "residual_over_step": 0.07113282814010873,
+      "open_loop_peak_rad": 0.02124,
+      "verdict": "DYNAMICS MATCH"
+    }
+  },
+  "rollouts": null
+}

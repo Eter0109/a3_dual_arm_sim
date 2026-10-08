@@ -346,7 +346,7 @@ def main() -> int:
     ratio_to_step = (float(np.percentile(free_residuals, 90)) / median_step
                      if (free_residuals.size and median_step) else None)
     report["teacher_forced"] = {
-        "steps": int(len(residuals)),
+        "steps": len(residuals),
         "steps_in_free_space": int(free.sum()),
         "steps_in_contact": int((~free).sum()),
         "residual_max_rad": float(residuals_array.max()) if len(residuals_array) else None,
@@ -371,10 +371,6 @@ def main() -> int:
                                         if free.any() else None),
         "moved_over_expected_median": float(np.median(ratios)) if ratios else None,
     }
-
-    info = json.loads((args.dataset / "meta" / "info.json").read_text())
-
-    info = json.loads((args.dataset / "meta" / "info.json").read_text())
 
     # ---- open loop ----
     #
@@ -412,7 +408,7 @@ def main() -> int:
     #: or 0.1524 rad depending only on what ran before it.
     settled = arm_divergence[10:] or arm_divergence
     report["open_loop"] = {
-        "steps": int(len(arm_divergence)),
+        "steps": len(arm_divergence),
         "arm_per_step_rad": [round(v, 5) for v in arm_divergence[:50]],
         "arm_peak_rad": round(max(arm_divergence), 5) if arm_divergence else None,
         "arm_peak_at_step": int(np.argmax(arm_divergence)) + 1 if arm_divergence else None,

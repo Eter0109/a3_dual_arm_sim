@@ -237,7 +237,7 @@ Each step names the invariants it can break, which are the ones to re-measure.
 
 | step | change | invariants at risk | gate |
 |---|---|---|---|
-| 0 | record the baseline | -- | save the current `a3_libero_panda` numbers and the Cookie fingerprint to `logs/invariants/baseline.json` |
+| 0 | record the baseline | -- | `python scripts/guard.py --record` -- writes `configs/invariants_baseline.json`, which is **tracked on purpose**: under `logs/` it would be gitignored, and a baseline that cannot be diffed is a number somebody read once |
 | 1 | **mirror off** (`reference_mirror: false`) | 1 (images) | fingerprint vs the dataset frame |
 | 2 | **cameras -> A3's own** (mount, fov, resolution) | 1 | fingerprint + MSE at a recorded frame, per camera |
 | 3 | **arm -> A3** (joints, torque/servo, gripper semantics) | 3, 4, 5 | TF replay step 3-4; tracking probe; gripper round trip |
@@ -260,19 +260,39 @@ Three rules for the walk:
 
 ## 5. The guard set
 
-Two invariants that must hold after **every** edit, run from a script:
+Two invariants that must hold after **every** edit, and a runner that checks them together:
+
+```
+python scripts/guard.py --record    # once, on a state that is known good
+python scripts/guard.py             # after every edit; exits non-zero
+python scripts/guard.py --cheap     # the half that needs no GPU and no checkpoint
+```
 
 1. `a3_libero_panda`, seeds 0-9, expect **>= 9/10**.
 2. The Cookie fingerprint: for a fixed seed, `mse(ours, dataset_frame)` as-is beats every flip
    by >= 15%, and is within a small multiple of the within-episode noise floor.
 
+Each is checked against the recorded baseline and, where an absolute invariant exists, against
+the invariant rather than against the baseline -- `|ours - recorded|` is exact arithmetic and
+is checked at `1e-6`, not at "whatever it was last time".
+
+Every row prints **measured, expected, and the difference**.  One consequence is worth naming
+because it is the whole reason the tool is shaped this way: the replay residual is checked
+twice, once against the tolerance the tool documents and once as drift from the baseline, in
+two rows.  They are different claims -- a residual 70x its baseline can sit happily under an
+absolute tolerance -- and a single row that averaged them would answer neither.
+
 Plus, cheap and worth it:
 
-3. `probe_tracking.py` -- the delivery ratio.
+3. `probe_tracking.py` -- the delivery ratio.  (Also a row in the guard, from
+   `check_invariants.py`'s channel 4.)
 4. `python -m pytest` or whatever the smoke set is; the bridge's `policy check` for every
    manifest still parses.
 
 The guard set is what makes "I fixed A and did not break B" a claim rather than a hope.
+**A guard that cannot fail is not a guard**: the failure path was tested by tampering with a
+copy of the baseline (a wrong orientation, a 58x image budget, a tracking drift, a 70x replay
+drift) and confirming each one lands on its own row with the reason printed.
 
 ---
 
@@ -324,8 +344,11 @@ Small, and mostly assembly of things that already exist:
    does not record where the props were; on a scene whose props it cannot reproduce, the arm
    can be teleported into one and the environment's own safety stop fires, which is an
    `INVALID` verdict rather than a number (F1 in `bug-catalogue.md`).
-3. `logs/invariants/baseline.json`
-   -- the recorded expectations, so drift is a diff and not a discussion.
+3. `configs/invariants_baseline.json`
+   -- `scripts/guard.py --record` writes it, and `guard.py` reads it: the recorded
+   expectations, so drift is a diff and not a discussion.  It is a config and not a log
+   because `logs/` is gitignored, and the only baseline worth having is one `git diff` can
+   show.
 
 Cost: the ledger is cheap -- no policy, no GPU -- which is the point.  It can run on every
 commit; the policy runs only when it is green.
