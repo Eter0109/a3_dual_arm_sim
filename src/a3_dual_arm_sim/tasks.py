@@ -130,7 +130,30 @@ TASKS: dict[str, TaskSpec] = {
         name="a3_cookie_single_piece",
         prompt=_SINGLE_PIECE_PROMPT,
         success_contract="released_1_upright_settled_contained_0_remain",
-    ),    # The relay fills two boxes rather than one, so its acceptance rule is its own:
+    ),
+    # The two behaviour probes are the same task with one layout fact moved, and they carry
+    # their own names only because the registry's invariant is that a scene key and its task
+    # name agree -- which is what makes a summary row traceable back to the scene that wrote
+    # it.  Their *contract* is `a3_cookie_single_piece`'s, unchanged: the probe changes where
+    # the box starts or where the arm starts, never what counts as done.  A scene whose
+    # success rule differed would be measuring something else and would need a rule of its
+    # own rather than a copy of this one.
+    #
+    # They are registered rather than built inline so that `probe_ladder_object.py --scene
+    # <name>` reproduces the run that produced the numbers in
+    # `scene-transition-and-bug-triage.md`, and so a sweep that iterates the registry finds
+    # them instead of a reader having to know their names.
+    "a3_probe_box_in_bin": TaskSpec(
+        name="a3_probe_box_in_bin",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="released_1_upright_settled_contained_0_remain",
+    ),
+    "a3_probe_home_over_cookie": TaskSpec(
+        name="a3_probe_home_over_cookie",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="released_1_upright_settled_contained_0_remain",
+    ),
+    # The relay fills two boxes rather than one, so its acceptance rule is its own:
     # ten Cookies in each box with sixty left in the source, box A pushed clear and
     # box B back in the station.  The environment cannot express it -- its task
     # config checks a single target bin -- which is why this task's contract is the
@@ -139,6 +162,46 @@ TASKS: dict[str, TaskSpec] = {
         name="a3_cookie_two_box",
         prompt=COOKIE_PROMPT,
         success_contract="released_10_each_box_60_remain_boxes_relocated",
+    ),
+    # The LIBERO prop scenes.  They borrowed `a3_cookie_single_piece`'s spec until now, which
+    # is why the registry's own consistency test had been red: a scene keyed `a3_libero_props`
+    # was declaring a task named `a3_cookie_single_piece`, and a summary row could not be
+    # traced back to the scene that wrote it.  Borrowing the *prompt* is fine and deliberate --
+    # these scenes exist to watch a LIBERO-trained policy under LIBERO's own camera, so they
+    # have to be asked in words it knows -- but the acceptance rule has to be stated per scene,
+    # and for four of the five there is no rule to state.
+    #
+    # Only `a3_libero_panda_single_cookie` is `scorable` (see the scene's own `details`): the
+    # other four have no reachable Cookie, or ask for something no dataset contains, so
+    # `success` is False by construction and a success rate there carries no information.  An
+    # explicit `unscored_...` contract says that out loud rather than dressing those runs in
+    # the single-piece rule and letting a reader divide by the wrong denominator.  `training`
+    # derives its accepted task list from this registry, so what is here is exactly what a
+    # dataset is allowed to claim.
+    "a3_libero_panda_single_cookie": TaskSpec(
+        name="a3_libero_panda_single_cookie",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="released_1_upright_settled_contained_0_remain",
+    ),
+    "a3_libero_props": TaskSpec(
+        name="a3_libero_props",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="unscored_no_cookie_in_the_scene",
+    ),
+    "a3_libero_props_matched": TaskSpec(
+        name="a3_libero_props_matched",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="unscored_no_cookie_in_the_scene",
+    ),
+    "a3_libero_panda": TaskSpec(
+        name="a3_libero_panda",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="unscored_no_cookie_in_the_scene",
+    ),
+    "a3_libero_panda_cookie": TaskSpec(
+        name="a3_libero_panda_cookie",
+        prompt=_SINGLE_PIECE_PROMPT,
+        success_contract="unscored_no_cookie_in_the_source_bin",
     ),
 }
 

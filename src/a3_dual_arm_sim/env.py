@@ -241,6 +241,40 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         return self._last_applied_action.copy()
 
     @property
+    def canonical_action_mode(self) -> str:
+        """What this environment's own command vector actually *is*, as a name.
+
+        ``step`` produces two arrays: the one the caller asked for
+        (``info["requested_action"]``) and the one that reached the actuators
+        (``info["applied_action"]``).  They are the same shape, and they mean the
+        same thing only while the arm is a joint-servo arm.  Under
+        `OperationalSpaceAdapter` the left arm's seven entries are the **torques** the
+        controller solved for the latched goal -- `_limit_joint_action` says so and
+        deliberately neither clips nor rate-limits them -- and there is no name for
+        that among the action spaces, because it is not one.
+
+        So this raises instead of returning a label.  A recorder that stores
+        ``applied_action`` has to ask, and the answer for a torque-driven arm is "store
+        the requested action instead", which is the space the policy emits and the one
+        a fine-tune can use.  Returning ``"joint_position"`` here is what would put
+        Newton-metres in a field a reader takes for radians.
+        """
+
+        if isinstance(self._ik, OperationalSpaceAdapter):
+            # `noqa: TRY004` -- the rule reads an `isinstance` guard followed by `ValueError`
+            # as a type check wanting `TypeError`.  This is not a type check: a torque-driven
+            # arm is a legitimate configuration, and the error is that *this question* has no
+            # answer for it, which is what every other contract violation in this package
+            # raises (`ContractError` is a `ValueError`).
+            raise ValueError(  # noqa: TRY004
+                "this scene's left arm is driven by operational-space control, so the "
+                "applied action is joint torque and belongs to no action space; record "
+                "`requested_action` (the space the policy emits) rather than "
+                "`applied_action`"
+            )
+        return "joint_position"
+
+    @property
     def current_joint_action(self) -> np.ndarray:
         return self._current_joint_action()
 

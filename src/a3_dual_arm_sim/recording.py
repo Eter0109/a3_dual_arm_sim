@@ -10,9 +10,11 @@ from typing import Any, Protocol
 import numpy as np
 
 from .contracts import (
+    CARTESIAN_ACTION_DIM,
     EEF_POSE,
     FORCE,
     FRONT_IMAGE,
+    JOINT_ACTION_DIM,
     LEFT_WRIST_IMAGE,
     RIGHT_WRIST_IMAGE,
     STATE,
@@ -31,7 +33,12 @@ TASK = "task"
 
 
 class Recorder(Protocol):
-    def start_episode(self, context: EpisodeContext, controller_type: str) -> None: ...
+    def start_episode(
+        self,
+        context: EpisodeContext,
+        controller_type: str,
+        stored_action_mode: str,
+    ) -> None: ...
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None: ...
     def finish_episode(
         self,
@@ -48,9 +55,16 @@ class MemoryRecorder:
         self.episodes: list[list[dict[str, Any]]] = []
         self.metrics: list[Mapping[str, Any]] = []
         self.context: EpisodeContext | None = None
+        self.stored_action_mode: str | None = None
 
-    def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
+    def start_episode(
+        self,
+        context: EpisodeContext,
+        controller_type: str,
+        stored_action_mode: str,
+    ) -> None:
         self.context = context
+        self.stored_action_mode = stored_action_mode
         self.frames = []
 
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None:
@@ -73,15 +87,35 @@ class MemoryRecorder:
         return None
 
 
+#: Width of the ``action`` column per action space.  The two spaces are different lengths, so the
+#: schema cannot be a constant: a `cartesian_delta` dataset is 14 wide and a joint one is 16, and
+#: LeRobot validates every frame against the declared shape (measured -- it raises
+#: "The feature 'action' of shape '(14,)' does not have the expected shape '(16,)'" rather than
+#: writing the wrong thing, which is the good failure).
+ACTION_WIDTH = {"joint_position": JOINT_ACTION_DIM, "cartesian_delta": CARTESIAN_ACTION_DIM}
+
+
 def lerobot_features(
-    height: int, width: int, *, use_videos: bool = False
+    height: int, width: int, *, action_mode: str = "joint_position", use_videos: bool = False
 ) -> dict[str, Any]:
     """Describe one canonical A3 frame to LeRobot.
 
     LeRobot selects video storage from the feature ``dtype`` rather than from the
     ``use_videos`` writer flag, so the camera keys must be declared as ``video``
     for episodes to be encoded into mp4 files instead of PNG rows.
+
+    ``action_mode`` names the space the ``action`` column belongs to and therefore how wide it
+    is.  It is a parameter rather than a constant because the dataset's action is the *policy's*
+    action -- see `EpisodeRunner.recorded_action` -- and the two spaces in use here are 14 and 16
+    wide.  The observation features are unaffected: `observation.state` is the environment's own
+    16-wide joint state whatever the policy emits.
     """
+
+    if action_mode not in ACTION_WIDTH:
+        raise ValueError(
+            f"unknown action_mode {action_mode!r}; known spaces are {sorted(ACTION_WIDTH)}"
+        )
+    action_width = ACTION_WIDTH[action_mode]
     image = {
         "dtype": "video" if use_videos else "image",
         "shape": (height, width, 3),
@@ -95,7 +129,11 @@ def lerobot_features(
         VELOCITY: {"dtype": "float32", "shape": (16,), "names": [f"velocity_{i}" for i in range(16)]},
         EEF_POSE: {"dtype": "float32", "shape": (14,), "names": [f"eef_pose_{i}" for i in range(14)]},
         FORCE: {"dtype": "float32", "shape": (18,), "names": [f"force_{i}" for i in range(18)]},
-        ACTION: {"dtype": "float32", "shape": (16,), "names": [f"action_{i}" for i in range(16)]},
+        ACTION: {
+            "dtype": "float32",
+            "shape": (action_width,),
+            "names": [f"action_{i}" for i in range(action_width)],
+        },
     }
 
 
@@ -110,6 +148,7 @@ class LeRobotV3Recorder:
         fps: int,
         image_height: int,
         image_width: int,
+        action_mode: str = "joint_position",
         use_videos: bool = False,
         rollover_mb: float | None = None,
     ) -> None:
@@ -128,12 +167,15 @@ class LeRobotV3Recorder:
             fps=fps,
             root=self.root,
             robot_type="A3_dual_arm",
-            features=lerobot_features(image_height, image_width, use_videos=use_videos),
+            features=lerobot_features(
+                image_height, image_width, action_mode=action_mode, use_videos=use_videos
+            ),
             use_videos=use_videos,
             image_writer_threads=3,
         )
         if rollover_mb is not None:
             self._set_rollover(rollover_mb)
+        self._action_mode = action_mode
         self._context: EpisodeContext | None = None
         self._controller_type = "unknown"
         self._frames = 0
@@ -181,9 +223,27 @@ class LeRobotV3Recorder:
             write_info(meta.info, meta.root)
         self.rollover_mb = rollover_mb
 
-    def start_episode(self, context: EpisodeContext, controller_type: str) -> None:
+    def start_episode(
+        self,
+        context: EpisodeContext,
+        controller_type: str,
+        stored_action_mode: str,
+    ) -> None:
+        # The schema was fixed when the dataset was created and cannot be changed afterwards, so
+        # a run whose recorded action is a different width than the file declares has to stop
+        # here rather than at the first frame.  Only the *name* is compared, because the name is
+        # what carries the width (`ACTION_WIDTH`) and comparing two names is the check that
+        # cannot drift.
+        if stored_action_mode != self._action_mode:
+            raise ValueError(
+                f"this dataset was created for {self._action_mode!r} actions but the runner is "
+                f"recording {stored_action_mode!r}; construct the recorder with "
+                f"action_mode={stored_action_mode!r} so the declared schema and the recorded "
+                f"action agree"
+            )
         self._context = context
         self._controller_type = controller_type
+        self._stored_action_mode = stored_action_mode
         self._frames = 0
 
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None:
@@ -217,7 +277,13 @@ class LeRobotV3Recorder:
             "task": self._context.task,
             "controller_type": self._controller_type,
             "source_action_mode": self._context.action_mode,
-            "stored_action_mode": "joint_position",
+            # What the ``action`` column *is*, told to the recorder by the runner that chose
+            # the array rather than written here as a literal.  It used to be the literal
+            # ``"joint_position"``, which was true only of a joint-servo arm: under
+            # operational-space control the applied action is joint torque, so a scene with
+            # LIBERO's Panda on the left arm would have shipped Newton-metres in a field whose
+            # metadata called them radians, and nothing in the pipeline would have objected.
+            "stored_action_mode": self._stored_action_mode,
             "frames": self._frames,
             "success": success,
         }

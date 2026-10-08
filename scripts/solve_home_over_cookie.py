@@ -22,7 +22,8 @@ from a3_dual_arm_sim.contracts import LEFT_JOINTS
 COOKIE_XY = (0.0994 + 0.020, 0.2311 - 0.200)
 HOVER_HEIGHT_M = 0.120
 
-scene = libero_props_scene(matched_cameras=True, panda=True, a3_single_cookie=True,
+scene = libero_props_scene(task_name="a3_probe_home_over_cookie", matched_cameras=True,
+                           panda=True, a3_single_cookie=True,
                            a3_layout_offset_m=(0.020, -0.200))
 env = scene.build_env(0.0, 0.0)
 env.reset(seed=0, options=None)

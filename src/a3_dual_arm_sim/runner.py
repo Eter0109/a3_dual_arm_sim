@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -11,6 +11,34 @@ from .contracts import EpisodeContext, jsonable
 from .env import A3DualArmEnv
 from .policy import Policy
 from .recording import Recorder
+
+#: Which of the two arrays ``env.step`` returns is written as an episode's ``action``.
+#: ``applied`` is the environment's canonical command and is what every scene recorded before
+#: this was a choice; ``requested`` is what the policy emitted.
+RecordedAction = Literal["applied", "requested"]
+
+
+def stored_action_mode(env: A3DualArmEnv, recorded_action: str) -> str:
+    """Name the action space the array we are about to record belongs to.
+
+    One definition, because two callers need the same answer and a mismatch between them is
+    exactly the defect this exists to prevent: ``collect_dataset`` has to declare the dataset's
+    schema *before* the first episode and the runner has to declare what it wrote, and a schema
+    of one width holding an action of another is caught by LeRobot only on the first frame.
+
+    ``requested`` is the policy's own space by construction.  ``applied`` is the environment's,
+    and where the left arm is torque-driven the environment refuses to put a name on it -- see
+    `A3DualArmEnv.canonical_action_mode` -- because there is no action space whose entries are
+    Newton-metres and inventing one is how torques end up in a jaw-angle column.
+    """
+
+    if recorded_action not in ("applied", "requested"):
+        raise ValueError(
+            f"recorded_action must be 'applied' or 'requested', got {recorded_action!r}"
+        )
+    if recorded_action == "requested":
+        return str(env.action_mode)
+    return env.canonical_action_mode
 
 
 def _jsonable(value: Any) -> Any:
@@ -80,10 +108,15 @@ class EpisodeRunner:
         realtime: bool = False,
         save_failed_episodes: bool = True,
         reset_options: Mapping[str, Any] | None = None,
+        recorded_action: RecordedAction = "applied",
     ) -> None:
         if policy.action_mode != env.action_mode:
             raise ValueError(
                 f"policy action_mode={policy.action_mode} does not match env {env.action_mode}"
+            )
+        if recorded_action not in ("applied", "requested"):
+            raise ValueError(
+                f"recorded_action must be 'applied' or 'requested', got {recorded_action!r}"
             )
         self.env = env
         self.policy = policy
@@ -91,6 +124,19 @@ class EpisodeRunner:
         self.recorder = recorder
         self.realtime = realtime
         self.save_failed_episodes = save_failed_episodes
+        #: Which of the two arrays ``env.step`` returns is written as the dataset's
+        #: ``action``.  ``applied`` is the environment's own canonical command and is what
+        #: every scene recorded before this was a choice; ``requested`` is what the policy
+        #: emitted, which is the space a fine-tune trains on and the only one that exists
+        #: for a torque-driven arm.
+        #:
+        #: The distinction is not cosmetic.  Under `OperationalSpaceAdapter` the applied
+        #: action's first seven entries are Newton-metres; recording them would put torques
+        #: in a field a reader takes for joint angles, and the old hardcoded
+        #: ``stored_action_mode = "joint_position"`` would have agreed with the reader.  So
+        #: the mode is asked of the environment (`canonical_action_mode`) rather than
+        #: assumed, and it raises for an arm whose command is not an action space at all.
+        self.recorded_action = recorded_action
         #: Extra ``env.reset`` options, so a caller can control a scene's own
         #: randomisation without wrapping the environment.  The collection driver
         #: uses this to pass the two switches the batch scenes need set
@@ -100,10 +146,14 @@ class EpisodeRunner:
 
     def run(self, *, seed: int = 0, max_steps: int | None = None) -> EpisodeResult:
         context = EpisodeContext(seed=seed, task=self.task, action_mode=self.env.action_mode)
+        # Ask before the first step, so an impossible combination fails on a scene that has
+        # not yet run rather than 500 episodes into a collection.  The dataset's schema is
+        # created from this same answer, and the recorder asserts the two agree.
+        mode = stored_action_mode(self.env, self.recorded_action)
         observation, _ = self.env.reset(seed=seed, options=self.reset_options)
         self.policy.reset(context)
         if self.recorder is not None:
-            self.recorder.start_episode(context, type(self.policy).__name__)
+            self.recorder.start_episode(context, type(self.policy).__name__, mode)
         terminated = truncated = False
         info: dict[str, Any] = {}
         # Running maximum of every scalar info entry.  The final value is not enough,
@@ -144,7 +194,12 @@ class EpisodeRunner:
                     observe_step(requested=action, applied=info["applied_action"], info=info)
                 recording_enabled = bool(getattr(self.policy, "recording", True))
                 if self.recorder is not None and recording_enabled:
-                    self.recorder.add_frame(observation, info["applied_action"])
+                    recorded = (
+                        info["requested_action"]
+                        if self.recorded_action == "requested"
+                        else info["applied_action"]
+                    )
+                    self.recorder.add_frame(observation, recorded)
                     recorded_frames += 1
                 observation = next_observation
                 if terminated or truncated or bool(getattr(self.policy, "stop_requested", False)):

@@ -17,7 +17,7 @@ from .expert import A3CookieTransferExpert, A3GraspExpert, CookiePhase
 from .grasp import A3GraspEnv, GraspTaskConfig
 from .policy import Policy
 from .recording import LeRobotV3Recorder
-from .runner import EpisodeRunner
+from .runner import EpisodeRunner, RecordedAction, stored_action_mode
 from .same_column_batch_expert import A3SameColumnBatchExpert
 from .single_piece_expert import A3SinglePieceExpert
 from .tasks import TASKS, TaskSpec
@@ -179,6 +179,17 @@ class CollectionScene:
     #: own task config) reports it here so the summary states what was applied
     #: rather than what was requested.
     applied_noise: tuple[float, float] | None = None
+    #: Which of ``env.step``'s two arrays becomes the dataset's ``action``.
+    #:
+    #: ``"applied"`` is the environment's own canonical command, which is what every
+    #: dataset collected before this was a choice contains.  ``"requested"`` is what the
+    #: *policy* emitted, and it is the only honest choice when the two differ: under
+    #: operational-space control the applied action is joint torque, so a scene with
+    #: LIBERO's Panda on the left arm has to record the request or ship Newton-metres in a
+    #: column a reader takes for joint angles.  The dataset's declared width follows from
+    #: this -- see `runner.stored_action_mode` and `recording.ACTION_WIDTH` -- so it also
+    #: decides whether the ``action`` column is 16 wide or 14.
+    recorded_action: RecordedAction = "applied"
     #: Extra scene facts for the summary (config path, noise, layout). Recorded so
     #: a dataset explains itself without reading the script that made it.
     details: dict[str, Any] = field(default_factory=dict)
@@ -268,12 +279,17 @@ def collect_dataset(
     if fast_render:
         env.use_fast_render()
     policy = scene.build_policy(env)
+    # The dataset's schema is fixed when the file is created, so the space has to be known
+    # here rather than discovered from the first frame.  Asked once, of the same function the
+    # runner uses, and the recorder asserts the two agree before an episode starts.
+    recorded_mode = stored_action_mode(env, scene.recorded_action)
     recorder = LeRobotV3Recorder(
         destination,
         repo_id=repo_id,
         fps=env.config.control_hz,
         image_height=env.config.image_height,
         image_width=env.config.image_width,
+        action_mode=recorded_mode,
         use_videos=use_videos,
         rollover_mb=rollover_mb,
     )
@@ -282,6 +298,7 @@ def collect_dataset(
         policy,
         task=scene.task.prompt,
         recorder=recorder,
+        recorded_action=scene.recorded_action,
         save_failed_episodes=save_failed_episodes,
         reset_options={
             "randomize_scene": scene.randomize_placements,
@@ -934,6 +951,7 @@ COOKIE_ON_TABLE_PROMPT = "pick up the yellow block and place it on the plate"
 
 def libero_props_scene(
     *,
+    task_name: str,
     visual_style: str = "plain",
     matched_cameras: bool = False,
     panda: bool = False,
@@ -1195,10 +1213,17 @@ def libero_props_scene(
         # A3 Cookie prompt and takes LIBERO's words on the command line, because there the
         # instruction is a separate axis; here the object *is* the axis, so a sentence about
         # a bowl would be asking about the wrong thing.
+        # The instruction has to name what is on the table, and the *acceptance rule* has to
+        # be the one belonging to this scene.  `task_name` is required rather than defaulted
+        # because this builder serves eight registered scenes and a default would silently
+        # hand several of them one scene's rule -- which is what used to happen: every
+        # `a3_libero_*` scene declared the task named `a3_cookie_single_piece`, so a summary
+        # row could not be traced back to the scene that wrote it and the registry's own
+        # consistency test was red.
         task=(
-            replace(TASKS["a3_cookie_single_piece"], prompt=COOKIE_ON_TABLE_PROMPT)
+            replace(TASKS[task_name], prompt=COOKIE_ON_TABLE_PROMPT)
             if cookie_on_table
-            else TASKS["a3_cookie_single_piece"]
+            else TASKS[task_name]
         ),
         build_env=build_env,
         build_policy=build_policy,
@@ -1259,23 +1284,26 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
         "a3_cookie_single_piece": cookie_single_piece_scene,
-        "a3_libero_props": libero_props_scene,
+        "a3_libero_props": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_props", **kwargs
+        ),
         # The same scene with the camera geometry a LIBERO policy was trained under.  A
         # separate name rather than a flag on the CLI because the two produce numbers that
         # must not be compared, and a name is the only thing that survives into a report.
         "a3_libero_props_matched": lambda **kwargs: libero_props_scene(
-            matched_cameras=True, **kwargs
+            task_name="a3_libero_props_matched", matched_cameras=True, **kwargs
         ),
         # LIBERO's cameras, LIBERO's objects, LIBERO's fixtures -- and LIBERO's own robot on
         # the left arm.  The one scene where a failure cannot be about the arm, because the
         # arm is the reference one; see `model._add_libero_panda`.
         "a3_libero_panda": lambda **kwargs: libero_props_scene(
-            matched_cameras=True, panda=True, **kwargs
+            task_name="a3_libero_panda", matched_cameras=True, panda=True, **kwargs
         ),
         # Axis 4 of the ladder: `a3_libero_panda` with A3's own Cookie in the bowl's place
         # and the two bowls taken out.  The only axis that differs from `a3_libero_panda` is
         # the object, which is what makes the pair a measurement rather than two scenes.
         "a3_libero_panda_cookie": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_panda_cookie",
             matched_cameras=True, panda=True, cookie_on_table=True, **kwargs
         ),
         # A3's own single-Cookie task on the table that is known to work: the validated
@@ -1308,6 +1336,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # the scene; and a slab turned onto its long face is a different grasp from one
         # presented edge-on.  It is a visibility experiment, not a candidate configuration.
         "a3_libero_panda_single_cookie": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_panda_single_cookie",
             matched_cameras=True, panda=True, a3_single_cookie=True,
             a3_layout_offset_m=(0.020, -0.200),
             a3_cookie_position_m=(0.2343, -0.0932),
@@ -1334,6 +1363,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # instruction.  If the policy reaches for the Cookie here, its choice depends on the
         # *state* rather than only on how the objects look, which would be worth knowing.
         "a3_probe_box_in_bin": lambda **kwargs: libero_props_scene(
+            task_name="a3_probe_box_in_bin",
             matched_cameras=True, panda=True, a3_single_cookie=True,
             a3_layout_offset_m=(0.020, -0.200),
             # The bin's centre after the offset is (0.195, 0.115); its inner half size is
@@ -1354,6 +1384,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # same measurement -- but the direction of the risk is known and it is recorded here
         # so the result is not read as a clean test of "the camera sees the object".
         "a3_probe_home_over_cookie": lambda **kwargs: libero_props_scene(
+            task_name="a3_probe_home_over_cookie",
             matched_cameras=True, panda=True, a3_single_cookie=True,
             a3_layout_offset_m=(0.020, -0.200),
             a3_home_over_cookie=True,

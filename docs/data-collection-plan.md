@@ -80,24 +80,38 @@ ablation rather than a fork.
 
 ### 2.2 The dataset would record torques in a field labelled joint positions
 
-`runner.py:147` records `info["applied_action"]`, and `recording.py:220` **hardcodes**
-`"stored_action_mode": "joint_position"` in the episode metadata.  Under the Panda that vector's
-first seven entries are Newton-metres from the OSC solve.  So a dataset collected on this scene
-today would ship torques -- magnitudes of order 1-10 -- inside a schema that says they are joint
-angles, and nothing in the pipeline would object.
+`runner.py` records `info["applied_action"]`, and `recording.py` wrote the literal
+`"stored_action_mode": "joint_position"` into the episode metadata.  Under the Panda that
+vector's first seven entries are Newton-metres from the OSC solve.  So a dataset collected on this
+scene would have shipped torques -- magnitudes of order 1-10 -- inside a schema that says they are
+joint angles, and nothing in the pipeline would object.
 
 This is the same failure mode as F5-F13 in `bug-catalogue.md`: not a crash, a **silent lie in the
-instrument**, always in the direction of "the data looks fine".
+instrument**.
 
-The fix has two halves and both are needed:
+**And there is a second half, which a test found rather than a reading.**  The dataset's
+``action`` column was declared **16 wide, as a constant** (`recording.py:lerobot_features`), so a
+14-wide `cartesian_delta` action cannot be written at all: LeRobot validates every frame against
+the declared shape and raises `The feature 'action' of shape '(14,)' does not have the expected
+shape '(16,)'`.  "Record the policy's action" is therefore a **schema** decision, not only a choice
+of which array to copy -- the file has to be created with the right width before the first episode,
+and LeRobot only complains on the first frame.
+
+So the fix has three parts, and all three are needed:
 
 1. **Record what the policy consumed.**  The dataset's action has to be the policy-space action
    (`cartesian_delta`, 14 wide) -- that is what a fine-tune trains on and what the manifest
-   declares.  Either record `info["requested_action"]` when the policy space is Cartesian, or add
-   a `record_action` hook so the policy decides, and state the choice in the run's summary.
-2. **Refuse the impossible combination.**  `stored_action_mode` must be derived from the arm
-   actually in use and asserted, not written as a literal.  A scene whose `left_arm` is `panda`
-   combined with a stored mode of `joint_position` should raise at setup.
+   declares.  `EpisodeRunner(recorded_action=...)` selects the array and
+   `runner.stored_action_mode(env, ...)` names its space, one definition shared with the
+   collection driver so the schema and the frame cannot disagree.
+2. **Let the schema follow the space.**  `LeRobotV3Recorder(action_mode=...)` declares the
+   ``action`` width from `recording.ACTION_WIDTH` (16 for `joint_position`, 14 for
+   `cartesian_delta`), and `start_episode` refuses a run whose recorded space is not the one the
+   file was created for -- which turns a first-frame crash into a named error at setup.
+3. **Refuse the impossible combination.**  `A3DualArmEnv.canonical_action_mode` returns
+   `"joint_position"` for a joint-servo arm and **raises** for a torque-driven one, so the
+   default `recorded_action="applied"` on the Panda scene fails loudly and names the fix.
+   A scene declares its intent in `CollectionScene.recorded_action`.
 
 ### 2.3 Two Cookies at random positions break two assumptions
 
@@ -119,45 +133,39 @@ The fix has two halves and both are needed:
 
 ### 3.1 The two boxes
 
-The user's request is 10 mm and 30 degrees.  The reference branch's own `basic` profile is
-**10 mm and 0.030 rad, which is 1.7 degrees** (`docs/randomization.md`, and its
-`configs/randomization.yaml`); `advanced` reaches 20 mm and 0.080 rad, 4.6 degrees.  So "30
-degrees" is **17 times** the reference's loosest setting, and that gap is the first thing to
-settle -- see section 6.
+**Decided: the reference branch's `basic` strength -- 10 mm and yaw ±0.030 rad (1.7 degrees).**
+The "30 degrees" in the original request was the reference's `±0.030 rad` read as degrees.  The
+reference's own `basic` profile is 10 mm and 0.030 rad (`docs/randomization.md`); `advanced`
+reaches 20 mm and 0.080 rad, 4.6 degrees.  Staying at `basic` is the conservative choice and it
+is the one taken.
 
-Translating the request into `SceneRandomization`, the shapes differ per axis because the arm's
-workspace is not centred on the nominal pose -- that is what the existing ranges in
-`configs/cookie_same_column.yaml` encode:
+Translating that into `SceneRandomization`, the shapes are symmetric here rather than per-axis,
+because the nominal layout is not the same-column one those measured asymmetric ranges belong to:
 
 ```yaml
 randomization:
   source_bin_x_m: [-0.010, 0.010]
   source_bin_y_m: [-0.010, 0.010]
-  source_bin_yaw_rad: 0.10        # placeholder, see 6.1
+  source_bin_yaw_rad: 0.030
   target_bin_x_m: [-0.010, 0.010]
   target_bin_y_m: [-0.010, 0.010]
-  target_bin_yaw_rad: 0.10        # placeholder, see 6.1
+  target_bin_yaw_rad: 0.030
   arm_home_rad: 0.04
   min_box_clearance_m: 0.020
 ```
 
-**The existing measured reach limits do not carry over and must be re-measured.**  The comment in
-that YAML (`target +x 30 / -x 140 / +y 90 / -y 55 mm`, `source +x 80 / -x 170 / +y 230 /
--y 245 mm`) was measured for the **A3 arm on the same-column layout**.  This scene has the
-**Panda at LIBERO's base**, a different nominal layout, and a 200 mm y offset.  What the numbers
-are here is a measurement, not an inheritance, and it is the first cheap thing to run.
+**Even at this strength the existing measured reach limits do not carry over and must be
+re-measured.**  The comment in `configs/cookie_same_column.yaml` (`target +x 30 / -x 140 / +y 90 /
+-y 55 mm`, `source +x 80 / -x 170 / +y 230 / -y 245 mm`) was measured for the **A3 arm on the
+same-column layout**.  This scene has the **Panda at LIBERO's base**, a different nominal layout,
+and a 200 mm y offset, and 10 mm symmetric is a *request* until the window it sits in is known.
+That measurement is the first cheap thing to run in Stage 3.
 
-Yaw is the axis that needs care, and the two boxes are not symmetric:
-
-- **source bin yaw** rotates the whole Cookie layout with it (the Cookies are placed relative to
-  the bin body, `cookie_transfer.py:430`), so it is free variation for the arm;
-- **target box yaw** rotates the ten slots, and the expert reads the *live* box frame, so it
-  should cope -- what needs checking is the insertion, which is aimed at 2.5 mm gaps;
-- 30 degrees on a 237 x 202 mm bin swings its corners about **60 mm**, which eats the
-  `min_box_clearance_m` budget against a target box that is only 66.9 mm away nominally.  The
-  rejection sampling already handles this by redrawing, but if the ranges make an acceptable
-  layout rare, every episode pays for it in draws -- and `max_clearance_attempts` turns "the
-  ranges ask for a layout that cannot exist" into a loud error, which is the right failure.
+At 1.7 degrees the yaw axis is no longer a risk: it swings the bin's corners about 3.4 mm and the
+target box's about 2 mm, well inside the 20 mm `min_box_clearance_m` and far from the insertion's
+2.5 mm gaps.  The asymmetry worth keeping in mind is only that source-bin yaw carries the whole
+Cookie layout with it (the Cookies are placed relative to the bin body,
+`cookie_transfer.py:430`) while target-box yaw rotates the slots the expert reads live.
 
 ### 3.2 Two Cookies in the bin, not too close
 
@@ -194,22 +202,23 @@ Two things the draw must also respect, and neither is in the table above:
 - **Reachability of both pieces.**  With a random draw, some pairs are simply outside the arm's
   window.  Same mechanism: refuse, redraw, count.
 
-### 3.3 Cookie yaw: the decision that decides whether this is easy
+**Decided: yaw aligned to the source bin, position drawn.**  Each Cookie's yaw is the bin's yaw
+plus nothing, so the two pieces stay parallel to each other and to the bin.  The reference branch
+keeps Cookie yaw at **±0.015 rad (0.86 degrees)** for the same reason -- its insertion is aimed at
+measured clearances -- and only ever rotates the *boxes*.
 
-The reference branch keeps Cookie yaw at **±0.015 rad (0.86 degrees)** -- essentially fixed --
-because its insertion is aimed at measured clearances; only the *boxes* rotate.  For a slab that
-must be grasped across its 25 mm width, approach direction is the whole grasp: a Cookie at 45
-degrees to the nominal needs a 45-degree wrist rotation, and the expert has no such degree of
-freedom in its plan today.
+What that buys and costs, at the 60 mm separation recommended in 3.2:
 
-So the honest options are:
+- the two pieces can be **25 mm** apart without touching rather than 55.9 mm, so much more of the
+  bin is usable and the separation bound stops being the binding constraint;
+- the approach direction is the one the expert already implements, so no new grasp planning is
+  needed before the first data exists;
+- the *position* variation is still real -- the grasp has to find the piece wherever it is in a
+  181 x 146 mm region, which is what a policy trained on one memorised trajectory cannot do.
 
-- **yaw aligned to the bin** (each Cookie's yaw = the bin's yaw, drawn position only).  The
-  Cookies are then parallel, the min-separation bound is 25 mm rather than 56 mm, the approach is
-  the one already implemented, and the *position* variation is still real.  **This is the
-  recommended first version.**
-- **yaw free** (a draw, then the expert has to plan the approach into the slab's own frame).  More
-  variation, and a new capability in the expert -- worth doing second, not first.
+Free yaw remains the natural Stage 4b: it needs the approach planned in the slab's own frame, which
+is a new capability in the expert, and it is best added once there is a working baseline to
+compare against rather than at the same time as everything else.
 
 ---
 
@@ -248,14 +257,25 @@ phase rather than assumed -- the phase enum makes that a per-phase histogram.
 Each stage has a gate and lands only when the gate is green.  One GPU process at a time, ten seeds
 per iteration at most.
 
-### Stage 0 -- the two instrument fixes (blocking, no data)
+### Stage 0 -- the instrument (done)
 
-1. `stored_action_mode` derived from the arm and asserted, not a literal (`recording.py:220`).
-2. The action stored is the policy-space action, and the choice is in the summary.
+Landed as `tests/test_recorded_action_mode.py` (7 tests) plus the three code changes above, with
+`CollectionScene.recorded_action` threading the choice through the collection driver.  Every
+existing scene keeps `recorded_action="applied"` and a 16-wide `action` column, byte-identical to
+what it produced before, and a test asserts that.
 
-**Gate:** a one-episode smoke run on `a3_libero_panda_single_cookie` whose metadata says
-`cartesian_delta`, whose `action` array has 14 columns, and whose values are in [-1, 1].  And a
-deliberate-rejection test: a Panda scene asked to store `joint_position` raises.
+Found on the way: the registry's own consistency test had been **red on `main`** -- every
+`a3_libero_*` scene declared the task named `a3_cookie_single_piece`, so a summary row could not be
+traced back to the scene that wrote it.  `libero_props_scene` now *requires* a `task_name` and each
+of the eight registered scenes passes its own, with an explicit `unscored_...` contract for the
+four that have no reachable Cookie and therefore no acceptance rule.  The point of fixing it here
+is not tidiness: a test that is red for reasons of its own cannot tell me whether I broke
+something, and this plan is about to add a scene.
+
+**Gate:** green.  A `cartesian_delta` run writes a 14-column action whose values are in [-1, 1],
+the written metadata says `cartesian_delta` on disk, a joint-servo scene is unchanged at 16
+columns, and both a wrong-width schema and a torque arm asked to store joint positions fail with a
+message that names the fix.
 
 ### Stage 1 -- the Cartesian expert, one Cookie, today's fixed layout
 
@@ -271,18 +291,29 @@ change the plan.
 raises when `require_exact_slots` and `required_cookies != 10`), `require_released=True`,
 `terminate_on_success=True`.  Ordering from live positions, not the configured grid.
 
+**Decided: the placement target is "somewhere in the box", not a named slot.**  With
+`require_exact_slots=False` the criterion is the target region, so the expert is free to release
+both pieces anywhere inside.  The consequence for the data is worth stating plainly: the
+instruction says *put them in the target box*, and the demonstrations will show the box's interior
+rather than its marked cells -- so the policy learns where the box is and not what the slots are
+for.  That is a deliberate loosening, and it is the version that gets to a baseline fastest.  The
+inherited planner still aims at a slot and re-plans when one is out of reach
+(`single_piece_expert.py`), so nothing has to be ripped out to tighten this later; tightening it is
+a change of criterion, and the datasets would then not be comparable.
+
 **Gate:** 3 of 3 with both Cookies in the box and released; total at or under 450 steps; the
 second Cookie's grasp not disturbed by the first one's removal.
 
 ### Stage 3 -- box randomization
 
-Re-measure the reach window for this scene and arm first, then set the ranges inside it.  Start at
-the reference's own strength (10 mm, 0.03-0.10 rad yaw) and step the yaw up towards the requested
-30 degrees only while the gate holds.
+Re-measure the reach window for this scene and arm first, then set the ranges inside it.  The
+strength is decided -- 10 mm and ±0.030 rad, the reference's `basic` -- so what this stage
+measures is whether the window contains it, not how wide the window should be.
 
 **Gate:** 9 of 10 on the randomized layout, with the failures kept in the denominator and
-described.  Report per-axis, not just the total: an asymmetric range that is green overall but
-red in one direction is a range that is too wide in that direction.
+described.  Report per-axis, not just the total: a 10 mm range that is green overall but red in
++x is telling us the lower bound on +x is tighter than 10 mm, and that is a number the next
+scene needs.
 
 ### Stage 4 -- two Cookies at random positions
 
@@ -294,56 +325,54 @@ wall, a piece the first grasp nudged) and each one needs a name before it can be
 
 ### Stage 5 -- pilot collection
 
-Twenty episodes, written but not trained on, with the discard rule on (`save_failed_episodes`
-defaults to False -- a demonstration of a failure teaches the policy the wrong thing).  Look at
-the *shape* of the data: per-episode step counts, per-phase time, and whether the two Cookies give
-two genuinely different trajectories or one trajectory twice.
+**Fifty episodes first, to look at speed, the success rate and the format -- then decide the
+volume from the success rate's lower bound, aiming at 500 accepted episodes.**
 
-**Gate:** the acceptance rate and the step distribution are known and stable, and `collection_summary.json`
-records the ranges actually in force.
+The pilot is written but not trained on, and the discard rule stays on (`save_failed_episodes`
+defaults to False -- a demonstration of a failure teaches the policy the wrong thing).  Three
+questions, in this order:
+
+1. **Speed.**  Wall-clock per accepted episode, and where it goes.  This sets what 500 costs and
+   whether `fast_render` is needed.  The per-phase histogram answers where the *steps* go, which
+   is the only thing that can be optimised deliberately rather than by guess.
+2. **Success rate.**  Accepted over attempted, failures kept in the denominator, broken down per
+   axis.  Fifty attempts separates "about half" from "almost always"; it does not separate 92%
+   from 96%, and the plan does not pretend otherwise.
+3. **Format.**  That the `action` column is the 14-wide `cartesian_delta`, that its values are in
+   [-1, 1], that `stored_action_mode` says what is actually stored, and that the videos, the state
+   and the task string are what a fine-tune expects.
+
+**The volume follows from the lower bound, not the point estimate.**  At n = 50 an observed 90%
+has a 95% Wilson interval of roughly **78% to 96%**, so 500 accepted episodes cost somewhere
+between about 520 and 640 attempts.  The decision the pilot enables is which end to budget: a 78%
+lower bound needs a 640-attempt quota and the headroom that a 90% rate would not.  `max_attempts`
+exists for this, and `collect_dataset` stops and reports rather than quietly returning short.
 
 ### Stage 6 -- collection and first fine-tune
 
-Volume is a decision for section 6.  Two things to carry in from what is already measured:
+Five hundred accepted episodes, collected at whatever attempt quota Stage 5 justified, with the
+prompt fixed before the first episode is written:
 
-- train and test seeds must be disjoint; the reference branch's own warning is that a saved-episode
-  success rate is not a success rate, so failures stay in the denominator;
-- the words have to be taught, not prompted.  The prompt for this task names `two yellow blocks`,
-  `the source bin` and `the target box`, and none of those words occur in LIBERO's vocabulary.
+> pick up the two yellow blocks from the source bin and put them in the target box
+
+Two things to carry in from what is already measured:
+
+- train and test seeds must be disjoint, and a saved-episode success rate is not a success rate;
+- the words have to be taught, not prompted.  `block`, `source bin` and `target box` occur zero
+  times in LIBERO's vocabulary, so a fine-tune on A3's objects has to teach the nouns as well as
+  the grasp.
 
 ---
 
-## 6. What I need decided
+## 6. Decisions taken
 
-### 6.1 Is 30 degrees real, or did `±0.030 rad` read as 30 degrees?
-
-The reference's `basic` profile is `±0.030 rad`, which rounds to 1.7 degrees.  If the intent was
-"the reference's basic profile", this is a typo and the yaw is 1.7 degrees.  If 30 degrees is
-real, it is 17x the reference's loosest profile and it is the single biggest source of risk in the
-plan -- it swings the bin's corners 60 mm into a 67 mm nominal gap, and it changes the grasp
-approach for the target slots.  My recommendation is to **implement the knob, start at the
-reference's strength, and step up with a gate at each step**, so the number ends up measured
-rather than chosen.
-
-### 6.2 Cookie yaw: aligned to the bin, or free?
-
-Aligned (recommended first) keeps the existing approach and still gives real position variation.
-Free yaw needs the expert to plan the approach into the slab's own frame -- a new capability --
-and it drops the min-separation requirement from 56 mm to 25 mm.
-
-### 6.3 Where do the two Cookies go -- slots, or anywhere in the box?
-
-The target box is A3's ten-slot box, and the environment's criterion is "in the target region"
-with `require_exact_slots=False`.  The expert's existing slot order aims at slots 8 and 9 and
-re-plans when unreachable.  Aiming at slots is the harder, more informative target and it makes
-the success criterion strict; "anywhere in the box" is easier and looser.  The two produce
-different datasets.
-
-### 6.4 Volume and the prompt
-
-How many accepted episodes for the first fine-tune, and is the prompt "pick up the two yellow
-blocks from the source bin and put them in the target box" -- or a LIBERO-shaped sentence with
-LIBERO's container words?
+| question | decision |
+|---|---|
+| randomization strength | **±10 mm and yaw ±0.030 rad (1.7 deg)** -- the reference's `basic` profile.  The "30 degrees" in the request was `0.030 rad` read as degrees. |
+| Cookie yaw | **aligned to the source bin**; position is drawn, orientation is not.  Free yaw is Stage 4b. |
+| placement target | **anywhere inside the target box** (`require_exact_slots=False`).  Looser than aiming at the marked slots, and not comparable with a strict dataset. |
+| volume | **50-episode pilot first** (speed, success rate, format), then the attempt quota from the success rate's lower bound, **aiming at 500 accepted episodes**. |
+| prompt | `pick up the two yellow blocks from the source bin and put them in the target box` |
 
 ---
 
