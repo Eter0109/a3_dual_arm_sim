@@ -401,6 +401,46 @@ of with `state[7]`, the recorded achieved one.  It measures servo lag while look
 a convention mismatch -- the same class as C2, with the same shape: one end is a command and the
 other is a measurement.
 
+### F5. The arm that was not under the body the search started from
+
+*Symptom*: a policy rollout that displaced the bowl **136.6 mm** and lifted it **90.4 mm** --
+unmistakably a grasp and a carry -- was reported as `arm on the object for 0` steps, and the
+failure signature printed was `never touched the object`, the branch that exists for a rollout
+which never reached the object at all.
+
+*Cause*: `props.robot_bodies` walked down from `ARM_BASE_BODY = "base_link"` and returned every
+descendant.  In `a3_libero_panda` the left arm is not one of those descendants: `_add_libero_panda`
+splices LIBERO's Panda in as a tree of its own, rooted at `robot0_base`, which is a sibling of
+the table rather than a child of `base_link`.  The search found 19 bodies -- the A3's *right*
+arm, which in that scene is inert -- and none of the arm doing the work.  A contact test against
+an empty body set answers `False` forever and cannot tell that it is answering nothing.
+
+*Rule*: **a set that comes back empty because the search started in the wrong place looks exactly
+like a set that is legitimately empty.**  Any helper whose job is "gather the things of kind X"
+should be run once against every scene it will be used in and the count printed; here the reply
+was 19 where 35 was right.  Found by moving an object and noticing the tool denied it.
+
+### F6. A torque recorded under the unit of an angle
+
+*Symptom*: `peak arm motion per step: 17129.87 mrad`, i.e. **17.1 rad in one control step**, in a
+scene whose `max_joint_step_rad` caps a step at 0.1 rad.  Physically impossible, printed without
+comment, in the same table as the real measurements.
+
+*Cause*: the quantity was taken from `info["applied_action"][:7]` and labelled in radians.  That
+is correct only for a joint-target arm.  `env._limit_joint_action` has an early return for
+`OperationalSpaceAdapter` under which those seven entries are **torques in N.m** -- not joint
+angles, not rate-limited, not clipped to any joint range, because there is no trajectory to
+limit.  `a3_libero_panda` is such a scene.  Both probes had been logging this number, which
+means every "mrad" figure they had printed for a Panda scene was the step-to-step change of a
+torque vector.  The motion is now measured where it is unambiguous: the difference of
+`data.qpos` at the working arm's seven joints, addressed by name.
+
+*Rule*: **a number is only a measurement together with the unit it actually has**, and a unit is
+a claim about the code path that produced the value, not about the field's name.  The cheap
+check that catches this class: compare every recorded quantity against a physical bound before
+believing it -- 17 rad against a 0.1 rad cap is a one-line contradiction.  F5 and F6 were both
+found that way, in the same run, from output that had been printed as plausible for weeks.
+
 ---
 
 ## G. Cross-scene leakage

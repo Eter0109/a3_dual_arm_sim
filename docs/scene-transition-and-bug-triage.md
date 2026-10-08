@@ -219,6 +219,28 @@ the Cookie scene, and measure where behaviour degrades:
 3. table and background appearance;
 4. object identity: LIBERO's bowl -> the Cookie, same camera, same arm.
 
+Axis 4 is **built**, as of `25de1fe`.  It is the coarse one and the decisive one, because it
+changes exactly one thing: the scene keeps LIBERO's cameras, LIBERO's Panda in the same mount,
+the same physics block, the same `pruned_init` start poses for every episode, the same plate in
+the same place -- and the reachable object goes from `libero_bowl_object`, which
+`pi05_libero_finetuned` was trained to pick up, to `cookie_0`, A3's own 6.3 mm Cookie, which
+appears in no public dataset.  It is `a3_libero_panda_cookie`: the bowl and the distractor bowl
+are removed, the Cookie is placed where the bowl's *mesh* settles (0.150, 0.130), and the
+instruction changes with the objects --
+`"pick up the yellow block and place it on the plate"`, since a prompt that names a black bowl
+next to a Cookie would be a different experiment.  It is a flag on `libero_props_scene`, like
+`matched_cameras` and `panda`, so `configs/libero_props.yaml` stays the one statement about what
+that scene is, and `cookie_on_table=True` is the only difference between the two ends.
+
+Both ends are measured by one script and one yardstick, `scripts/probe_ladder_object.py`, which
+reports per step: the nearest fingertip's distance to the object's measured centre, how far the
+object moved and how high it rose, whether the arm and whether the table were in contact with
+it (MuJoCo's own contact list, not a proximity threshold), the gripper's opening, the eef's
+displacement, and the **measured** joint motion of the working arm.  That last one is the
+"did the arm move at all" evidence, and where it is read from mattered -- see F5 and F6 in
+`docs/bug-catalogue.md`, two instrument bugs that the first run of this probe exposed by
+printing a grasp as "never touched" and a torque as an angle.
+
 A **capability** failure degrades **monotonically** along a continuous axis: performance is a
 function of the scene, and it crosses the failure threshold somewhere you can point at.  A
 **bug** appears as a **cliff at a wiring boundary** -- a change that has no behavioural

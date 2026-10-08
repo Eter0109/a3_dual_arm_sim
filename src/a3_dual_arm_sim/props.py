@@ -40,8 +40,22 @@ FINGERTIPS = ("L_finger_inner_touch", "L_finger_outer_touch")
 #: The site the IK solves for, so "where the arm went" is the point the policy controls.
 EEF_SITE = "L_eef"
 
-#: The body the whole arm hangs off, used to find every arm body without naming them.
+#: The body the A3's own arms hang off, used to find every arm body without naming them.
 ARM_BASE_BODY = "base_link"
+
+#: Every root a *robot* hangs off in these scenes.  There is more than one because
+#: `a3_libero_panda` replaces the left arm with LIBERO's own Panda, which
+#: `model._add_libero_panda` splices into the XML as a tree of its own rooted at
+#: `robot0_base` -- a sibling of the table, **not** a descendant of `base_link`.  A walk
+#: down from `base_link` alone therefore finds the A3's right arm and none of the arm that
+#: does the work.
+#:
+#: That is not a cosmetic difference.  The contact check asks "is the object touching an
+#: arm body", so a missing subtree turns every grasp into "the arm never touched it".
+#: Measured on `a3_libero_panda`, before this was fixed: a rollout that displaced the bowl
+#: 136.6 mm and lifted it 90.4 mm -- a grasp -- was reported as 0 steps of contact, and the
+#: failure signature printed was the one for a rollout that never reached the object.
+REFERENCE_ROBOT_BASE_BODIES = (ARM_BASE_BODY, "robot0_base")
 
 #: The eight corners of a box, for turning a geom's axis-aligned extent into world points.
 _CORNERS = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
@@ -101,14 +115,55 @@ def prop_frame(model, data, body_id: int) -> tuple[np.ndarray, float, np.ndarray
     return centre, radius, (high - low)
 
 
-def robot_bodies(model, base: str = ARM_BASE_BODY) -> set[int]:
-    """Every body of the arm, found by walking down from its base rather than by name."""
+def robot_bodies(model, bases: tuple[str, ...] = REFERENCE_ROBOT_BASE_BODIES) -> set[int]:
+    """Every body of every robot in this model, by walking down from each arm's base.
 
-    root = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, base)
-    if root < 0:
-        raise ValueError(f"{base!r} is not a body in this model; the contact check needs "
-                         f"the arm's bodies")
-    return {body for body in range(model.nbody) if _under(model, root, body)}
+    Structure rather than names, so a rename cannot silently empty the set -- but the
+    *roots* have to be named, because this model carries two robots and they are two
+    separate trees.  See :data:`REFERENCE_ROBOT_BASE_BODIES` for the failure a single root
+    caused.  Bases that are absent from this model are skipped rather than fatal, since no
+    one scene has all of them; it is only an error if *none* of them is present.
+    """
+
+    roots = [
+        root
+        for root in (
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, base) for base in bases
+        )
+        if root >= 0
+    ]
+    if not roots:
+        raise ValueError(f"none of {bases!r} is a body in this model; the contact check "
+                         f"needs the arms' bodies")
+    return {
+        body
+        for body in range(model.nbody)
+        if any(_under(model, root, body) for root in roots)
+    }
+
+
+def arm_qpos_addresses(model) -> np.ndarray:
+    """Where the *working* arm's seven joints live in ``qpos``.
+
+    Addressed by the names in ``contracts.LEFT_JOINTS`` rather than by counting, because
+    ``model._add_libero_panda`` **renames** LIBERO's Panda joints to those names -- so the
+    same seven strings work in every scene here, and a scene that wedged in a third arm
+    could not silently shift the answer.  This exists because the obvious alternative,
+    ``info["applied_action"][:7]``, is a joint target only for a joint-target arm: under an
+    ``OperationalSpaceAdapter`` those entries are **torques**, which is how a probe came to
+    report 17 rad of "motion" per step in a scene capped at 0.1 rad.
+    """
+
+    from a3_dual_arm_sim.contracts import LEFT_JOINTS
+
+    addresses = []
+    for name in LEFT_JOINTS:
+        joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if joint < 0:
+            raise ValueError(f"{name!r} is not a joint in this model; the measured "
+                             f"joint motion needs the working arm's own joints")
+        addresses.append(int(model.jnt_qposadr[joint]))
+    return np.asarray(addresses)
 
 
 def touching(model, data, prop_geoms: set[int] | list[int], bodies: set[int]) -> bool:

@@ -46,6 +46,7 @@ from a3_dual_arm_sim.props import (  # noqa: E402
     EEF_SITE,
     FINGERTIPS,
     PLATE_MESH_BODY,
+    arm_qpos_addresses,
     prop_frame,
     prop_geoms,
     prop_points,
@@ -197,6 +198,7 @@ def main() -> int:
         plate_centre, plate_radius_m, _ = prop_frame(model, env.data, plate)
         bowl_geoms = set(prop_geoms(model, bowl))
         arm_bodies = robot_bodies(model)
+        arm_qpos = arm_qpos_addresses(model)
         bowl_top_z = float(bowl_start[2] + bowl_size_m[2] / 2.0)
         # The task direction, as a unit vector on the table.  Every "the bowl moved N mm"
         # figure this probe has printed is a magnitude, and a magnitude whose *sign along
@@ -222,11 +224,11 @@ def main() -> int:
             )
 
         rows = []
-        previous: np.ndarray | None = None
+        previous_joints: np.ndarray | None = None
         for step in range(args.steps):
             action = gateway.act(observation, args.task)
-            observation, _, terminated, truncated, info = env.step(action)
-            applied = np.asarray(info["applied_action"], dtype=np.float64)
+            observation, _, terminated, truncated, _unused = env.step(action)
+            joints = np.asarray(env.data.qpos[arm_qpos], dtype=np.float64)
             # The model's own first row, before clipping.  Read from the gateway rather
             # than from `action`, which is the post-IK sixteen-wide joint target -- taking
             # its first three entries as metres is a factor of about fifty out.
@@ -279,11 +281,20 @@ def main() -> int:
                     "gripper": float(np.asarray(observation[STATE], dtype=np.float64)[7]),
                     "command_mm": float(np.abs(command[:3]).max()) * ACTION_UNIT_M * 1000.0,
                     "command_grip": float(command[6]),
-                    "motion_mrad": 0.0 if previous is None
-                    else float(np.abs(applied[:7] - previous[:7]).max()) * 1000.0,
+                    # The working arm's **measured** joint motion per control step, in mrad.
+                    # This field used to be `applied[:7]`, which is a joint target only for
+                    # a joint-target arm: `env._limit_joint_action` returns those seven
+                    # entries unclipped when an `OperationalSpaceAdapter` drives the arm,
+                    # and under that adapter they are **torques in N.m**.  In the Panda
+                    # scenes this field therefore held the step-to-step change of a torque
+                    # vector and reported peaks of 17 rad per step against a 0.1 rad cap.
+                    # Nothing read it, but a mislabelled number in a stored trace is a trap
+                    # for whoever does read it next -- see F6 in `docs/bug-catalogue.md`.
+                    "joint_motion_mrad": 0.0 if previous_joints is None
+                    else float(np.abs(joints - previous_joints).max()) * 1000.0,
                 }
             )
-            previous = applied
+            previous_joints = joints
             if terminated or truncated:
                 print(f"seed {seed}: episode ended at step {step}", flush=True)
                 break
