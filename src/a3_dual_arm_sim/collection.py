@@ -919,6 +919,8 @@ def libero_props_scene(
     matched_cameras: bool = False,
     panda: bool = False,
     cookie_on_table: bool = False,
+    a3_single_cookie: bool = False,
+    hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
 
@@ -1008,6 +1010,60 @@ def libero_props_scene(
                     ),
                 ),
             )
+        if a3_single_cookie:
+            # **A3's own task, in the scene that is known to work.**  This is the direct
+            # question the ladder is a slower way of asking: if the arm, the cameras, the
+            # physics and the start poses are all the ones that place LIBERO's bowl 35 times
+            # in 40, does the policy do *A3's* job when the objects and the sentence are
+            # A3's?
+            #
+            # Unlike axis 4 this keeps A3's instruction **and** A3's target: the sentence is
+            # `a3_cookie_single_piece`'s own ("pick up the one yellow block from the source
+            # bin and put it in the target box"), and the source bin and the ten-slot box sit
+            # where A3 puts them.  Axis 4 asked something no dataset contains -- "place it on
+            # the plate" -- and answered it; this asks the question the task actually is.
+            #
+            # The props are taken from `configs/cookie_same_column.yaml` **by loading it**
+            # rather than by copying numbers, so a later edit to A3's own scene cannot leave
+            # this one quietly describing a different table.  The list below is the whole
+            # difference: eleven fields of `cookie_transfer`.  Everything else stays as the
+            # configuration that measured 35/40, because that is the part known to be right --
+            # the LIBERO physics block (`physics_hz 500`, `libero_fidelity`, the 0.40 damping,
+            # the 0.05 m control scale, the `world` rotation frame), LIBERO's per-episode
+            # `pruned_init` start poses, the matched cameras and the mirror.
+            #
+            # Two of the eleven are worth naming because they are not A3's defaults seen from
+            # this file.  `box_lift_m` and `box_tilt_deg` are 0.03 m and 8 degrees here -- the
+            # box is lifted and canted -- which costs nothing while the box is parked past the
+            # table's corner and would be a tilted ten-slot box the moment it is in reach.  A3
+            # runs it flat, and so does this.
+            a3 = _styled_config("configs/cookie_same_column.yaml", visual_style)
+            a3_transfer = a3.cookie_transfer
+            loaded = replace(
+                loaded,
+                cookie_transfer=replace(
+                    loaded.cookie_transfer,
+                    libero_props=(),
+                    box_lift_m=a3_transfer.box_lift_m,
+                    box_tilt_deg=a3_transfer.box_tilt_deg,
+                    cookie_source_positions_m=(a3_transfer.cookie_source_positions_m[0],),
+                    source_bin_center_m=a3_transfer.source_bin_center_m,
+                    source_bin_half_size_m=a3_transfer.source_bin_half_size_m,
+                    source_bin_wall_height_m=a3_transfer.source_bin_wall_height_m,
+                    target_bin_world_position_m=a3_transfer.target_bin_world_position_m,
+                    target_bin_half_size_m=a3_transfer.target_bin_half_size_m,
+                    target_bin_wall_height_m=a3_transfer.target_bin_wall_height_m,
+                    target_slots_local_m=a3_transfer.target_slots_local_m,
+                    # LIBERO's per-episode start poses are *its* task's archive and put the
+                    # arm at the pose for picking up its bowl.  A3's task is a different
+                    # reach with a different first move.
+                    libero_init_states="",
+                    deployment_home=(
+                        tuple(LIBERO_PANDA_HOME_RAD) if panda
+                        else tuple(a3_transfer.deployment_home[:7])
+                    ) + tuple(loaded.cookie_transfer.deployment_home[7:]),
+                ),
+            )
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
@@ -1015,17 +1071,29 @@ def libero_props_scene(
             yaw_noise_rad=yaw_noise_rad,
             require_exact_slots=False,
             require_released=True,
-            terminate_on_success=False,
+            # A3's own scene stops the episode once the Cookie is in and released, and the
+            # branch that runs A3's own task has to as well -- otherwise a solved episode runs
+            # to the 6000-step horizon and the recording is a stationary arm.  The other two
+            # branches keep it off because there is no success for them to terminate on.
+            terminate_on_success=bool(a3_single_cookie),
         )
         return A3CookieTransferEnv(loaded, task_config=task_config, render_cameras=True)
 
     def build_policy(env: A3DualArmEnv) -> Policy:
-        # Unused by any recording this scene is for, but `CollectionScene` requires one,
-        # and the single-piece expert is the honest choice: it is the expert the props
-        # scene's Cookie layout was reduced for, and it ignores the props entirely.
+        # The single-piece expert, which is the honest choice for every branch here: it is the
+        # expert the props scene's Cookie layout was reduced for and it ignores the props
+        # entirely.
+        #
+        # **`hold_steps` must not be 0, and it was.**  `CookieCollectionPolicy.stop_requested`
+        # is `expert.failed or self._steps_since_done >= self.hold_steps`, so 0 makes the
+        # condition true on the very first step and the runner ends the episode at step 1 with
+        # `terminated=False` and no safety reason -- a silent failure with no message, because
+        # it is a *legitimate* way for a rollout to end.  It cost nothing while nothing here
+        # ran the expert; `a3_libero_panda_single_cookie` does, and reported 0/20 with every
+        # episode one step long.  The value is A3's own: `cookie_single_piece_scene`'s default.
         return CookieCollectionPolicy(
             expert=A3SinglePieceExpert(env),  # type: ignore[arg-type]
-            hold_steps=0,
+            hold_steps=hold_steps,
         )
 
     return CollectionScene(
@@ -1041,15 +1109,30 @@ def libero_props_scene(
         build_env=build_env,
         build_policy=build_policy,
         metric_keys=("cookies_in_target", "cookies_in_source"),
-        randomize_placements=False,
-        randomize_cookies=False,
+        # A3's own scene randomizes both, and this branch has to as well: the per-episode
+        # variation in `a3_libero_panda` comes from LIBERO's fifty `pruned_init` start poses,
+        # which this branch drops, so with these off every seed would build the same table
+        # and the only variation left would be the policy's own sampling.
+        randomize_placements=bool(a3_single_cookie),
+        randomize_cookies=bool(a3_single_cookie),
         details={
-            "config": "configs/libero_props.yaml",
+            "config": (
+                "configs/libero_props.yaml with A3's `cookie_transfer` props from "
+                "configs/cookie_same_column.yaml -- the validated cameras, robot and "
+                "physics with A3's own task on the table"
+                if a3_single_cookie
+                else "configs/libero_props.yaml"
+            ),
             "props": (
-                "LIBERO `plate`/`ramekin`/`cookies` as scenery, with the A3 Cookie dropped "
-                "where LIBERO's bowl mesh settles -- axis 4 of the ladder"
-                if cookie_on_table
-                else "LIBERO `akita_black_bowl` and `plate`, as passive scenery"
+                "A3's single Cookie, A3's source bin and A3's ten-slot box, flat on the "
+                "table, and no LIBERO object at all"
+                if a3_single_cookie
+                else (
+                    "LIBERO `plate`/`ramekin`/`cookies` as scenery, with the A3 Cookie "
+                    "dropped where LIBERO's bowl mesh settles -- axis 4 of the ladder"
+                    if cookie_on_table
+                    else "LIBERO `akita_black_bowl` and `plate`, as passive scenery"
+                )
             ),
             "cameras": (
                 "LIBERO-matched: the agentview rebuilt around the bowl at LIBERO's own "
@@ -1057,8 +1140,12 @@ def libero_props_scene(
                 if matched_cameras
                 else "this branch's: front at 1.150 m (4.58 mm/px), wrist 85 mm off axis"
             ),
-            "scorable": False,
-            "why": "no reachable Cookie, so failure is by construction; use it for video",
+            "scorable": bool(a3_single_cookie),
+            "why": (
+                "A3's own success predicate is reachable here, so this one can be scored"
+                if a3_single_cookie
+                else "no reachable Cookie, so failure is by construction; use it for video"
+            ),
         },
     )
 
@@ -1091,6 +1178,13 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # the object, which is what makes the pair a measurement rather than two scenes.
         "a3_libero_panda_cookie": lambda **kwargs: libero_props_scene(
             matched_cameras=True, panda=True, cookie_on_table=True, **kwargs
+        ),
+        # A3's own single-Cookie task on the table that is known to work: the validated
+        # cameras, robot, physics and start poses, with A3's props, A3's sentence and A3's
+        # success predicate.  The direct form of the ladder's question, and the only
+        # `libero_props` branch whose `scorable` is true.
+        "a3_libero_panda_single_cookie": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, panda=True, a3_single_cookie=True, **kwargs
         ),
     }
 
