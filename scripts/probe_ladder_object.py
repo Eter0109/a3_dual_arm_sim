@@ -300,10 +300,13 @@ def main() -> int:
                     # seven entries *unclipped* when the arm is driven by an
                     # `OperationalSpaceAdapter`, and under that adapter they are **torques
                     # in N.m, not joint angles**.  The difference is not subtle: it reported
-                    # a peak of 17 129 "mrad" per step, which is 17 rad, in a scene whose
-                    # per-step cap is 0.1 rad.  A quantity recorded under a unit it does not
-                    # have is how a rollout that never moved gets mistaken for one that did,
-                    # and the reverse.
+                    # a peak of 17 129 "mrad" per step, which is 17 rad in one 50 ms control
+                    # step, i.e. 340 rad/s.  The bound that makes that absurd is not
+                    # `max_joint_step_rad` -- which the OSC path deliberately bypasses, there
+                    # being no trajectory to rate-limit -- but the environment's own safety
+                    # stop, which fires above **80 rad/s**.  A quantity recorded under a unit
+                    # it does not have is how a rollout that never moved gets mistaken for
+                    # one that did, and the reverse.
                     "joint_motion_mrad": 0.0 if previous_joints is None
                     else float(np.abs(joints - previous_joints).max()) * 1000.0,
                     # Kept, but named for what it is: the raw entry the servo received,

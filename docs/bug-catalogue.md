@@ -438,8 +438,11 @@ torque vector.  The motion is now measured where it is unambiguous: the differen
 *Rule*: **a number is only a measurement together with the unit it actually has**, and a unit is
 a claim about the code path that produced the value, not about the field's name.  The cheap
 check that catches this class: compare every recorded quantity against a physical bound before
-believing it -- 17 rad against a 0.1 rad cap is a one-line contradiction.  F5 and F6 were both
-found that way, in the same run, from output that had been printed as plausible for weeks.
+believing it.  The right bound here was not `max_joint_step_rad` (0.1 rad), which the OSC path
+deliberately bypasses -- there is no trajectory to rate-limit -- but the environment's **own**
+safety stop, which fires above 80 rad/s: 17 rad in one 50 ms control step is 340 rad/s, a
+velocity the simulator would have refused.  F5 and F6 were both found that way, in the same run,
+from output that had been printed as plausible for weeks.
 
 ### F7. A threshold calibrated in another scene
 
