@@ -337,6 +337,42 @@ prior was learned on bowl-scale objects** -- reach in, close on a rim -- and a 6
 outside it.  Every knob left is a knob on the scene, and the scene has been measured to matter
 less than the object does.  What is left is data.
 
+#### What LIBERO actually says, counted
+
+Before spending a run on phrasing, the phrasing was read off the source: every `(:language ...)`
+field in LIBERO's own BDDL files, 130-odd instructions across the four suites.  The templates
+are:
+
+    libero_object   Pick the alphabet soup and place it in the basket
+    libero_spatial  Pick the akita black bowl between the plate and the ramekin and place it on the plate
+    libero_goal     Put the bowl on the plate
+
+So the verbs are **`Pick ... place it in/on ...`**, and the object suite's referents are named by
+what they are.  Word counts over the whole corpus:
+
+| word | count | |
+|---|---|---|
+| `basket` | 44 | the object suite's destination |
+| `bowl` | 42 | |
+| `cookies` | 12 | and only as a **landmark** -- "next to the cookies box" |
+| `yellow` | 5 | |
+| `box` | 5 | a real LIBERO container word |
+| **`block`** | **0** | |
+| **`small`** | **0** | |
+| **`cookie`** (singular) | **0** | |
+
+**A3's instruction uses a word the checkpoint has never seen in an instruction, and so does the
+natural fix.**  `pick up the one yellow block from the source bin and put it in the target box`
+carries four separate out-of-distribution choices at once: `the one`, `block`, `source bin` and
+`target box`, plus a verb template (`pick up ... put it in`) that is not LIBERO's.  And the
+object has no name in the corpus at all: LIBERO's graspable things are bowls, mugs, bottles,
+plates, ramekins and grocery containers -- there is no small flat slab anywhere in it.
+
+That bounds what the prompt axis can do.  The **template** and the **container names** are
+things LIBERO has words for, and they can be fixed: `Pick the yellow block and place it in the
+box` is LIBERO's template with LIBERO's container.  The **referent** cannot: whichever noun is
+chosen for a 50 x 6.4 x 25 mm yellow slab is a noun this checkpoint has not been taught.
+
 A **capability** failure degrades **monotonically** along a continuous axis: performance is a
 function of the scene, and it crosses the failure threshold somewhere you can point at.  A
 **bug** appears as a **cliff at a wiring boundary** -- a change that has no behavioural
