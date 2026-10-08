@@ -838,6 +838,25 @@ LIBERO_PANDA_HOME_RAD = (
     -0.000131, -0.170836, -0.024106, -2.452567, -0.006121, 2.225902, 0.767745,
 )
 
+#: A second home: the same arm with its hand **over the Cookie**, 120 mm above it, tool still
+#: pointing straight down.  Solved on the live model by least squares against the eef site
+#: (`scripts/solve_home_over_cookie.py`), starting from `LIBERO_PANDA_HOME_RAD`: residual
+#: **0.00 mm** in position and the tool axis exactly `(0, 0, -1)`, which is the pose the
+#: wrist camera needs to have the Cookie in shot.
+#:
+#: Why it exists: the wrist camera looks down the tool axis, so at LIBERO's home it is aimed
+#: at the table under the hand, 330 mm to one side of the Cookie, and the policy only sees the
+#: object once the arm happens to wander over the bin ~150 steps in.  This start pose puts it
+#: there at step 0.
+#:
+#: **It is not a candidate home.**  Moving the start pose away from LIBERO's own has been
+#: measured to cost the task once already -- on the A3 arm, "the fingers got over the bowl in
+#: 4 of 40 episodes against 39 of 40 from the A3 home" -- so a result from this pose is a
+#: result about the pose as much as about the camera.
+LIBERO_PANDA_HOME_OVER_COOKIE_RAD = (
+    0.106614, 0.392458, 0.072980, -2.129438, -0.047935, 2.520412, 0.434565,
+)
+
 
 def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     """The camera geometry that reproduces LIBERO's own framing on this arm.
@@ -923,6 +942,8 @@ def libero_props_scene(
     a3_layout_offset_m: tuple[float, float] = (0.0, 0.0),
     a3_cookie_position_m: tuple[float, float] | None = None,
     a3_cookie_quat_wxyz: tuple[float, ...] = (),
+    a3_target_box_position_m: tuple[float, float, float] | None = None,
+    a3_home_over_cookie: bool = False,
     hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
@@ -1112,9 +1133,13 @@ def libero_props_scene(
                     source_bin_half_size_m=a3_transfer.source_bin_half_size_m,
                     source_bin_wall_height_m=a3_transfer.source_bin_wall_height_m,
                     target_bin_world_position_m=(
-                        a3_transfer.target_bin_world_position_m[0] + offset_x,
-                        a3_transfer.target_bin_world_position_m[1] + offset_y,
-                        a3_transfer.target_bin_world_position_m[2],
+                        (
+                            a3_transfer.target_bin_world_position_m[0] + offset_x,
+                            a3_transfer.target_bin_world_position_m[1] + offset_y,
+                            a3_transfer.target_bin_world_position_m[2],
+                        )
+                        if a3_target_box_position_m is None
+                        else a3_target_box_position_m
                     ),
                     target_bin_half_size_m=a3_transfer.target_bin_half_size_m,
                     target_bin_wall_height_m=a3_transfer.target_bin_wall_height_m,
@@ -1124,7 +1149,11 @@ def libero_props_scene(
                     # reach with a different first move.
                     libero_init_states="",
                     deployment_home=(
-                        tuple(LIBERO_PANDA_HOME_RAD) if panda
+                        (
+                            tuple(LIBERO_PANDA_HOME_OVER_COOKIE_RAD) if a3_home_over_cookie
+                            else tuple(LIBERO_PANDA_HOME_RAD)
+                        )
+                        if panda
                         else tuple(a3_transfer.deployment_home[:7])
                     ) + tuple(loaded.cookie_transfer.deployment_home[7:]),
                 ),
@@ -1252,7 +1281,6 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # A3's own single-Cookie task on the table that is known to work: the validated
         # cameras, robot, physics and start poses, with A3's props, A3's sentence and A3's
         # success predicate.  The only `libero_props` branch whose `scorable` is true.
-        #
         # `a3_layout_offset_m` slides A3's arrangement into LIBERO's frame, because LIBERO's
         # agentview is aimed at where LIBERO's bowl used to be and A3's layout is not there.
         # The camera is not touched -- see the branch -- so this offset is the price the
@@ -1284,6 +1312,51 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
             a3_layout_offset_m=(0.020, -0.200),
             a3_cookie_position_m=(0.2343, -0.0932),
             a3_cookie_quat_wxyz=(0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+            **kwargs
+        ),
+        # ------------------------------------------------------------------ behaviour probes
+        #
+        # These two are **not** candidate configurations for A3's task.  They are probes of
+        # what the policy does when the scene stops offering the thing it has been choosing,
+        # and they both keep the Cookie in the source bin's corner, standing, exactly as A3
+        # draws it -- the moved-and-turned Cookie of the visibility run above is specific to
+        # that question.
+        #
+        # Why they exist: with the box on the table, ten seeds in two runs picked the box up
+        # and carried it into the bin, and the Cookie was never touched.  The question the
+        # next run asks is what the policy does when that move is **already done** -- either
+        # because the destination is occupied, or because it cannot see the Cookie until the
+        # arm has gone where the Cookie is.
+        #
+        # `a3_probe_box_in_bin`: the target box starts **inside** the source bin, placed at the
+        # bin's centre so it neither touches nor covers the Cookie, which is at the bin's
+        # near-left corner.  Nothing else changes -- same objects, same appearance, same
+        # instruction.  If the policy reaches for the Cookie here, its choice depends on the
+        # *state* rather than only on how the objects look, which would be worth knowing.
+        "a3_probe_box_in_bin": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            # The bin's centre after the offset is (0.195, 0.115); its inner half size is
+            # (0.1126, 0.0951), so a box centred here spans y 0.080..0.150 and the Cookie at
+            # y = 0.031 is 49 mm clear of it.  Spawned at 0.78 and dropped: it rests on the
+            # bin floor rather than the table.
+            a3_target_box_position_m=(0.195, 0.115, 0.780),
+            **kwargs
+        ),
+        # `a3_probe_home_over_cookie`: the arm starts with its hand over the source bin rather
+        # than at LIBERO's home, so the wrist camera -- which looks straight down the tool
+        # axis -- has the Cookie in shot at step 0 instead of at step 150.
+        #
+        # **This deliberately spends something the repository has already priced.**  Moving
+        # the start pose away from LIBERO's own cost the bowl task badly the last time it was
+        # tried: "the fingers got over the bowl in **4 of 40** episodes against **39 of 40**
+        # from the A3 home".  That was the A3 arm, and this is the Panda, so it is not the
+        # same measurement -- but the direction of the risk is known and it is recorded here
+        # so the result is not read as a clean test of "the camera sees the object".
+        "a3_probe_home_over_cookie": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_home_over_cookie=True,
             **kwargs
         ),
     }
