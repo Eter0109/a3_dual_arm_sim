@@ -1,9 +1,25 @@
 # Going back to the Cookie scene without fooling ourselves
 
-The LIBERO reproduction works (31/40, then 35/40 on a re-run; LIBERO itself is 10/10).  The
-question now is the reverse direction: walk the scene back towards A3's Cookie task, one step
-at a time, and end up able to say **"π0.5 failed here because of the model"** and have that
-be true rather than hopeful.
+The LIBERO reproduction works (31/40, then 35/40 on a re-run, then **33/40** on a re-run today;
+LIBERO itself is 10/10).  The question now is the reverse direction: walk the scene back towards
+A3's Cookie task, one step at a time, and end up able to say **"π0.5 failed here because of the
+model"** and have that be true rather than hopeful.
+
+That spread is the policy's sampling, not the scene's, and it is worth stating in the units it
+was measured in: rerunning the same forty seeds and comparing *per seed* -- same scene, same
+manifest, same start-pose archive -- gives 28 of 40 verdicts changing and, for the pure
+measurement underneath them, bowl-to-plate distances moving from 33.0 to 229.2 mm on seed 0,
+128.4 to 28.8 on seed 26 and 27.8 to 214.8 on seed 27.  Failures became successes and successes
+became failures in the same run.  **So "35/40" is one draw, and a difference of two episodes
+between two runs is not evidence of anything**; only a change large enough to leave that band,
+or one that moves the *shape* of the failures, is.
+
+When the third draw was taken the probe's contact channel had just been fixed (F5, F6), so the
+same run also answers whether the fix changed the verdict: it did not.  All seven failures are
+`settled on the table, off the plate`, none is `over the plate but still in the gripper` -- and
+that second branch is the only one the fix can reach, since before it `touch_arm` was
+identically zero in this scene and `held` was structurally false.  The recorded runs' logs say
+so themselves: every seed of `logs/ablation/baseline.log` reports `arm on the bowl for 0/300`.
 
 Zero-shot on the Cookie scene is *expected* to fail, and a fine-tune may fail too.  The danger
 is not the failure; it is attributing the failure to the model while a bug is in the pipe.
