@@ -74,6 +74,11 @@ ACTION_UNIT_M = 0.05
 #: `observation.state[7]` -- the left gripper's opening, in the scene's own convention.
 GRIPPER_STATE_INDEX = 7
 
+#: The cameras a policy sees, and the ones a clip shows beside the scene view.  Same three
+#: `render_libero_props_video.py` stacks, because a clip is for comparing against the ones
+#: already recorded rather than for a second opinion about which cameras matter.
+POLICY_CAMERAS = ("front", "left_wrist", "right_wrist")
+
 #: A close is a *fraction of this run's own open value*, not an absolute opening.
 #:
 #: The absolute version of this existed and was wrong.  0.05 was calibrated on the A3's
@@ -163,6 +168,128 @@ def _held_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
     return np.flatnonzero(closed & (trace["touch_arm"] > 0))
 
 
+class _Recorder:
+    """A clip of the rollout, drawn from the same numbers the summary prints.
+
+    Why this is here rather than a flag on `render_libero_props_video.py`: that recorder's
+    chart is the bowl's mouth against the plate's edge and its scene lookup needs
+    `BOWL_MESH_BODY`, so pointing it at this scene draws a picture about a plate that is not
+    there.  This one draws **these** quantities -- the nearest fingertip's distance to the
+    watched object, the object's distance to its target, and the band where the object was
+    off the surface -- which means the clip and the table cannot disagree: they are one
+    computation, not two that happen to be about the same scene.
+
+    Layout: the scene view on the left at ``view_size``, the policy's three cameras stacked
+    at the same height to its right, and the chart along the bottom.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        view_size: int,
+        panel_size: int,
+        chart_height: int,
+        fps: int,
+        crf: int,
+        steps: int,
+        object_radius_mm: float,
+        target_radius_mm: float | None,
+        title: str,
+    ) -> None:
+        import av
+
+        self.view_size = view_size
+        self.panel_size = panel_size
+        self.chart_height = chart_height
+        self.width = view_size + panel_size
+        self.height = view_size + chart_height
+        self.steps = steps
+        self.object_radius_mm = object_radius_mm
+        self.target_radius_mm = target_radius_mm
+        self.title = title
+        #: `(gap_mm, object_to_target_mm, off_the_surface)` per frame, which is the chart.
+        self.history: list[tuple[float, float, bool]] = []
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.container = av.open(str(path), mode="w")
+        self.stream = self.container.add_stream("libx264", rate=fps)
+        self.stream.width = self.width
+        self.stream.height = self.height
+        self.stream.pix_fmt = "yuv420p"
+        self.stream.options = {"crf": str(crf), "preset": "medium"}
+
+    def _x(self, index: int) -> float:
+        return (index / max(self.steps - 1, 1)) * (self.width - 1)
+
+    def _chart(self):
+        from PIL import Image, ImageDraw
+
+        chart = Image.new("RGB", (self.width, self.chart_height), (16, 16, 20))
+        draw = ImageDraw.Draw(chart)
+        values = [v for pair in self.history for v in pair[:2]]
+        top_mm = max([60.0, self.object_radius_mm * 1.4] + [v * 1.05 for v in values])
+        baseline = self.chart_height - 5
+        span = self.chart_height - 16
+
+        def y(value_mm: float) -> float:
+            return baseline - (value_mm / top_mm) * span
+
+        # The band where the object was off the surface: the one thing the clip is here to
+        # settle, so it is drawn behind everything else and as an area, not a line.
+        for index, (_, _, off) in enumerate(self.history):
+            if off:
+                draw.line((self._x(index), 0, self._x(index), self.chart_height),
+                          fill=(34, 62, 40))
+        for radius, colour, label in (
+            (self.object_radius_mm, (255, 210, 120), "object radius"),
+            (self.target_radius_mm, (150, 200, 255), "target radius"),
+        ):
+            if radius is None:
+                continue
+            draw.line((0, y(radius), self.width, y(radius)), fill=colour)
+            draw.text((4, y(radius) - 11), f"{label} {radius:.0f} mm", fill=colour)
+        for column, colour in ((0, (120, 255, 160)), (1, (255, 140, 140))):
+            points = [(self._x(i), y(pair[column])) for i, pair in enumerate(self.history)]
+            if len(points) > 1:
+                draw.line(points, fill=colour, width=2)
+        draw.text((4, 2), "green: nearest fingertip to the object   "
+                          "red: object to target   band: off the surface",
+                  fill=(200, 200, 200))
+        return chart
+
+    def add(self, view, cameras: dict, hud: list[str]) -> None:
+        """One frame: the pictures, the chart so far, and the numbers as text."""
+
+        import av
+        import numpy as np
+        from PIL import Image, ImageDraw
+
+        frame = Image.new("RGB", (self.width, self.height), (10, 10, 12))
+        frame.paste(Image.fromarray(view).resize((self.view_size, self.view_size)),
+                    (0, 0))
+        for index, (name, image) in enumerate(cameras.items()):
+            frame.paste(
+                Image.fromarray(np.asarray(image)).resize((self.panel_size, self.panel_size)),
+                (self.view_size, index * self.panel_size),
+            )
+        frame.paste(self._chart(), (0, self.view_size))
+
+        draw = ImageDraw.Draw(frame)
+        draw.text((6, 6), self.title, fill=(255, 230, 120))
+        for index, line in enumerate(hud):
+            draw.text((6, 20 + index * 12), line, fill=(235, 235, 235))
+
+        # The text sits on top of the scene view, so it needs something behind it.
+        self.container.mux(self.stream.encode(
+            av.VideoFrame.from_ndarray(np.asarray(frame), format="rgb24")
+        ))
+
+    def close(self) -> None:
+        for packet in self.stream.encode():
+            self.container.mux(packet)
+        self.container.close()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--scene", default="a3_libero_panda")
@@ -177,6 +304,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", default="0,1,2")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--trace", type=Path, default=None)
+    parser.add_argument("--video", type=Path, default=None,
+                        help="write a clip of the whole run: scene view, policy cameras, "
+                             "and the chart of the ladder's own quantities")
+    parser.add_argument("--view-size", type=int, default=480)
+    parser.add_argument("--panel-size", type=int, default=160)
+    parser.add_argument("--chart-height", type=int, default=150)
+    parser.add_argument("--fps", type=int, default=20)
+    parser.add_argument("--crf", type=int, default=20)
+    parser.add_argument("--shadows", action="store_true",
+                        help="keep the shadow passes; four times slower for a human view")
     return parser.parse_args()
 
 
@@ -268,10 +405,12 @@ def main() -> int:
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     gateway = None
     runs: list[dict[str, np.ndarray]] = []
+    recorder: _Recorder | None = None
 
     for seed in seeds:
         env = scene.build_env(0.0, 0.0)
-        env.use_fast_render()
+        if not args.shadows:
+            env.use_fast_render()
         observation, _ = env.reset(seed=seed, options=None)
 
         model = env.model
@@ -313,6 +452,24 @@ def main() -> int:
             print(f"task     {task!r}")
             print()
 
+        if args.video is not None and recorder is None:
+            # Built from the first seed's measured geometry: the object's radius and the
+            # target's are the same in every seed, and they are what the chart draws its
+            # reference lines at.
+            recorder = _Recorder(
+                args.video,
+                view_size=args.view_size,
+                panel_size=args.panel_size,
+                chart_height=args.chart_height,
+                fps=args.fps,
+                crf=args.crf,
+                steps=args.steps,
+                object_radius_mm=radius_m * 1000.0,
+                target_radius_mm=(None if target_centre is None else
+                                  prop_frame(model, env.data, target)[1] * 1000.0),
+                title=f"{args.scene}  seed {seed}  {args.object} -> {args.target or '-'}",
+            )
+
         rows = []
         previous_joints: np.ndarray | None = None
         for step in range(args.steps):
@@ -324,6 +481,33 @@ def main() -> int:
             gap = min(float(np.linalg.norm(tip - centre)) for tip in fingertips)
             eef_position = np.asarray(env.data.site_xpos[eef], dtype=np.float64)
             joints = np.asarray(env.data.qpos[arm_qpos], dtype=np.float64)
+            gripper = float(np.asarray(observation[STATE], dtype=np.float64)[
+                GRIPPER_STATE_INDEX])
+            on_arm = touching(model, env.data, watched_geoms, arm_bodies)
+
+            if recorder is not None:
+                height_mm = float(centre[2] - start[2]) * 1000.0
+                to_target = (None if target_centre is None else
+                             float(np.linalg.norm(centre[:2] - target_centre[:2])) * 1000.0)
+                recorder.history.append(
+                    (gap * 1000.0, to_target if to_target is not None else float("nan"),
+                     height_mm > LIFT_MM)
+                )
+                recorder.add(
+                    env.render_view("front", height=args.view_size, width=args.view_size),
+                    {name: observation[f"observation.images.{name}"]
+                     for name in POLICY_CAMERAS},
+                    [
+                        f"seed {seed}   step {step}",
+                        "fingertip " + f"{gap * 1000.0:6.1f} mm"
+                        + ("   target " + f"{to_target:6.1f} mm"
+                           if to_target is not None else ""),
+                        "height " + f"{height_mm:+6.1f} mm"
+                        + f"   off surface {int(height_mm > LIFT_MM)}"
+                        + f"   arm on it {int(on_arm)}",
+                        "gripper " + f"{gripper:.3f}",
+                    ],
+                )
 
             rows.append(
                 {
@@ -335,10 +519,9 @@ def main() -> int:
                                          float(np.linalg.norm(
                                              centre[:2] - target_centre[:2])) * 1000.0),
                     # MuJoCo's own contact list, not a proximity threshold.
-                    "touch_arm": float(touching(model, env.data, watched_geoms, arm_bodies)),
+                    "touch_arm": float(on_arm),
                     "touch_table": float(touching(model, env.data, watched_geoms, {0})),
-                    "gripper": float(np.asarray(observation[STATE], dtype=np.float64)[
-                        GRIPPER_STATE_INDEX]),
+                    "gripper": gripper,
                     "eef_x_mm": float(eef_position[0] - start[0]) * 1000.0,
                     "eef_y_mm": float(eef_position[1] - start[1]) * 1000.0,
                     "eef_z_mm": float(eef_position[2] - start[2]) * 1000.0,
@@ -395,6 +578,10 @@ def main() -> int:
 
     if gateway is not None:
         gateway.close()
+
+    if recorder is not None:
+        recorder.close()
+        print(f"video    {args.video}")
 
     if args.trace is not None:
         args.trace.parent.mkdir(parents=True, exist_ok=True)
