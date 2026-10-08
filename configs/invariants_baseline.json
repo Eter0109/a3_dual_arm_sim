@@ -44,5 +44,8 @@
       "verdict": "DYNAMICS MATCH"
     }
   },
-  "rollouts": null
+  "rollouts": {
+    "placements": 10,
+    "total": 10
+  }
 }
