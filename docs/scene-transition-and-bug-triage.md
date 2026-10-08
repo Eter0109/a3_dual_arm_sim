@@ -241,6 +241,47 @@ displacement, and the **measured** joint motion of the working arm.  That last o
 `docs/bug-catalogue.md`, two instrument bugs that the first run of this probe exposed by
 printing a grasp as "never touched" and a torque as an angle.
 
+#### What axis 4 measured
+
+Four seeds, 300 control steps each, `configs/policies/pi05_libero_panda.yaml`:
+
+| seed | nearest fingertip | arm contact | object moved | rose | ended from plate centre | signature |
+|---|---|---|---|---|---|---|
+| **bowl 0** | 11.5 mm | 56 steps | 114.6 mm | +92.5 mm | 30.0 mm | grasped it and carried it |
+| **bowl 1** | 13.5 mm | 53 steps | 115.7 mm | +87.5 mm | 31.8 mm | grasped it and carried it |
+| **bowl 2** | 16.1 mm | 87 steps | 188.3 mm | +159.3 mm | 24.3 mm | grasped it and carried it |
+| **bowl 3** | 23.2 mm | 50 steps | 122.9 mm | +95.9 mm | 17.2 mm | grasped it and carried it |
+| Cookie 0 | 12.7 mm | 0 recorded | 15.9 mm | +0.0 mm | 120.2 mm | never recorded in contact, contact between samples |
+| Cookie 1 | 92.0 mm | 0 | 0.1 mm | +0.0 mm | 117.5 mm | never touched the object |
+| Cookie 2 | 54.2 mm | 0 | 0.1 mm | +0.0 mm | 117.5 mm | never touched the object |
+| **Cookie 3** | 16.1 mm | 41 steps | 152.4 mm | **+107.2 mm** | **1.4 mm** | grasped it and carried it |
+
+The plate's radius is 73.7 mm, so a reading under that is a placement.
+
+**The shape is not a cliff.**  The one seed that found the Cookie carried out the *entire* chain
+-- reach, close on it, lift it 107 mm, carry it 152 mm, and put it down 1.4 mm from the plate's
+centre.  A wiring bug cannot do that: every bug in the catalogue is fatal to the whole chain,
+not to its rate.  The arm's kinematics are the same on both ends (median peak joint motion 45.8
+against 43.5 mrad), which rules out the execution and controller classes outright.
+
+**It is not a clean slope either.**  The three failures are two different things: seed 0 got to
+12.7 mm, closed, and pushed the Cookie 15.9 mm without ever holding it, while seeds 1 and 2 never
+came within 92.0 and 54.2 mm.  That split is what one expects if the binding constraint is
+**whether the Cookie is resolved in the image at all** -- at 1-5 px wide (`7e76fa1`) detection is
+marginal, and each seed either notices it or does not.  That is axis 2 of the ladder, and it is
+where the next measurement should go.
+
+**The caveat is the sample size.**  Four seeds per end puts a wide interval on 1/4, and this
+policy samples fresh flow-matching noise per chunk, so the spread across seeds is itself a
+finding.  What n=4 supports is the *existence* of the capability, which is a yes-or-no question
+that one success answers; it does not support the rate.  Raising both ends to twenty seeds is the
+next run, and one success in twenty would still say "capability is present, rate is 5%".
+
+**None of this is scorable yet**, and it should not be reported as a success rate for the Cookie
+task: the Cookie scene's success predicate is still A3's, and the instruction here ends at the
+plate, which A3's contracts do not mention.  `probe_ladder_object.py` reports **placement against
+a target body**, which is the weaker, honest claim.
+
 A **capability** failure degrades **monotonically** along a continuous axis: performance is a
 function of the scene, and it crosses the failure threshold somewhere you can point at.  A
 **bug** appears as a **cliff at a wiring boundary** -- a change that has no behavioural
