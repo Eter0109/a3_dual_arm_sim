@@ -839,34 +839,7 @@ LIBERO_PANDA_HOME_RAD = (
 )
 
 
-def _look_at_quat_wxyz(eye: tuple[float, ...], target: tuple[float, ...]) -> tuple[float, ...]:
-    """A `(w, x, y, z)` orientation that puts a MuJoCo camera at ``eye`` on ``target``.
-
-    MuJoCo cameras look down their local **-z** with **+y** up in the image, so the frame
-    is built from the view direction and a world-up reference rather than from Euler
-    angles.  Used to *re-aim* the transferred agentview without touching its position or
-    its field of view, which is the only change this repository has measured a price for
-    in the other direction (the front camera's fovy costs 12-14 points of 50).
-    """
-
-
-    import mujoco
-
-    forward = np.asarray(target, dtype=np.float64) - np.asarray(eye, dtype=np.float64)
-    forward = forward / np.linalg.norm(forward)
-    z_axis = -forward
-    x_axis = np.cross(forward, np.array((0.0, 0.0, 1.0)))
-    x_axis = x_axis / np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
-    rotation = np.stack((x_axis, y_axis, z_axis), axis=1).ravel()
-    quat = np.zeros(4, dtype=np.float64)
-    mujoco.mju_mat2Quat(quat, rotation)
-    return tuple(float(value) for value in quat)
-
-
-def _libero_matched_cameras(
-    cameras: CameraConfig, focus_m: tuple[float, ...] | None = None
-) -> CameraConfig:
+def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     """The camera geometry that reproduces LIBERO's own framing on this arm.
 
     Why this touches the cameras and nothing else
@@ -907,11 +880,7 @@ def _libero_matched_cameras(
         # elevation -- and each pinned a scalar while leaving the direction wrong, because
         # LIBERO's camera is not aimed at the object at all.
         front_position_m=LIBERO_AGENTVIEW_MATCHED_POS_M,
-        front_quat_wxyz=(
-            LIBERO_AGENTVIEW_QUAT_WXYZ
-            if focus_m is None
-            else _look_at_quat_wxyz(LIBERO_AGENTVIEW_MATCHED_POS_M, focus_m)
-        ),
+        front_quat_wxyz=LIBERO_AGENTVIEW_QUAT_WXYZ,
         front_fovy_deg=LIBERO_AGENTVIEW_FOVY_DEG,
         # Inert while the camera is fixed -- MuJoCo reads a target only in `targetbody`
         # mode -- but left on the bowl so the scene still records what the shot is about.
@@ -988,35 +957,28 @@ def libero_props_scene(
             else None
         )
         if matched_cameras:
-            # **In this branch the transferred agentview is aimed at nothing**, and it has to
-            # be re-aimed.  LIBERO's agentview is copied with its position *and* orientation
-            # (it is a fixed camera and its auto-aim target is inert in that mode), so it looks
-            # at the spot LIBERO's bowl used to occupy -- which in this scene is bare table,
-            # with A3's bin and box clipped into the bottom-left corner of the frame and the
-            # Cookie a few-pixel sliver at the edge.
+            # **The camera is LIBERO's and does not move; the layout is what moves.**
             #
-            # **Moving the layout instead was tried and does not work.**  A rigid translation
-            # of A3's whole arrangement into the frame is the smaller perturbation on paper --
-            # same internal geometry, camera untouched -- and its price was measured: with A3's
-            # own arm, which solves this scene 3 times in 3 with the layout where A3 puts it,
-            # the same expert solves it **0 in 3** at offsets (0.02, -0.12) and (0.02, -0.20).
-            # Where the arrangement sits is load-bearing for the task, so the camera is the
-            # axis that has to give.
+            # LIBERO's agentview is copied with its position *and* its orientation, and in
+            # this branch that means it is aimed at the spot LIBERO's bowl used to occupy --
+            # which here is bare table, with A3's bin and box clipped into the bottom-left
+            # corner of the frame.  Something has to give, and it is not the camera: staying on
+            # LIBERO's geometry is the point of the configuration, and the camera is the axis
+            # with the *known* price (the front fovy costs 12-14 points of 50).
             #
-            # Only the **orientation** changes: position and fovy stay LIBERO's, so the one
-            # camera property this repository has priced (fovy, 12-14 points of 50) is held.
-            focus = None
-            if a3_transfer is not None:
-                source_xy = a3_transfer.cookie_source_positions_m[0]
-                box_xy = a3_transfer.target_bin_world_position_m[:2]
-                focus = (
-                    (source_xy[0] + box_xy[0]) / 2.0,
-                    (source_xy[1] + box_xy[1]) / 2.0,
-                    a3_transfer.cookie_model_z_m,
-                )
-            loaded = replace(
-                loaded, cameras=_libero_matched_cameras(loaded.cameras, focus)
-            )
+            # An earlier version re-aimed the front camera at A3's layout instead, on the
+            # argument that moving the layout breaks the *scripted expert* -- measured: A3's own
+            # arm solves this scene 3 times in 3 with the layout where A3 puts it, and 0 in 3 at
+            # offsets (0.02, -0.12) and (0.02, -0.20).  That argument is backwards.  The expert
+            # is a reference kept for convenience, not the objective; if it cannot reach the
+            # arrangement the scene needs, the thing to fix is the expert, and only when it is
+            # actually needed -- for collecting data -- rather than bending the scene to it now.
+            # The re-aim is in the history at `a99c876` if it is ever wanted.
+            #
+            # So: LIBERO's camera, position, aim and 45 degrees, with
+            # `a3_layout_offset_m` sliding A3's arrangement into that frame.  What the offset
+            # costs is now an accepted, recorded cost rather than a surprise.
+            loaded = replace(loaded, cameras=_libero_matched_cameras(loaded.cameras))
             # **The arm is deliberately left at the A3 deployment home, and that is a
             # measurement rather than an omission.**  LIBERO starts every episode with its
             # end effector at (-0.2112, -0.0111, 1.1742) and this arm starts 362 mm away, so
@@ -1217,6 +1179,11 @@ def libero_props_scene(
                 if a3_single_cookie
                 else "configs/libero_props.yaml"
             ),
+            "layout_offset_m": (
+                f"{a3_layout_offset_m} -- A3's arrangement slid rigidly into LIBERO's frame"
+                if a3_single_cookie
+                else None
+            ),
             "props": (
                 "A3's single Cookie, A3's source bin and A3's ten-slot box, flat on the "
                 "table, and no LIBERO object at all"
@@ -1275,10 +1242,17 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         ),
         # A3's own single-Cookie task on the table that is known to work: the validated
         # cameras, robot, physics and start poses, with A3's props, A3's sentence and A3's
-        # success predicate.  The direct form of the ladder's question, and the only
-        # `libero_props` branch whose `scorable` is true.
+        # success predicate.  The only `libero_props` branch whose `scorable` is true.
+        #
+        # `a3_layout_offset_m` slides A3's arrangement into LIBERO's frame, because LIBERO's
+        # agentview is aimed at where LIBERO's bowl used to be and A3's layout is not there.
+        # The camera is not touched -- see the branch -- so this offset is the price the
+        # camera choice costs, and it is a rigid translation of the whole arrangement, which
+        # keeps the internal geometry A3's task is about.  Chosen by rendering the first frame
+        # at four candidates; (0.02, -0.20) puts both boxes fully inside with margin.
         "a3_libero_panda_single_cookie": lambda **kwargs: libero_props_scene(
-            matched_cameras=True, panda=True, a3_single_cookie=True, **kwargs
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200), **kwargs
         ),
     }
 
