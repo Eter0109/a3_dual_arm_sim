@@ -895,8 +895,30 @@ def _libero_matched_cameras(cameras: CameraConfig) -> CameraConfig:
     )
 
 
+#: Where LIBERO's ``akita_black_bowl`` mesh settles in this scene, in world XY.  Measured,
+#: not configured: `configs/libero_props.yaml` drops the wrapper at (0.150, 0.230) and
+#: LIBERO authors the object with an inner body offset 100 mm towards -y, so the mesh --
+#: the thing a camera sees and a gripper touches -- lands here.
+LIBERO_BOWL_MESH_XY_M = (0.150, 0.130)
+
+#: The props axis 4 of the ladder removes.  Both are `akita_black_bowl`, the object the
+#: checkpoints were trained on, and leaving either in place would leave a *easier* object
+#: than the Cookie on the table for the policy to choose instead.
+LIBERO_BOWL_PROP_NAMES = ("bowl", "bowl_near")
+
+#: Axis 4's instruction: LIBERO's own sentence with the object swapped, and its
+#: disambiguating clause dropped because this scene has one graspable object.  The target is
+#: kept -- "the plate" is the same plate, in the same place, as the sentence the checkpoints
+#: were trained on.
+COOKIE_ON_TABLE_PROMPT = "pick up the yellow block and place it on the plate"
+
+
 def libero_props_scene(
-    *, visual_style: str = "plain", matched_cameras: bool = False, panda: bool = False
+    *,
+    visual_style: str = "plain",
+    matched_cameras: bool = False,
+    panda: bool = False,
+    cookie_on_table: bool = False,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
 
@@ -960,6 +982,32 @@ def libero_props_scene(
                 # settling steps, because the A3's gains and the A3's integrator step were
                 # chosen together.  At 1.0 the arm sags 3.75 degrees at the elbow instead,
                 # 42 mm at the tool, and holds.
+        if cookie_on_table:
+            # **Axis 4 of the ladder: the object changes and nothing else.**  Same camera,
+            # same robot, same physics, same `pruned_init` start pose, same plate in the
+            # same place -- the reachable object goes from LIBERO's bowl, which the policy
+            # was trained on, to A3's own Cookie, which appears in no public dataset.
+            #
+            # `cookie_source_positions_m` is a *world* position (`model._add_cookie_scene`
+            # parents it straight onto `world`), so this does not move the source bin: the
+            # bin stays parked past the table's corner and the Cookie is dropped onto the
+            # table instead of falling with the tray.
+            #
+            # The two bowls come out.  "The object on the table" has to be the Cookie and
+            # only the Cookie, or the policy can satisfy the instruction by picking up the
+            # object it was trained on and the axis measures nothing.
+            loaded = replace(
+                loaded,
+                cookie_transfer=replace(
+                    loaded.cookie_transfer,
+                    cookie_source_positions_m=(LIBERO_BOWL_MESH_XY_M,),
+                    libero_props=tuple(
+                        prop
+                        for prop in loaded.cookie_transfer.libero_props
+                        if prop.name not in LIBERO_BOWL_PROP_NAMES
+                    ),
+                ),
+            )
         task_config = CookieTransferTaskConfig(
             cookie_count=1,
             required_cookies=1,
@@ -981,7 +1029,15 @@ def libero_props_scene(
         )
 
     return CollectionScene(
-        task=TASKS["a3_cookie_single_piece"],
+        # The instruction has to name what is on the table.  `a3_libero_panda` keeps the
+        # A3 Cookie prompt and takes LIBERO's words on the command line, because there the
+        # instruction is a separate axis; here the object *is* the axis, so a sentence about
+        # a bowl would be asking about the wrong thing.
+        task=(
+            replace(TASKS["a3_cookie_single_piece"], prompt=COOKIE_ON_TABLE_PROMPT)
+            if cookie_on_table
+            else TASKS["a3_cookie_single_piece"]
+        ),
         build_env=build_env,
         build_policy=build_policy,
         metric_keys=("cookies_in_target", "cookies_in_source"),
@@ -989,7 +1045,12 @@ def libero_props_scene(
         randomize_cookies=False,
         details={
             "config": "configs/libero_props.yaml",
-            "props": "LIBERO `akita_black_bowl` and `plate`, as passive scenery",
+            "props": (
+                "LIBERO `plate`/`ramekin`/`cookies` as scenery, with the A3 Cookie dropped "
+                "where LIBERO's bowl mesh settles -- axis 4 of the ladder"
+                if cookie_on_table
+                else "LIBERO `akita_black_bowl` and `plate`, as passive scenery"
+            ),
             "cameras": (
                 "LIBERO-matched: the agentview rebuilt around the bowl at LIBERO's own "
                 "0.96 m / 39.8 deg / 163.4 deg / fovy 45, wrist on the tool axis at fovy 75"
@@ -1024,6 +1085,12 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # arm is the reference one; see `model._add_libero_panda`.
         "a3_libero_panda": lambda **kwargs: libero_props_scene(
             matched_cameras=True, panda=True, **kwargs
+        ),
+        # Axis 4 of the ladder: `a3_libero_panda` with A3's own Cookie in the bowl's place
+        # and the two bowls taken out.  The only axis that differs from `a3_libero_panda` is
+        # the object, which is what makes the pair a measurement rather than two scenes.
+        "a3_libero_panda_cookie": lambda **kwargs: libero_props_scene(
+            matched_cameras=True, panda=True, cookie_on_table=True, **kwargs
         ),
     }
 
