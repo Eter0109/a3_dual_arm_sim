@@ -491,8 +491,9 @@ gripper closing from 0.81 to 0.15 across the six steps it happened in.
 is 25 physics substeps (`physics_hz 500`, `control_hz 20`).  A contact that begins and ends
 inside one control step is invisible to it, so the field is a *lower bound* on contact, and how
 loose that bound is depends on the object: a 112 mm bowl is in contact for 50-87 consecutive
-steps, while a 6.3 mm Cookie can be brushed and released within one.  Seventy-five steps of that
-rollout showed displacement with no recorded contact.
+steps, while a 6.4 mm-thin Cookie can be brushed and released within one.  Eight of twenty seeds
+of `a3_libero_panda_cookie` displaced the Cookie 14.5-54.8 mm with no contact recorded at any
+sample; in most of them the Cookie was **toppled** (see F11), which is a single-step event.
 
 *Rule*: **a sampled field is not a verdict, and the size of what it misses is a property of the
 system, not of the sampling rate.**  Where a quantity is sampled coarsely, state what it can miss
@@ -501,6 +502,42 @@ channel that cannot miss it (displacement) decide the sentence.  The trap is not
 it is that the sampling error is **correlated with the variable the experiment is about**: every
 instrument bug in this file has been biased the same way, toward "the policy cannot do it", so a
 coarse channel is not a neutral channel.
+
+### F10. A hold of one control step reported as a grasp
+
+*Symptom*: `grasped it and carried it`, on two seeds of `a3_libero_panda_cookie` that recorded
+**1 and 2 steps** of contact, never raised the Cookie above its starting height (+0.0 and +0.3
+mm), and displaced it 18.5 and 21.7 mm.
+
+*Cause*: the grasp test was "is there a step where the gripper is closed **and** the object is in
+contact".  The policy closes the gripper early in every rollout -- at step 45 on the Cookie end
+against step 43-47 everywhere -- and then leaves it closed, so the second half of every episode
+satisfies the closure half of the test, and a single brushed sample then manufactures a "hold".
+A brush of one 50 ms step is not a grasp.
+
+*Rule*: **a grasp is not a coincidence of two booleans, it is a state that persists and has a
+consequence.**  The consequence here is unambiguous and needs no threshold on contact: **a
+carried object leaves the surface it was resting on.**  `LIFT_MM` (5 mm, against a measured
+0.63 mm settling noise) now decides it, and the two false positives became
+`displaced it without lifting it off the surface`.  Note the shape of the error: a conjunctive
+test with a *permissive* reading of each half is how a 1-step event passes as a 40-step one.
+
+### F11. `max` of a signed quantity hides the fall
+
+*Symptom*: `rose +0.0 mm` on sixteen of twenty Cookie seeds, next to `moved 18.4 mm`.
+
+*Cause*: the Cookie is a 25 mm-tall, 6.4 mm-thin slab standing on its edge; when the closing jaws
+catch it, it **topples**, and its centre drops **9.2 mm** (from 12.5 mm above the surface to 3.2).
+`object_height_mm.max()` over the episode reports the *peak rise*, so a fall -- the dominant
+event in the whole run -- appears as `+0.0`, indistinguishable from "nothing happened".  The
+number that revealed it was the displacement: 18 mm of horizontal motion with no lift is only
+possible if the object rotated about its own base.
+
+*Rule*: **report both ends of a signed quantity, or you have reported half of it.**  `rose` and
+`sank` are now printed and recorded together, and every one of those sixteen seeds shows
+`sank = -9.2 mm`.  This is the same family as F4 and C2 -- one end of a comparison standing in
+for both -- and it is the one that cost the most to notice, because the missing half was the
+half that explained the failure.
 
 ---
 

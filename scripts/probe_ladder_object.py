@@ -97,6 +97,21 @@ CLOSED_FRACTION_OF_OPEN = 0.5
 #: so this is a settled-noise allowance rather than a physical tolerance.
 MOVED_MM = 2.0
 
+#: How far the object has to **rise above where it started** to count as carried.
+#:
+#: This is the grasp test that cannot be argued with: a carried object has left the surface
+#: it was resting on.  It replaced "is the gripper closed while the object is in contact",
+#: which is satisfied by a single coincidental sample -- on `a3_libero_panda_cookie` seeds
+#: 10 and 19 each recorded 1-2 steps of overlap, never lifted anything (+0.0 and +0.3 mm),
+#: and were reported as `grasped it and carried it`.  A brush of one control step is not a
+#: grasp, and the difference is exactly whether the object left the table.
+#:
+#: One-sided on purpose.  The Cookie is a 25 mm-tall, 6.4 mm-thin slab standing on its edge,
+#: and when the jaws close on it it **topples**: its centre falls 9.2 mm, which `max` of a
+#: signed height reports as +0.0.  So the test is on the rise and the fall is printed
+#: beside it, rather than one number pretending to be both.
+LIFT_MM = 5.0
+
 
 def _closed_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
     """The steps on which the gripper counts as closed, against its own open value.
@@ -145,43 +160,56 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _signature(trace: dict[str, np.ndarray]) -> str:
-    """Which of Gate 3's failure signatures this rollout is.
+#: The closed set of shapes a rollout can take.  A **fixed set** rather than a sentence with
+#: the numbers baked in, because the whole purpose of naming a shape is to count them across
+#: seeds and across the two ends of the ladder -- and a label that changes with the
+#: measurement ("moved it 18.5 mm but never lifted it" against "...21.7 mm...") cannot be
+#: counted, diffed, or compared.  The numbers belong next to it, not inside it.
+SHAPES = (
+    "the arm never moved (execution bug, not capability)",
+    "never touched the object",
+    "never recorded in contact, but displaced it",
+    "touched it, never moved it",
+    "displaced it without lifting it off the surface",
+    "lifted it without the gripper ever closed on it",
+    "grasped it and carried it",
+)
 
-    Read off the three observations, not off a threshold that decides pass or fail:
-    whether anything touched the object, whether it moved, and whether the gripper closed
-    while it was still on it.  The point of naming the shape is that the shapes mean
-    different things -- "never touched it" and "touched it but never moved it" are both
-    0% and are not the same finding.
+
+def _signature(trace: dict[str, np.ndarray]) -> str:
+    """Which of :data:`SHAPES` this rollout is.
+
+    Read off the observations, not off a threshold that decides pass or fail: whether
+    anything touched the object, whether it moved, and whether it left the surface.  The
+    shapes mean different things -- `never touched it` and `displaced it without lifting
+    it` are both "it failed" and are opposite findings, one about perception and one about
+    the hold.
     """
 
     if float(np.abs(trace["joint_motion_mrad"]).max()) <= 0.0:
-        return "the arm never moved (execution bug, not capability)"
+        return SHAPES[0]
     touched = int(trace["touch_arm"].sum())
     moved = float(trace["object_mm"].max())
-    closed = _closed_steps(trace)
+    lifted = float(trace["object_height_mm"].max())
     held = _held_steps(trace)
     if touched == 0:
         # `touch_arm` is MuJoCo's contact list read **once per control step**, so it is a
         # lower bound, and the bound is loosest for the smallest object.  A 112 mm bowl
-        # presents a contact that lasts tens of steps and cannot be missed; a 6.3 mm Cookie
-        # brushed for a few physics substeps can be, and on seed 0 it was: the Cookie slid
-        # 15.9 mm over 75 steps with no recorded contact at any sample.  Saying "never
-        # touched the object" there is not conservative, it is false, and it is false in the
-        # direction that flatters the working end of the ladder -- the bias is against
-        # exactly the object the axis is about.  Displacement is the channel that cannot miss
-        # it, so it decides which of the two sentences this is.
-        if moved > MOVED_MM:
-            return (f"never recorded in contact, yet it moved {moved:.1f} mm -- the contact "
-                    f"was between samples")
-        return "never touched the object"
+        # presents a contact that lasts tens of steps and cannot be missed; a 6.4 mm-thin
+        # Cookie brushed within one 50 ms control step can be, and it was -- on
+        # `a3_libero_panda_cookie` eight of twenty seeds displaced the Cookie 14-55 mm with
+        # no contact recorded at any sample.  Saying "never touched the object" there is not
+        # conservative, it is false, and it is false in the direction that flatters the
+        # working end of the ladder.  Displacement is the channel that cannot miss it, so it
+        # decides which of the two shapes this is.
+        return SHAPES[1] if moved <= MOVED_MM else SHAPES[2]
     if moved <= MOVED_MM:
-        return "touched it, never moved it"
-    if closed.size == 0:
-        return "moved it without ever closing the gripper on it"
+        return SHAPES[3]
+    if lifted < LIFT_MM:
+        return SHAPES[4]
     if held.size == 0:
-        return "closed the gripper, but never while it was on the object"
-    return "grasped it and carried it"
+        return SHAPES[5]
+    return SHAPES[6]
 
 
 def _grasp_timing(trace: dict[str, np.ndarray]) -> str:
@@ -330,7 +358,8 @@ def main() -> int:
             f"seed {seed}: nearest fingertip {trace['gap_mm'][closest]:.1f} mm from the "
             f"object centre at step {closest}  |  object moved "
             f"{trace['object_mm'].max():.2f} mm, peak height "
-            f"{trace['object_height_mm'].max():+.1f} mm  |  gripper closed on "
+            f"{trace['object_height_mm'].max():+.1f} mm (deepest "
+            f"{trace['object_height_mm'].min():+.1f} mm)  |  gripper closed on "
             f"{_closed_steps(trace).size}/{len(rows)} steps and closed *on the object* for "
             f"{_held_steps(trace).size}, arm on "
             f"the object for {int(trace['touch_arm'].sum())}, on the table for "
