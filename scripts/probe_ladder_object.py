@@ -435,6 +435,7 @@ def main() -> int:
         mujoco.mj_forward(model, env.data)
         start, radius_m, size_m = prop_frame(model, env.data, watched)
         target_centre = None if target < 0 else prop_frame(model, env.data, target)[0]
+        target_start = target_centre
         watched_geoms = set(prop_geoms(model, watched))
         arm_bodies = robot_bodies(model)
         arm_qpos = arm_qpos_addresses(model)
@@ -515,9 +516,33 @@ def main() -> int:
                     "gap_mm": gap * 1000.0,
                     "object_mm": float(np.linalg.norm(centre - start)) * 1000.0,
                     "object_height_mm": float(centre[2] - start[2]) * 1000.0,
-                    "object_target_mm": (float("nan") if target_centre is None else
+                    # **Two different distances, and conflating them cost a reading.**
+                    #
+                    # `object_target_mm` is against where the target *started*, which is the
+                    # right reference only while the target is scenery.  In `a3_libero_panda`
+                    # the target is LIBERO's plate and never moves, so it was right for every
+                    # scene this probe was written for.  In `a3_libero_panda_single_cookie` the
+                    # target is A3's ten-slot box, which is a **free rigid body** -- and the
+                    # policy picks it up and carries it into the source bin.  The trace then
+                    # said "the object never moved (median 0.3 mm), the target gap is flat at
+                    # 131 mm, nothing is happening" while the one thing actually being
+                    # manipulated was the box.  A clip showed it in the last frames.
+                    #
+                    # So the target's own displacement is recorded, and `live_gap_mm` is the
+                    # distance to where the target is *now*.  A probe cannot report on a
+                    # scene that moves a reference it assumed was fixed.
+                    "object_target_mm": (float("nan") if target_start is None else
                                          float(np.linalg.norm(
-                                             centre[:2] - target_centre[:2])) * 1000.0),
+                                             centre[:2] - target_start[:2])) * 1000.0),
+                    "target_mm": (float("nan") if target_start is None else
+                                  float(np.linalg.norm(
+                                      prop_frame(model, env.data, target)[0] - target_start))
+                                  * 1000.0),
+                    "live_gap_mm": (float("nan") if target_start is None else
+                                    float(np.linalg.norm(
+                                        centre[:2]
+                                        - prop_frame(model, env.data, target)[0][:2]))
+                                    * 1000.0),
                     # MuJoCo's own contact list, not a proximity threshold.
                     "touch_arm": float(on_arm),
                     "touch_table": float(touching(model, env.data, watched_geoms, {0})),
@@ -568,6 +593,8 @@ def main() -> int:
             f"{_held_steps(trace).size}, arm on "
             f"the object for {int(trace['touch_arm'].sum())}, on the table for "
             f"{int(trace['touch_table'].sum())}  |  {len(rows)} of {args.steps} steps run\n"
+            f"        the target moved {np.nanmax(trace['target_mm']):.1f} mm"
+            f" (its start is the only reference the old run had)\n"
             f"        gripper: open value this run {open_reference:.4f}, so closed means "
             f"below {CLOSED_FRACTION_OF_OPEN * open_reference:.4f}, and its minimum was "
             f"{float(trace['gripper'].min()):.4f} on step "

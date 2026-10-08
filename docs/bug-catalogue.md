@@ -560,6 +560,28 @@ in height and a 21-step gap in duration.  A test that requires both a height and
 also the honest statement of the physics: a carried object has left the surface **and stays
 away from it**.
 
+### F13. A reference that moved, measured as though it were fixed
+
+*Symptom*: `never touched the object`, median displacement **0.3 mm**, object-to-target distance
+flat at 131 mm for forty seeds -- and a clip whose last frame shows the policy carrying the
+**target box** into the source bin, having touched the watched object not at all.
+
+*Cause*: the probe records the target's centre **once, at reset**, and reports
+`object_target_mm` as the watched object's distance to *that* point.  That is the right
+reference while the target is scenery -- LIBERO's plate never moves, and neither does anything
+else this probe had been pointed at -- and it is silently wrong when the target is a **free
+rigid body**.  A3's ten-slot box has a `freejoint`; the policy picks it up and carries it, and
+every column of the table was blind to it: the box was not the watched body, and the number
+that could have shown it was measured against where the box *used* to be.
+
+*Rule*: **a probe that names a reference must record whether the reference moved**, in the same
+way it records whether the object did.  The trace now carries the target's own displacement and
+a live object-to-target distance beside the fixed-reference one, and the summary prints the
+target's motion first -- because in this scene that was the only thing happening.  This is the
+same failure as F4 and C2 in a new place: one end of a comparison standing for both.  The
+general form is worth keeping: **any reference a measurement holds fixed is a claim about the
+world, and a free body is the world declining that claim.**
+
 ---
 
 ## G. Cross-scene leakage
