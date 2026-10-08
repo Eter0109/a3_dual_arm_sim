@@ -625,6 +625,18 @@ class A3CookieTransferEnv(A3DualArmEnv):
             # A Cookie inherits the bin's yaw, plus its own jitter.
             orientation = yaw + self._scene_yaw
             quaternion = (np.cos(orientation / 2), 0.0, 0.0, np.sin(orientation / 2))
+            # ...unless the scene declares a starting attitude, which is the **base** the yaw
+            # turns on top of.  Without this the reset overwrote whatever the model was built
+            # with -- and it overwrote it with a pure yaw, so a scene asking for the slab
+            # rolled onto its broad face got it standing anyway, silently, with the same
+            # pixels in the camera as before.  Empty is the identity and keeps every existing
+            # scene byte-for-byte: a Cookie stands on its 6.4 mm edge, which is what A3's own
+            # task means by upright.
+            base_quat = self.config.cookie_transfer.cookie_source_quat_wxyz
+            if base_quat:
+                composed = np.zeros(4, dtype=np.float64)
+                mujoco.mju_mulQuat(composed, np.asarray(quaternion), np.asarray(base_quat))
+                quaternion = tuple(float(value) for value in composed)
             self.set_cookie_pose(index, (base_x + dx, base_y + dy, self.COOKIE_RESET_Z), quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)

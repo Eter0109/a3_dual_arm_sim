@@ -759,6 +759,14 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             "body",
             name=f"cookie_{index}",
             pos=f"{x} {y} {scene.cookie_model_z_m}",
+            # Empty means identity, which is the **standing** attitude every A3 scene uses:
+            # the Cookie is 50 x 6.4 x 25 mm and stands on its 6.4 mm edge, upright.  A scene
+            # that needs the other face toward the camera sets a rotation here rather than
+            # laying the body down in `pos`, because the freejoint has to start from the pose
+            # the task means.  See `a3_libero_panda_single_cookie`, which yaws it a quarter
+            # turn so the 50 x 25 mm face -- not the 6.4 mm edge -- is what a camera sees.
+            **({} if not scene.cookie_source_quat_wxyz
+               else {"quat": _vec(scene.cookie_source_quat_wxyz)}),
         )
         ET.SubElement(cookie, "freejoint", name=f"cookie_{index}_free")
         collision = ET.SubElement(

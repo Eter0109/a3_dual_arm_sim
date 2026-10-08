@@ -921,6 +921,8 @@ def libero_props_scene(
     cookie_on_table: bool = False,
     a3_single_cookie: bool = False,
     a3_layout_offset_m: tuple[float, float] = (0.0, 0.0),
+    a3_cookie_position_m: tuple[float, float] | None = None,
+    a3_cookie_quat_wxyz: tuple[float, ...] = (),
     hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
@@ -1086,6 +1088,14 @@ def libero_props_scene(
             # which names neither the field nor the shape.
             offset_x, offset_y = a3_layout_offset_m
             a3_source = a3_transfer.cookie_source_positions_m[0]
+            cookie_xy = (
+                (
+                    a3_source[0] + offset_x,
+                    a3_source[1] + offset_y,
+                )
+                if a3_cookie_position_m is None
+                else a3_cookie_position_m
+            )
             loaded = replace(
                 loaded,
                 cookie_transfer=replace(
@@ -1093,9 +1103,8 @@ def libero_props_scene(
                     libero_props=(),
                     box_lift_m=a3_transfer.box_lift_m,
                     box_tilt_deg=a3_transfer.box_tilt_deg,
-                    cookie_source_positions_m=(
-                        (a3_source[0] + offset_x, a3_source[1] + offset_y),
-                    ),
+                    cookie_source_positions_m=(cookie_xy,),
+                    cookie_source_quat_wxyz=a3_cookie_quat_wxyz,
                     source_bin_center_m=(
                         a3_transfer.source_bin_center_m[0] + offset_x,
                         a3_transfer.source_bin_center_m[1] + offset_y,
@@ -1250,9 +1259,32 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         # camera choice costs, and it is a rigid translation of the whole arrangement, which
         # keeps the internal geometry A3's task is about.  Chosen by rendering the first frame
         # at four candidates; (0.02, -0.20) puts both boxes fully inside with margin.
+        #
+        # `a3_cookie_position_m` and the quarter-turn move the Cookie out of the bin and
+        # below the box, and turn it so its **50 x 25 mm face** is what the camera sees.  It
+        # was 23 pixels in a 3 x 21 box -- a 6.4 mm edge, 0.035% of the frame -- and it is now
+        # **101 pixels in an 18 x 6 box**, a factor of 4.4:
+        #
+        #   23 px standing in the bin's corner, edge to the camera
+        #  101 px on the table below the box, long face to the camera, quarter-turned
+        #
+        # The position is the *second* of three candidates that all measured 96-102 px, and it
+        # is chosen for reach rather than for pixels: it is 0.681 m from the Panda's base
+        # against 0.793 m for the one nearest the camera, 0.721 m for the middle.  Nearer the
+        # camera and within the arm's reach pull in opposite directions -- the camera sits at
+        # x = +0.87 and the arm's base at x = -0.45 -- and the arm has to actually get there,
+        # so the trade went to the arm, at a cost of 35 mm of camera distance.
+        #
+        # **This changes the task, and that is the point of the run.**  The Cookie is no longer
+        # in the source bin, so `from the source bin` in the instruction is no longer true of
+        # the scene; and a slab turned onto its long face is a different grasp from one
+        # presented edge-on.  It is a visibility experiment, not a candidate configuration.
         "a3_libero_panda_single_cookie": lambda **kwargs: libero_props_scene(
             matched_cameras=True, panda=True, a3_single_cookie=True,
-            a3_layout_offset_m=(0.020, -0.200), **kwargs
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_cookie_position_m=(0.2343, -0.0932),
+            a3_cookie_quat_wxyz=(0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+            **kwargs
         ),
     }
 

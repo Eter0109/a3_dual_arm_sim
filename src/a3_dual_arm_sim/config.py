@@ -162,6 +162,13 @@ class CookieSceneConfig:
     cookie_source_positions_m: tuple[tuple[float, ...], ...] = COOKIE_SOURCE_POSITIONS
     cookie_model_z_m: float = 0.7685
     cookie_reset_z_m: float = 0.7688
+    #: Orientation given to every Cookie at spawn, as ``(w, x, y, z)``.  Empty is the
+    #: identity -- the **standing** attitude every A3 scene uses, since this object is a
+    #: 50 x 6.4 x 25 mm slab and stands on its 6.4 mm edge.  A scene that needs a different
+    #: face toward the camera says so here rather than encoding it in `pos`, so the freejoint
+    #: starts from the pose the task means.  Set in code, not from YAML: no scene file has
+    #: needed it yet, and a value a config cannot express is one fewer thing to drift.
+    cookie_source_quat_wxyz: tuple[float, ...] = ()
     bin_wall_thickness_m: float = 0.006
     bin_friction: tuple[float, ...] = (1.2, 0.02, 0.001)
     source_bin_center_m: tuple[float, ...] = (0.175, 0.315)
