@@ -304,6 +304,39 @@ for the Cookie task**: A3's success predicate is about Cookies in a bin, the ins
 here ends at the plate, and `probe_ladder_object.py` reports **placement against a target body**
 -- the weaker, honest claim.
 
+#### The visibility experiment, and what it rules out
+
+The Cookie is small in the only camera the policy has: **23 pixels in a 3 x 21 box**, 0.035% of
+a 256 x 256 frame, with its 6.4 mm edge toward the aim.  If "the policy cannot see it" were the
+binding constraint, presenting it larger should move the numbers.  So it was made **4.4x larger
+-- 101 pixels in an 18 x 6 box** -- by moving it out of the bin to the table below the box,
+nearer the camera, and turning it a quarter turn so its 50 x 25 face is what the camera sees.
+
+| | Cookie taken | the box taken |
+|---|---|---|
+| box present, two runs of five and five seeds | **0 of 10** | **9 of 10** |
+| no box at all, Cookie where the bowl was (axis 4) | 2 of 20 | -- |
+| box present, Cookie **4.4x larger in pixels** | **0 of 5** | **5 of 5** |
+
+**Pixels are not the constraint.**  At 101 px the policy does not come *closer* to the Cookie but
+further -- nearest fingertip a median 130 mm against 60 mm before -- while carrying the box
+every time.  For scale, the same policy reaches **11 mm** to LIBERO's bowl.  So it is not failing
+to reach things; it is not going there.
+
+**Neither is the scene's ambiguity the whole constraint**, and this is the part worth stating
+carefully, because it is the tempting conclusion.  Removing the competing object entirely -- axis
+4, the Cookie alone on the table -- gives **2 of 20**, not a success.  So the chain is:
+
+* with a bowl-scale graspable alternative in view, the policy takes it, **reliably**;
+* with no alternative, it takes the Cookie **10%** of the time, and the dominant failure there is
+  knocking over a slab standing on its 6.4 mm edge;
+* making the Cookie four times larger changes neither number.
+
+The remaining explanation is the one no scene rearrangement addresses: **this checkpoint's grasp
+prior was learned on bowl-scale objects** -- reach in, close on a rim -- and a 6.4 mm slab is
+outside it.  Every knob left is a knob on the scene, and the scene has been measured to matter
+less than the object does.  What is left is data.
+
 A **capability** failure degrades **monotonically** along a continuous axis: performance is a
 function of the scene, and it crosses the failure threshold somewhere you can point at.  A
 **bug** appears as a **cliff at a wiring boundary** -- a change that has no behavioural
