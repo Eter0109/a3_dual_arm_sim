@@ -418,6 +418,86 @@ justification (an axis flip, a scene switch, a code path) and takes the rate fro
 This is the strongest available answer, because it does not rely on the absence of bugs: it
 relies on the *shape* of the degradation.
 
+#### Stage one is the box, stage two is the Cookie
+
+The prompt axis is closed, so the remaining explanation for "ten seeds, ten boxes, no Cookie" was
+perception: the wrist camera looks down the tool axis, and from LIBERO's home that axis points at
+the table under the hand, 330 mm to one side of the Cookie.  The object may simply be out of shot
+until the arm happens to wander over the bin.
+
+**Two probes test that, and both refute it.**  Both restore the Cookie to A3's own placement --
+standing in the source bin's near-left corner, `(0.1194, 0.0311)` -- and keep the prompt.  Five
+seeds each, 300 steps, `scripts/probe_ladder_object.py`, scenes registered in `collection.py`.
+
+*Probe 1, `a3_probe_home_over_cookie`*: the arm starts with its hand **120 mm above the Cookie**,
+tool straight down (`LIBERO_PANDA_HOME_OVER_COOKIE_RAD`, solved by least squares on the live model
+to a 0.00 mm residual; equilibrium checked -- 0 contacts, < 0.1 mrad of drift over 300 unactuated
+steps).  So at step 0 the Cookie is unambiguously in the wrist camera.
+
+How unambiguous is measured by **projection**, not by colour.  The colour detector verified on the
+front camera does not transfer to the wrist cameras -- from 120 mm the brown table is brighter and
+passes the same thresholds, which read as 16352 yellow pixels in a frame holding one small bar.
+Projecting the Cookie's eight rotated corners with the convention calibrated to 1.1 px:
+
+| home (+ 120 mm) | Cookie centre in `left_wrist` | bbox |
+|---|---|---|
+| LIBERO's | offset (+55.7, -39.0) | 14 x 25 px |
+| hand over the Cookie | offset ( +1.7, +38.1) | **37 x 44 px** |
+
+Which also corrects the premise: the Cookie was **never** invisible from LIBERO's home.  It is a
+14 x 25 px sliver in the top third of the wrist frame from step 0, and the probe gives it 4.6x the
+pixels, centred.
+
+| probe 1, 5 seeds | nearest fingertip to the Cookie | Cookie displaced | box displaced | signature |
+|---|---|---|---|---|
+| 0 | 83.7 mm | 0.27 mm | 18.1 mm | never touched the object |
+| 1 | 117.4 mm | 0.79 mm | **217.1 mm** | never touched the object |
+| 2 | 95.4 mm | 18.14 mm | **170.3 mm** | never recorded in contact, but displaced it |
+| 3 | 64.6 mm | 9.40 mm | **178.9 mm** | never recorded in contact, but displaced it |
+| 4 | 75.5 mm | 2.06 mm | **187.0 mm** | never recorded in contact, but displaced it |
+
+**0 of 5 Cookies, and 4 of 5 boxes carried 170-217 mm.**  The arm starts over the object, with the
+object centred and large in its own wrist camera, and leaves.  The clip's frame at seed 1, step 139
+shows where it went: the target box is sitting **inside** the source bin, next to the untouched
+Cookie.  This is the same result as the ten seeds before it, from a start pose chosen specifically
+to make the object visible, so **the visibility explanation is dead**.
+
+*Probe 2, `a3_probe_box_in_bin`*: the box starts **inside** the bin, at its centre,
+`(0.195, 0.115)`.  Two things had to be true and were measured
+(`scripts/check_box_in_bin.py`): the box rests *in* the bin rather than on its rim (bin rim top
+0.7760, box origin 0.7560 against 0.7500 on the table, unmoved over 150 free steps), and it neither
+touches nor covers the Cookie (the Cookie's footprint reaches y = 0.056, the box starts at
+y = 0.080; the front frame holds **23** yellow pixels with the box on the table and **23** with it
+in the bin, and **0 of them change**).
+
+| probe 2, 5 seeds | nearest fingertip | Cookie displaced | Cookie height | closed *on* the object | signature |
+|---|---|---|---|---|---|
+| 0 | 46.6 mm | 0.27 mm | +0.0 mm | 0 steps | never touched the object |
+| 1 | 47.4 mm | 0.27 mm | +0.0 mm | 0 steps | never touched the object |
+| 2 | 11.9 mm | 8.16 mm | +0.6 mm | 25 steps | displaced it without lifting it off the surface |
+| 3 | 18.5 mm | 3.97 mm | +3.3 mm | 28 steps | displaced it without lifting it off the surface |
+| 4 | 10.9 mm | 16.02 mm | **-9.2 mm** | 23 steps | displaced it without lifting it off the surface |
+
+**0 of 5 Cookies, but the arm now goes to it**: three of five reach a 12-28 mm fingertip gap,
+record 23-28 steps of contact and drive the gripper to 0.013, and the box stays put (0.0-6.5 mm,
+91.9 mm in seed 1 where the arm drags it aside on the way in).  The Cookie is displaced 4-16 mm and
+**toppled** -- seed 4 rises +7.2 mm and sinks -9.2 mm, which is the axis-4 signature, not a carry.
+
+**The two probes compose into one story.**  Probe 1's end state -- box in the bin, Cookie standing
+untouched -- is close to probe 2's start state, and the policy does different things in the two.
+That is the finding:
+
+> target selection follows the **box's state**, not the Cookie's visibility.  Given a box that is
+> not yet in the bin, the policy moves the box into the bin and ignores the Cookie however large
+> and however centred the Cookie is.  Given a box that is already in the bin, it goes to the
+> Cookie, reaches it, closes on it -- and topples it.
+
+So the earlier reading needs one amendment.  It is not that the policy fails to understand *which
+object* -- it reads the instruction (20/20 against 11/20) -- but that it executes the two halves of
+the arrangement in the **other order**, container into bin before object into container, and stops
+after the first.  The remaining obstacle is the one axis 4 already named: it can reach this 50 x 25
+x 6.4 mm slab and close on it, and it cannot lift it.
+
 ---
 
 ## 4. The staged transition
