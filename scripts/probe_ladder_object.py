@@ -208,7 +208,14 @@ class _Recorder:
         self.object_radius_mm = object_radius_mm
         self.target_radius_mm = target_radius_mm
         self.title = title
-        #: `(gap_mm, object_to_target_mm, off_the_surface)` per frame, which is the chart.
+        #: `(gap_mm, target_mm, off_the_surface)` per frame, which is the chart.
+        #:
+        #: The second series is the **target's own displacement**, not its distance from the
+        #: watched object.  It was the latter, and that is a curve about a fixed reference:
+        #: it is the right thing to draw while the target is scenery, and in this scene the
+        #: target is a free body the policy picks up and carries, so the curve held a flat
+        #: 131 mm through the one event that mattered (F13).  The distance to the target is
+        #: still in the trace; what the picture needs is the thing that moved.
         self.history: list[tuple[float, float, bool]] = []
         path.parent.mkdir(parents=True, exist_ok=True)
         self.container = av.open(str(path), mode="w")
@@ -249,11 +256,12 @@ class _Recorder:
             draw.line((0, y(radius), self.width, y(radius)), fill=colour)
             draw.text((4, y(radius) - 11), f"{label} {radius:.0f} mm", fill=colour)
         for column, colour in ((0, (120, 255, 160)), (1, (255, 140, 140))):
-            points = [(self._x(i), y(pair[column])) for i, pair in enumerate(self.history)]
+            points = [(self._x(i), y(pair[column])) for i, pair in enumerate(self.history)
+                      if np.isfinite(pair[column])]
             if len(points) > 1:
                 draw.line(points, fill=colour, width=2)
         draw.text((4, 2), "green: nearest fingertip to the object   "
-                          "red: object to target   band: off the surface",
+                          "red: the target's own displacement   band: object off the surface",
                   fill=(200, 200, 200))
         return chart
 
@@ -488,11 +496,12 @@ def main() -> int:
 
             if recorder is not None:
                 height_mm = float(centre[2] - start[2]) * 1000.0
-                to_target = (None if target_centre is None else
-                             float(np.linalg.norm(centre[:2] - target_centre[:2])) * 1000.0)
+                target_mm = (float("nan") if target_start is None else
+                             float(np.linalg.norm(
+                                 prop_frame(model, env.data, target)[0] - target_start))
+                             * 1000.0)
                 recorder.history.append(
-                    (gap * 1000.0, to_target if to_target is not None else float("nan"),
-                     height_mm > LIFT_MM)
+                    (gap * 1000.0, target_mm, height_mm > LIFT_MM)
                 )
                 recorder.add(
                     env.render_view("front", height=args.view_size, width=args.view_size),
@@ -501,8 +510,8 @@ def main() -> int:
                     [
                         f"seed {seed}   step {step}",
                         "fingertip " + f"{gap * 1000.0:6.1f} mm"
-                        + ("   target " + f"{to_target:6.1f} mm"
-                           if to_target is not None else ""),
+                        + ("   target moved " + f"{target_mm:6.1f} mm"
+                           if np.isfinite(target_mm) else ""),
                         "height " + f"{height_mm:+6.1f} mm"
                         + f"   off surface {int(height_mm > LIFT_MM)}"
                         + f"   arm on it {int(on_arm)}",
