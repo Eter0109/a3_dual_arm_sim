@@ -373,6 +373,42 @@ things LIBERO has words for, and they can be fixed: `Pick the yellow block and p
 box` is LIBERO's template with LIBERO's container.  The **referent** cannot: whichever noun is
 chosen for a 50 x 6.4 x 25 mm yellow slab is a noun this checkpoint has not been taught.
 
+#### Does the checkpoint read the instruction at all?  Yes, and sharply
+
+Before concluding anything from "the prompt made no difference", the null had to be ruled out:
+*three prompts with the same outcome* is also what a pipeline that drops the text would produce.
+Two checks, and the second is the one with power.
+
+**The text arrives.**  `gateway._replan` packs it into the request (`Request(task=task)`), the
+server reads it back (`task=str(fields.get("task", ""))`), and the LIBERO adapter puts it into the
+batch the policy is called with (`batch["task"] = [request.task or ""]`).  It is an input to
+`predict_action_chunk`, not a field that stops at the door.
+
+**And it changes behaviour.**  The bowl scene, which the right instruction solves reliably, given
+the wrong one:
+
+| `a3_libero_panda`, 20 seeds | carried | closest fingertip, median |
+|---|---|---|
+| `pick up the black bowl between the plate and the ramekin and place it on the plate` | **20 / 20** | **11.0 mm** |
+| `Pick the yellow block and place it in the box` | **11 / 20** | **22.7 mm** |
+
+Fisher's exact p is about **0.0006**, and the failure changes kind rather than degree: seven of
+the nine failures are `displaced it without lifting it`, not "never got there".  The instruction
+is a real input to this policy, and a wrong one costs half the successes.
+
+**So the two results together are the finding, and neither is interesting alone.**  The
+instruction is read.  Three phrasings of it -- one of them LIBERO's own template with LIBERO's own
+container word -- change nothing at all about what the policy picks up: fifteen episodes, and the
+Cookie's displacement is **0.17 mm in every one of them**, which is its settling noise.  What that
+rules out is the prompt, not the pipeline:
+
+> there is no phrasing that binds this policy to this object.
+
+Which is what the vocabulary count said would happen.  And it has a consequence worth carrying
+into the data plan: since the instruction pathway is live and *load-bearing* (20/20 to 11/20), a
+fine-tune on A3's objects is a coherent plan rather than a hope -- the words `block`, `source
+bin` and `target box` would have to be taught as well as the grasp.
+
 A **capability** failure degrades **monotonically** along a continuous axis: performance is a
 function of the scene, and it crosses the failure threshold somewhere you can point at.  A
 **bug** appears as a **cliff at a wiring boundary** -- a change that has no behavioural
