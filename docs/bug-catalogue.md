@@ -441,6 +441,44 @@ check that catches this class: compare every recorded quantity against a physica
 believing it -- 17 rad against a 0.1 rad cap is a one-line contradiction.  F5 and F6 were both
 found that way, in the same run, from output that had been printed as plausible for weeks.
 
+### F7. A threshold calibrated in another scene
+
+*Symptom*: `gripper closed on 0/150 steps`, and the signature
+`moved it without ever closing the gripper on it`, for a rollout that had closed on step 47,
+held the hold, and carried the bowl 114.7 mm of the 117.6 mm to the plate.
+
+*Cause*: a close was `opening < 0.05`, and 0.05 was taken from the A3's finger servo, which
+reaches 0.027 at the end of its travel **when it is empty**.  In `a3_libero_panda` the jaws stop
+at **0.0823** because there is a 112 mm bowl between them, and a gripper gripping something
+cannot reach the value it reaches gripping nothing.  The threshold was not merely conservative;
+it was **structurally unsatisfiable in that scene**, so it could only ever return "never closed".
+It is now a fraction of the run's own maximum opening, which needs no constant per scene.
+
+*Rule*: **an absolute threshold is a claim about a machine, and a scene is allowed to contain a
+different machine.**  Calibrate against the quantity's own range in the run that produced it.
+The sharper version: a threshold that *cannot be met* is worse than no threshold, because it
+looks like evidence -- here it looked like proof that the policy cannot grasp, which is the
+hypothesis under test.
+
+### F8. A duration read off a step boundary
+
+*Symptom*: `closed the gripper after leaving it`, on a rollout with **84 steps of the gripper
+closed and touching the object at the same time**.
+
+*Cause*: the grasp test was `was the object in contact on the step before the first closed
+step`.  On seed 2 of `a3_libero_panda` the gripper shut across the approach -- 0.99, 0.81, 0.57,
+0.35 over steps 34-37 -- so it crossed the close threshold on the **same step** it first touched
+the bowl, the lookback landed on `no contact`, and a 84-step hold was classified as a gripper
+that closed on nothing.  The test was also answering a different question from the one the
+summary line printed next to it (`_grasp_timing` asked "did the close come before the last
+contact") and the two disagreed in the same line of output.
+
+*Rule*: **ask whether the state held, not what happened one step before it began.**  "Closed and
+on the object" is a conjunction over steps, and it is measured by counting the steps where both
+hold; a boundary lookup silently converts a duration into an instant, and the instant is where
+the noise is.  Both functions now share `_held_steps`, so the signature cannot disagree with the
+line above it.
+
 ---
 
 ## G. Cross-scene leakage

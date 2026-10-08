@@ -110,6 +110,24 @@ def _closed_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
     return np.flatnonzero(trace["gripper"] < CLOSED_FRACTION_OF_OPEN * reference)
 
 
+def _held_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
+    """The steps on which the gripper was **closed and on the object at the same time**.
+
+    This is the whole grasp test, and it used to be a one-step lookback instead: `was the
+    object in contact on the step before the first closed step`.  On `a3_libero_panda` seed
+    2 the gripper crossed its close threshold on the same step it first touched the bowl --
+    it had been shutting over the approach, 0.99 -> 0.81 -> 0.57 
+    -> 0.35 across steps 34-37 -- so the step before the close was `no contact`, and a
+    rollout with **84** steps of closed-and-touching was reported as `closed the gripper
+    after leaving it`.  Reading a *duration* off a step boundary is the error; a state that
+    holds for 84 steps cannot be inferred from the one step before its first frame.
+    """
+
+    closed = np.zeros(len(trace["gripper"]), dtype=bool)
+    closed[_closed_steps(trace)] = True
+    return np.flatnonzero(closed & (trace["touch_arm"] > 0))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--scene", default="a3_libero_panda")
@@ -141,17 +159,17 @@ def _signature(trace: dict[str, np.ndarray]) -> str:
         return "the arm never moved (execution bug, not capability)"
     touched = int(trace["touch_arm"].sum())
     moved = float(trace["object_mm"].max())
-    # The gripper's first close, and where the object was when it happened.
     closed = _closed_steps(trace)
+    held = _held_steps(trace)
     if touched == 0:
         return "never touched the object"
     if moved <= MOVED_MM:
         return "touched it, never moved it"
     if closed.size == 0:
         return "moved it without ever closing the gripper on it"
-    first = int(closed[0])
-    on_it = bool(trace["touch_arm"][max(first - 1, 0)] > 0)
-    return ("grasped it and carried it" if on_it else "closed the gripper after leaving it")
+    if held.size == 0:
+        return "closed the gripper, but never while it was on the object"
+    return "grasped it and carried it"
 
 
 def _grasp_timing(trace: dict[str, np.ndarray]) -> str:
@@ -162,17 +180,19 @@ def _grasp_timing(trace: dict[str, np.ndarray]) -> str:
     """
 
     closed = _closed_steps(trace)
+    held = _held_steps(trace)
+    contacts = np.flatnonzero(trace["touch_arm"] > 0)
     if closed.size == 0:
         return "the gripper never closed"
-    first = int(closed[0])
-    contacts = np.flatnonzero(trace["touch_arm"] > 0)
     if contacts.size == 0:
-        return f"the gripper first closed on step {first}, on an object it had never touched"
-    last = int(contacts[-1])
-    if first <= last:
-        return f"the gripper closed on step {first}, while it was still on the object"
-    return (f"the gripper first closed on step {first}, {first - last} steps after the last "
-            f"contact on step {last}")
+        return (f"the gripper first closed on step {int(closed[0])}, on an object it had "
+                f"never touched")
+    if held.size:
+        return (f"the gripper was closed on the object for {held.size} steps, first on step "
+                f"{int(held[0])} (first contact {int(contacts[0])}, first close "
+                f"{int(closed[0])})")
+    return (f"the gripper first closed on step {int(closed[0])} and never while it was on "
+            f"the object, whose last contact was step {int(contacts[-1])}")
 
 
 def main() -> int:
@@ -296,7 +316,8 @@ def main() -> int:
             f"object centre at step {closest}  |  object moved "
             f"{trace['object_mm'].max():.2f} mm, peak height "
             f"{trace['object_height_mm'].max():+.1f} mm  |  gripper closed on "
-            f"{_closed_steps(trace).size}/{len(rows)} steps, arm on "
+            f"{_closed_steps(trace).size}/{len(rows)} steps and closed *on the object* for "
+            f"{_held_steps(trace).size}, arm on "
             f"the object for {int(trace['touch_arm'].sum())}, on the table for "
             f"{int(trace['touch_table'].sum())}  |  {len(rows)} of {args.steps} steps run\n"
             f"        gripper: open value this run {open_reference:.4f}, so closed means "
