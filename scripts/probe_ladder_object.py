@@ -97,20 +97,40 @@ CLOSED_FRACTION_OF_OPEN = 0.5
 #: so this is a settled-noise allowance rather than a physical tolerance.
 MOVED_MM = 2.0
 
-#: How far the object has to **rise above where it started** to count as carried.
+#: How far the object has to **rise above where it started**, and for how many steps, to
+#: count as carried.
 #:
 #: This is the grasp test that cannot be argued with: a carried object has left the surface
-#: it was resting on.  It replaced "is the gripper closed while the object is in contact",
-#: which is satisfied by a single coincidental sample -- on `a3_libero_panda_cookie` seeds
-#: 10 and 19 each recorded 1-2 steps of overlap, never lifted anything (+0.0 and +0.3 mm),
-#: and were reported as `grasped it and carried it`.  A brush of one control step is not a
-#: grasp, and the difference is exactly whether the object left the table.
+#: it was resting on, and it stays away from it.  Both halves are needed and each rules out a
+#: different impostor, measured over the four traces to hand (`.npz` files in
+#: `/root/autodl-tmp/logs/ladder`, re-read offline):
 #:
-#: One-sided on purpose.  The Cookie is a 25 mm-tall, 6.4 mm-thin slab standing on its edge,
-#: and when the jaws close on it it **topples**: its centre falls 9.2 mm, which `max` of a
-#: signed height reports as +0.0.  So the test is on the rise and the fall is printed
-#: beside it, rather than one number pretending to be both.
-LIFT_MM = 5.0
+#: * height alone is passed by a **topple with a tip** -- seed 27 of the aimed A3-task run
+#:   recorded a peak rise of +6.7 mm and a fall of -9.4 mm while never moving more than
+#:   16.5 mm, and `LIFT_MM = 5` called that "grasped it and carried it";
+#: * duration alone is passed by a **brush**, which can hold the object a centimetre up for
+#:   a step or two.
+#:
+#: The separation is not marginal in either direction.  Real carries: the bowl's 20 seeds at
+#: 232-266 steps above 5 mm and 21-247 above 15 mm; axis 4's two real carries at 21 and 34
+#: steps above 15 mm.  Every other rollout that rose at all -- axis 4's two topples, the
+#: unaimed run's one, the aimed run's three -- sat at **0 steps above 15 mm**, with peak rises
+#: of 2.1, 4.1, 6.7, 8.8 and 2.4 mm.  So the thresholds sit in a 12x gap in height and a
+#: 21-step gap in duration rather than at a value chosen to make a number look right.
+LIFT_MM = 15.0
+LIFT_HOLD_STEPS = 5
+
+
+def _lifted_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
+    """The steps on which the object was **carried**: off the surface, and staying off.
+
+    Returns the steps above ``LIFT_MM``, which the caller compares against
+    ``LIFT_HOLD_STEPS``.  Returned rather than reduced to a boolean because the count is
+    the evidence -- it is printed, and it is what separates the sixteen-step carry from the
+    four-step tip in the traces this threshold was measured against.
+    """
+
+    return np.flatnonzero(trace["object_height_mm"] > LIFT_MM)
 
 
 def _closed_steps(trace: dict[str, np.ndarray]) -> np.ndarray:
@@ -190,7 +210,7 @@ def _signature(trace: dict[str, np.ndarray]) -> str:
         return SHAPES[0]
     touched = int(trace["touch_arm"].sum())
     moved = float(trace["object_mm"].max())
-    lifted = float(trace["object_height_mm"].max())
+    lifted = _lifted_steps(trace)
     held = _held_steps(trace)
     if touched == 0:
         # `touch_arm` is MuJoCo's contact list read **once per control step**, so it is a
@@ -205,7 +225,7 @@ def _signature(trace: dict[str, np.ndarray]) -> str:
         return SHAPES[1] if moved <= MOVED_MM else SHAPES[2]
     if moved <= MOVED_MM:
         return SHAPES[3]
-    if lifted < LIFT_MM:
+    if lifted.size < LIFT_HOLD_STEPS:
         return SHAPES[4]
     if held.size == 0:
         return SHAPES[5]
@@ -359,7 +379,8 @@ def main() -> int:
             f"object centre at step {closest}  |  object moved "
             f"{trace['object_mm'].max():.2f} mm, peak height "
             f"{trace['object_height_mm'].max():+.1f} mm (deepest "
-            f"{trace['object_height_mm'].min():+.1f} mm)  |  gripper closed on "
+            f"{trace['object_height_mm'].min():+.1f} mm, off the surface for "
+            f"{_lifted_steps(trace).size} steps)  |  gripper closed on "
             f"{_closed_steps(trace).size}/{len(rows)} steps and closed *on the object* for "
             f"{_held_steps(trace).size}, arm on "
             f"the object for {int(trace['touch_arm'].sum())}, on the table for "

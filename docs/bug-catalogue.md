@@ -539,6 +539,27 @@ possible if the object rotated about its own base.
 for both -- and it is the one that cost the most to notice, because the missing half was the
 half that explained the failure.
 
+### F12. A topple with a tip passes a one-sided lift test
+
+*Symptom*: `grasped it and carried it`, on a rollout whose object moved **16.5 mm**, rose
+**+6.7 mm** and then fell **9.4 mm** -- while the target box was 131 mm away.  Nothing was
+carried anywhere.
+
+*Cause*: the grasp test was "did the object's centre rise above 5 mm at any step".  A slab that
+is prised up by one jaw before it falls satisfies that; it is a *tip*, and its signature is the
+fall that follows, which a `max` does not show.  The 5 mm value had itself been chosen against
+the settling noise (0.63 mm) rather than against the impostor.
+
+*Rule*: **measure the threshold against the impostor, not against the noise**, and state the
+separation.  The impostor here is a tip-over, and what separates it from a carry is not the
+height but the **duration**: re-reading the four stored traces, real carries hold the object
+above 15 mm for **21 to 247 steps**, and every rollout that rose at all by less than that --
+axis 4's two topples, the unaimed run's one, the aimed run's three -- sits at **0 steps above
+15 mm**, with peak rises of 2.1, 4.1, 6.7, 8.8 and 2.4 mm.  The thresholds now sit in a 12x gap
+in height and a 21-step gap in duration.  A test that requires both a height and a duration is
+also the honest statement of the physics: a carried object has left the surface **and stays
+away from it**.
+
 ---
 
 ## G. Cross-scene leakage
