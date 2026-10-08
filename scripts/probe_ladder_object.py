@@ -162,6 +162,18 @@ def _signature(trace: dict[str, np.ndarray]) -> str:
     closed = _closed_steps(trace)
     held = _held_steps(trace)
     if touched == 0:
+        # `touch_arm` is MuJoCo's contact list read **once per control step**, so it is a
+        # lower bound, and the bound is loosest for the smallest object.  A 112 mm bowl
+        # presents a contact that lasts tens of steps and cannot be missed; a 6.3 mm Cookie
+        # brushed for a few physics substeps can be, and on seed 0 it was: the Cookie slid
+        # 15.9 mm over 75 steps with no recorded contact at any sample.  Saying "never
+        # touched the object" there is not conservative, it is false, and it is false in the
+        # direction that flatters the working end of the ladder -- the bias is against
+        # exactly the object the axis is about.  Displacement is the channel that cannot miss
+        # it, so it decides which of the two sentences this is.
+        if moved > MOVED_MM:
+            return (f"never recorded in contact, yet it moved {moved:.1f} mm -- the contact "
+                    f"was between samples")
         return "never touched the object"
     if moved <= MOVED_MM:
         return "touched it, never moved it"

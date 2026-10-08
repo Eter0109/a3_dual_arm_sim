@@ -479,6 +479,26 @@ hold; a boundary lookup silently converts a duration into an instant, and the in
 the noise is.  Both functions now share `_held_steps`, so the signature cannot disagree with the
 line above it.
 
+### F9. A sampled quantity reported as a verdict, with the bias against the smaller object
+
+*Symptom*: `never touched the object`, on a rollout where the object slid **15.9 mm** -- the
+gripper closing from 0.81 to 0.15 across the six steps it happened in.
+
+*Cause*: `touch_arm` is MuJoCo's contact list read **once per control step**, and a control step
+is 25 physics substeps (`physics_hz 500`, `control_hz 20`).  A contact that begins and ends
+inside one control step is invisible to it, so the field is a *lower bound* on contact, and how
+loose that bound is depends on the object: a 112 mm bowl is in contact for 50-87 consecutive
+steps, while a 6.3 mm Cookie can be brushed and released within one.  Seventy-five steps of that
+rollout showed displacement with no recorded contact.
+
+*Rule*: **a sampled field is not a verdict, and the size of what it misses is a property of the
+system, not of the sampling rate.**  Where a quantity is sampled coarsely, state what it can miss
+in the units of the thing being studied -- here "contact lasting less than 50 ms" -- and let a
+channel that cannot miss it (displacement) decide the sentence.  The trap is not the sampling,
+it is that the sampling error is **correlated with the variable the experiment is about**: every
+instrument bug in this file has been biased the same way, toward "the policy cannot do it", so a
+coarse channel is not a neutral channel.
+
 ---
 
 ## G. Cross-scene leakage
