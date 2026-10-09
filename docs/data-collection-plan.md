@@ -298,33 +298,51 @@ Port the command stage, not the state machine.  Drive the Panda, one Cookie, no 
 expert with the same code* solving the A3 arm 3 of 3, which is what proves the port did not
 change the plan.
 
-**Status: the port is in (`104bf0f`), the gate is not green.**  A3's arm, joint commands -- the
-regression check -- is **5 of 5 at a median 143 steps** with the full phase path, byte-identical to
-the recorded baseline.  Everything else is measured and named rather than hanging:
+**Status: green on both Panda configurations.**  A3's arm, joint commands -- the regression check --
+is **5 of 5 at a median 143 steps** with the full phase path, byte-identical to the recorded
+baseline, at every step of this work.
 
 | configuration | outcome |
 |---|---|
 | A3's arm, joint | **5/5**, median 143 steps |
-| A3's arm, cartesian | 0/3, reaches DESCEND_TO_PLACE, fails "placement descent timed out" |
-| Panda, cartesian, A3's layout | 0/3, reaches VERIFY_GRASP, does not verify the grasp |
-| Panda, cartesian, collection layout | 0/3, reaches VERIFY_GRASP, does not verify the grasp |
+| Panda, cartesian, A3's layout | 0/3 -- places the Cookie 17 mm from the bin wall, which is the corner case the wall-clearance requirement is about |
+| Panda, cartesian, collection layout | **3/3**, median 431 steps |
+| Panda, cartesian, collection layout, clear of the wall | **3/3**, median 155 steps |
 
-Four things came out of the port, and three of them only exist on the cartesian path: the two
-controllers read a `cartesian_delta`'s **rotation part in different frames** (measured, A/B in
-`docs`; `rotate(0.3 rad)` converges to 0.033 rad on A3's arm as world-frame and to 0.090 on the
-Panda as tool-frame); the grasp orientation was a **constant that is exactly A3's own start pose**,
-121.7 degrees away from the Panda's; and several phases that wait on "arrived" had **no timeout at
-all**, which is a hang rather than a failure when arrival is a thing a controller can miss.  The
-fourth is that three places returned `env.last_applied_action` as a "stay put" command, which under
-`cartesian_delta` is a 16-wide canonical vector.
+Everything the port needed is now measured and named rather than hanging.  Five defects came out of
+it, and four only exist on the cartesian path:
 
-**What is left is geometry, not wiring.**  The remaining two failures are both about where the
-pads land: A3's arm grasps and lifts and then fails to place, and the Panda reaches the pinch pose
-and does not close on the Cookie.  The next measurement is the **jaw gap at the pinch height**
-relative to the Cookie, on both arms -- the two failures are plausibly one geometry question seen
-from either end.  That measurement is why `approach_height_m` exists as a field: lowering it was
-measured and is worse (57 mm residual at 0.86 m against 160 mm at 0.76), so the height is not the
-problem and the gaps are what to look at.
+1. The two controllers read a `cartesian_delta`'s **rotation part in different frames** -- A3's arm
+   as world, the Panda as tool.  Measured A/B: `rotate(0.3 rad)` converges to 0.033 rad on A3's arm
+   as world-frame and to 0.090 on the Panda as tool-frame.
+2. The grasp orientation was a **constant that is exactly A3's own start pose**, 121.7 degrees away
+   from the Panda's, and `_solve_l` checks only the position residual, so an unreachable
+   orientation passed planning.
+3. Several phases that wait on "arrived" had **no timeout at all**, which is a hang rather than a
+   failure when arrival is a thing a controller can miss.
+4. `_cartesian_command` sent the **gripper entry in a single step**, where the joint path spreads it
+   over a queue.  Measured: the OPEN phase took the jaws from 0.0 to 0.25 -- half the action range
+   -- in one step, with the pads still touching the Cookie, and the release put a **12.57 rad/s**
+   spin into it.  Fixed by `release_steps` and `_ramp_gripper`; the spike is now 5.9980, spread over
+   ten commands.
+5. `settled` was judged from `qvel`, which is the velocity **inside a physics substep**.  The
+   substeps in one control step oscillate, so a Cookie lying still on the box floor read 0.65 rad/s
+   while its pose moved 0.0145 mm and 0.027 degrees per control step -- 0.0275 rad/s, and a factor
+   of 25, which is exactly the number of substeps in a control step (0.05 s / 0.002 s).  The Cookie
+   had stopped; the heading stopped advancing altogether after about 1100 steps.  This is why no
+   placement could ever be accepted.  Fixed by `_cookie_average_speed`, which measures the same
+   quantity over the control step instead of inside it; the thresholds are unchanged.
+
+Two of these are worth carrying forward as questions rather than fixed code.  The Cookie's resting
+angular speed of 0.0275 rad/s is real and so is its 0.29 mm/s creep, so the scene is never *exactly*
+static; the window is what makes the two thresholds meaningful rather than a shorter wait.  And the
+placement at 431 steps is over this section's 200-step gate -- the clear-of-wall run shows where the
+budget goes, so that is the number to work on next, not the predicate.
+
+**The step budget is now the open item.**  `collect clear of wall` places a Cookie in 155 steps and
+`collect` in 431, from the same code and the same Cookie count, so the difference is the extra
+retries the corner placement costs.  That is Stage 3's problem too: box randomization moves the
+target, and the reach window for the Panda has to be re-measured before it can be set.
 
 ### Stage 2 -- two Cookies, sequential, fixed layout
 

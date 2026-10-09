@@ -133,22 +133,79 @@ def main() -> int:
                 f" across {len(cookie_geoms)} Cookie geoms"
             )
         print(f"\n  holding still for {args.settle_steps} steps to see whether the spin decays:")
-        print("     step   cookie w   cookie v   contacts")
+        print("     step   qvel w    measured w   position drift   heading / tilt")
+        previous_posture: np.ndarray | None = None
+        previous_point: np.ndarray | None = None
         for extra in range(1, args.settle_steps + 1):
             observation, _, terminated, truncated, info = env.step(expert.act(observation))
             if extra % args.settle_every == 0 or extra == 1:
                 joint = env._cookie_joints[0]
                 dof = int(env.model.jnt_dofadr[joint])
+                posture_address = int(env.model.jnt_qposadr[joint])
                 velocity = np.asarray(env.data.qvel[dof : dof + 6], dtype=np.float64)
+                posture = np.asarray(
+                    env.data.qpos[posture_address + 3 : posture_address + 7],
+                    dtype=np.float64,
+                ).copy()
+                matrix = np.zeros(9, dtype=np.float64)
+                mujoco.mju_quat2Mat(matrix, posture)
+                matrix = matrix.reshape(3, 3)
+                # A real turn accumulates in the *orientation*; contact chatter at 20 Hz looks
+                # exactly like a steady angular speed in `qvel` because the samples alias, but it
+                # leaves the orientation oscillating about a fixed attitude instead of advancing.
+                heading = np.degrees(np.arctan2(matrix[1, 0], matrix[0, 0]))
+                tilt_now = np.degrees(
+                    np.arccos(np.clip(abs(matrix[2, 2]), -1.0, 1.0))
+                )
+                # The finite difference is the honest one: `qvel` for this joint reports a
+                # velocity that the pose does not follow.
+                step_seconds = 1.0 / float(env.config.control_hz)
+                measured = float("nan")
+                drift = float("nan")
+                if previous_posture is not None:
+                    here = np.zeros(9, dtype=np.float64)
+                    there = np.zeros(9, dtype=np.float64)
+                    mujoco.mju_quat2Mat(here, posture)
+                    mujoco.mju_quat2Mat(there, previous_posture)
+                    relative = here.reshape(3, 3) @ there.reshape(3, 3).T
+                    measured = float(
+                        np.arccos(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
+                    ) / step_seconds
+                    drift = float(
+                        np.linalg.norm(
+                            np.asarray(env.data.qpos[posture_address : posture_address + 3])
+                            - previous_point
+                        )
+                    )
+                previous_posture = posture
+                previous_point = np.asarray(
+                    env.data.qpos[posture_address : posture_address + 3], dtype=np.float64
+                ).copy()
                 print(
                     f"  {extra:6d}  {np.linalg.norm(velocity[3:]):9.5f}"
-                    f"  {np.linalg.norm(velocity[:3]):9.5f}"
-                    f"  {env.privileged_left_finger_contacts(0)}"
+                    f"  {measured:9.5f}  {drift * 1000:12.4f} mm"
+                    f"  heading {heading:8.3f} deg  tilt {tilt_now:6.2f} deg"
                 )
             if terminated or truncated:
                 print(f"  the environment ended the episode at extra step {extra}")
                 break
     if args.dump_contacts:
+        print("\n  every Cookie joint, and what qvel says about it:")
+        for order, cookie_joint in enumerate(env._cookie_joints):
+            kind = mujoco.mj_id2name(
+                env.model, mujoco.mjtObj.mjOBJ_JOINT, int(cookie_joint)
+            ) or "?"
+            address = int(env.model.jnt_qposadr[cookie_joint])
+            dof = int(env.model.jnt_dofadr[cookie_joint])
+            posture = np.asarray(env.data.qpos[address : address + 7], dtype=np.float64)
+            speed = np.asarray(env.data.qvel[dof : dof + 6], dtype=np.float64)
+            print(
+                f"    {order}: joint {cookie_joint} {kind!r} type"
+                f" {int(env.model.jnt_type[cookie_joint])}"
+                f"  qposadr {address} dofadr {dof}"
+                f"  at {np.round(posture[:3] * 1000, 2)} mm"
+                f"  qvel v {np.linalg.norm(speed[:3]):.5f} w {np.linalg.norm(speed[3:]):.5f}"
+            )
         # What is the Cookie actually resting on while it keeps turning?  The force each contact
         # carries is printed in full, including the torsional and rolling terms, because a flat slab
         # spinning about the vertical axis is opposed by the *torsional* friction component and not
