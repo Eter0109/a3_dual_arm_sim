@@ -199,6 +199,19 @@ Two things the draw must also respect, and neither is in the table above:
   measured, and the expert must be able to refuse a draw rather than fail on it -- `collect_dataset`
   already treats an expert's raised refusal as a rejected attempt rather than a crash
   (`collection.py:300-320`), so refusing is cheap and is the honest option.
+
+  **This is not hypothetical, and it is what the first Panda grasp attempt actually hit.**  A3's
+  own placement puts the Cookie in the source bin's near-left corner, and with the Panda closing on
+  it the outer jaw arrived against the **bin's wall** -- `('source_bin_right_wall',
+  'L_finger_inner_geom')` at 0.45 mm -- before it could pinch the Cookie, which took a 0.03 mm
+  graze carrying no force.  The jaws stopped 6.5 mm short of closed and the grasp could not verify.
+  So the usable region for a *drawn* Cookie is inset by the jaw's own footprint, not by the slab's,
+  and the number is `scripts/probe_panda_grasp.py`'s to report rather than this document's to guess.
+
+  Related, and measured so that it can be ruled out: the gripper is **not** too small for the
+  object.  Closed, its two jaw collision meshes are 0.21 mm apart -- it closes completely -- and
+  the gap grows 2 mm per mm of joint travel, so a 6.33 mm Cookie sits comfortably inside its range
+  (`scripts/check_gripper_minimum_opening.py`).
 - **Reachability of both pieces.**  With a random draw, some pairs are simply outside the arm's
   window.  Same mechanism: refuse, redraw, count.
 

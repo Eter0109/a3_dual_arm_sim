@@ -1159,6 +1159,21 @@ def _add_libero_panda(
         if body is None:
             raise RuntimeError(f"LIBERO's Panda has no {body_name} body")
         ET.SubElement(body, "site", name=site_name, pos="0 0 0", size="0.006", rgba="0 0 0 0")
+    # **A second site per jaw, on the body that actually collides -- and it answers a different
+    # question from where the fingertip is.**  A MuJoCo `touch` sensor reports the contact force
+    # on the body its *site* belongs to, so a site on `gripper0_finger_joint1_tip` reads zero
+    # while the contact is made by the collision mesh on `gripper0_leftfinger`: measured, the pads
+    # in contact -- four contacts at -0.00003 m -- with both touch channels reading exactly
+    # 0.0000.  `L_finger_*_touch` therefore stays where it is, naming the physical fingertip that
+    # the probe scripts measure clearance with, and the sensors hang off these.
+    for body_name, site_name in (
+        ("gripper0_leftfinger", "L_finger_inner_pad"),
+        ("gripper0_rightfinger", "L_finger_outer_pad"),
+    ):
+        jaw = _find_body(source, body_name)
+        if jaw is None:
+            raise RuntimeError(f"LIBERO's Panda has no {body_name} body")
+        ET.SubElement(jaw, "site", name=site_name, pos="0 0 0", size="0.006", rgba="0 0 0 0")
     hand = _find_body(source, "robot0_right_hand")
     if hand is None:
         raise RuntimeError("LIBERO's Panda has no robot0_right_hand body")
@@ -1175,10 +1190,17 @@ def _add_libero_panda(
     # in the world at LIBERO's home, so "96.4 mm along +z" is 96.4 mm below the hand.)
     ET.SubElement(hand, "site", name="L_eef", pos="0 0 0.096400", size="0.008", rgba="0 0 0 0")
     # `A3CookieTransferEnv` measures the grasp width from the jaws' *collision* geoms, by
-    # name, so each jaw hands its colliding geom this repository's name for it.  Robosuite
-    # ships both a visual and a collision mesh per jaw, which is why this picks by `contype`
-    # rather than taking the first child: naming a visual mesh would measure the gap between
-    # two surfaces that never touch anything.
+    # name, so each jaw hands its colliding geom this repository's name for it.
+    #
+    # **By name, and not by `contype`.**  This used to take the first geom whose XML `contype`
+    # attribute was not "0", which is always the *visual* mesh: robosuite sets `contype` from
+    # `<default>` classes rather than per element, so the attribute is absent, the `"1"` fallback
+    # passes, and the visual mesh got the name.  Compiled, that geom reads `contype=0
+    # conaffinity=0` -- it collides with nothing and so never appears in a contact pair -- while
+    # the mesh that does the colliding kept robosuite's name.  Measured consequence:
+    # `privileged_left_finger_contacts` could not return True on this arm at any pose, so
+    # `_has_verified_grasp` could never pass, and the expert retried a grasp it was already
+    # holding -- three times -- and reported "no reachable Cookie remains in the source bin".
     for body_name, geom_name in (
         ("gripper0_leftfinger", "L_finger_inner_geom"),
         ("gripper0_rightfinger", "L_finger_outer_geom"),
@@ -1189,8 +1211,13 @@ def _add_libero_panda(
         geoms = list(jaw.findall("geom"))
         if not geoms:
             raise RuntimeError(f"LIBERO's {body_name} carries no geom to name")
-        chosen = next((g for g in geoms if g.get("contype", "1") != "0"), geoms[0])
-        chosen.set("name", geom_name)
+        collisions = [g for g in geoms if "collision" in (g.get("name") or "")]
+        if len(collisions) != 1:
+            raise RuntimeError(
+                f"expected exactly one collision geom under {body_name}, found "
+                f"{[g.get('name') for g in collisions]}"
+            )
+        collisions[0].set("name", geom_name)
     ET.SubElement(
         hand,
         "camera",
@@ -1805,11 +1832,14 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         ET.SubElement(sensors, "force", name="L_wrist_force", site="L_wrist_ft")
         ET.SubElement(sensors, "torque", name="L_wrist_torque", site="L_wrist_ft")
         for finger in ("inner", "outer"):
+            # On the *pad* site rather than the fingertip one: see the sites above, where the
+            # difference between where the fingertip is and which body the force is on is the
+            # reason this sensor read 0 through a real grasp.
             ET.SubElement(
                 sensors,
                 "touch",
                 name=f"L_finger_{finger}_touch_sensor",
-                site=f"L_finger_{finger}_touch",
+                site=f"L_finger_{finger}_pad",
             )
 
     xml = ET.tostring(root, encoding="unicode")
