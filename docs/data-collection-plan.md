@@ -384,6 +384,34 @@ a change of criterion, and the datasets would then not be comparable.
 **Gate:** 3 of 3 with both Cookies in the box and released; total at or under 450 steps; the
 second Cookie's grasp not disturbed by the first one's removal.
 
+**Status: green.**  `two cookies` solves **3 of 3 at a median 356 steps**, and the other three
+gate configurations are unchanged (`a3 layout` 2/3 at 434, `collect` 3/3 at 431, `collect clear
+of wall` 3/3 at 155).  Both Cookies land in their own cell, upright: box `(-28.47, 12.53)` and
+`(28.75, 12.72)`, tilts 0.1 and 0.0 degrees.  Two defects had to be found first, and neither was
+where the failure message pointed.
+
+1. **The waiting Cookie turns on its own.**  With the policy doing nothing, a Cookie standing in
+   the source bin drifted **79.6 degrees in 400 steps (20 s)** at y=0.0711, 71.5 at y=0.1108 and
+   18.8 at A3's row, with the direction depending on where it stands.  Its friction tuple's
+   torsional term is 0.003, below MuJoCo's own default of 0.005.  The grasp had been planned from
+   the target box alone, so at 51 degrees of drift the jaws came down across the Cookie's 50 mm
+   face instead of its 6.4 mm thickness and knocked it flat.  Fixed by planning the grasp from the
+   Cookie's measured heading, turning about the tool's own approach axis; the sign is measured
+   (-1).  Raising the torsional friction to 0.02 removes the drift outright but was **rejected**:
+   it takes `collect` from 3/3 to 0/3.
+2. **The second Cookie was planned into the first one's cell.**  `_select_cookie` chose slot 9 and
+   `SinglePieceCookieExpert._plan_place_from_grasp` overwrote it with 8, because that loop exists
+   to try every slot until one is reachable and started from the beginning of `_slot_order` each
+   time.  Measured: the descent went to box x=-27.7 while the carried Cookie was released at box
+   x=-28.5, **on top of** the Cookie already at x=-28.4, the contact being
+   `cookie_0_top_geom <-> cookie_1_bottom_geom` at 0.88 N.  The slot selection already made is now
+   the first candidate and the occupied cells are excluded.
+
+A tilt check would have missed the first defect entirely: a Cookie turned about the vertical axis
+keeps its thin axis vertical, so its tilt stays at 0.1 degrees while its silhouette along the
+jaws' closing axis goes from 6.4 mm to 50 mm.  The quantity to watch is the heading, and
+`scripts/render_two_cookie_video.py` records both it and the video.
+
 ### Stage 3 -- box randomization
 
 Re-measure the reach window for this scene and arm first, then set the ranges inside it.  The
