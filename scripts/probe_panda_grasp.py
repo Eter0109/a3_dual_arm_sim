@@ -103,6 +103,10 @@ def main() -> int:
 
     print("static: which hand do the left fingers belong to?")
     static_report(model, "panda scene")
+    print("\n  the jaw chains the contact and force queries now cover:")
+    for jaw_index, jaw_geoms in enumerate(env._left_jaw_geoms):
+        names = [name_of(model, mujoco.mjtObj.mjOBJ_GEOM, g) for g in sorted(jaw_geoms)]
+        print(f"    jaw {('inner', 'outer')[jaw_index]:5s} {names}")
 
     cookie = 0
     cookie_body = env._cookie_bodies[cookie]
@@ -120,10 +124,13 @@ def main() -> int:
         print("\ndynamic: the jaws are commanded shut, phase VERIFY_GRASP")
         index = expert._current_cookie()
         contacts = env.privileged_left_finger_contacts(index)
-        touches = env.privileged_left_touch_values()
+        touches = env.privileged_left_touch_values(index)
+        sensors = env.privileged_left_touch_values()
         print(
             f"    cookie index {index}  contact(inner, outer) {contacts}  "
-            f"touch {np.round(touches, 4)}  verified {expert._has_verified_grasp()}"
+            f"normal force {np.round(touches, 4)} N  "
+            f"(fingertip sensors {np.round(sensors, 4)})  "
+            f"verified {expert._has_verified_grasp()}"
         )
         cookie_position = np.asarray(data.xpos[cookie_body], dtype=np.float64).copy()
         print(f"    Cookie centre        {np.round(cookie_position, 4)}")

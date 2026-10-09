@@ -255,6 +255,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_GEOM, f"L_finger_{finger}_geom")
             for finger in ("inner", "outer")
         )
+        # **A jaw is a chain, not a body, and a chain is resolved by walking the tree rather than
+        # by matching names.**  Each Panda finger is a finger body plus a tip body and *both* carry
+        # collision meshes, so naming one geom per jaw -- which is what the query used to do -- can
+        # only ever see the contacts that happen to land on that one mesh.  Measured through a real
+        # grasp: nine contacts, every one of them on `gripper0_finger{1,2}_pad_collision`, while the
+        # query looked at `L_finger_{inner,outer}_geom` on the finger bodies and reported no contact
+        # at all.  Which of the two meshes touches depends on the pose, so no single name can be
+        # right.
+        #
+        # The root is the finger joint the environment already resolves for its travel and sign, and
+        # the descendants come from `body_parentid`; nothing here reads a name, because a name that
+        # silently resolves to the wrong element is what this is repairing.
+        self._left_jaw_geoms = tuple(self._jaw_geoms(finger) for finger in ("inner", "outer"))
         # Thickness of one jaw pad along the closing axis.  The pads have to sit in
         # the groove between two neighbours, so the expert sizes its descent
         # opening from this and COOKIE_PITCH_Y.
@@ -304,23 +317,90 @@ class A3CookieTransferEnv(A3DualArmEnv):
         """
         return self.data.xmat[self._cookie_bodies[index]].reshape(3, 3)
 
+    def _jaw_geoms(self, finger: str) -> frozenset[int]:
+        """Every geom that can collide, on one left jaw and the bodies below it.
+
+        The tip body carries a small pad and the finger body carries the broad mesh, and which of
+        them meets the object depends on how the jaws come in -- so the set has to be the whole
+        chain.  Bodies are found by descending from the finger joint's body, not by name.
+        """
+
+        root = int(
+            self.model.jnt_bodyid[
+                self._id(mujoco.mjtObj.mjOBJ_JOINT, f"L_finger_{finger}_joint")
+            ]
+        )
+        bodies = {root}
+        for body in range(self.model.nbody):
+            ancestor = int(self.model.body_parentid[body])
+            while ancestor > 0:
+                if ancestor in bodies:
+                    bodies.add(body)
+                    break
+                ancestor = int(self.model.body_parentid[ancestor])
+        return frozenset(
+            geom
+            for geom in range(self.model.ngeom)
+            if int(self.model.geom_bodyid[geom]) in bodies
+            and (int(self.model.geom_contype[geom]) or int(self.model.geom_conaffinity[geom]))
+        )
+
+    def _jaw_contact_force(self, jaw_geoms: frozenset[int], cookie_geoms: frozenset[int]) -> float:
+        """Normal force this jaw is applying to this object, summed over their contacts.
+
+        The magnitude, not the sign: a contact pushes its two bodies apart, and which of the pair
+        MuJoCo reports first is an accident of the geoms' order.
+        """
+
+        force = np.zeros(6, dtype=np.float64)
+        total = 0.0
+        for contact_index in range(self.data.ncon):
+            contact = self.data.contact[contact_index]
+            pair = {int(contact.geom1), int(contact.geom2)}
+            if not (pair & cookie_geoms) or not (pair & jaw_geoms):
+                continue
+            mujoco.mj_contactForce(self.model, self.data, contact_index, force)
+            total += abs(float(force[0]))
+        return total
+
     def privileged_left_finger_contacts(self, index: int) -> tuple[bool, bool]:
-        """Report target-Cookie contact for each left finger from MuJoCo contacts."""
+        """Report target-Cookie contact for each left jaw, over the jaw's whole chain."""
         cookie_geoms = self._cookie_collision_geoms[index]
         contacts = [False, False]
         for contact_index in range(self.data.ncon):
             contact = self.data.contact[contact_index]
             pair = {int(contact.geom1), int(contact.geom2)}
-            for finger_index, finger_geom in enumerate(self._left_finger_geoms):
-                if finger_geom in pair and bool(pair & cookie_geoms):
-                    contacts[finger_index] = True
+            if not (pair & cookie_geoms):
+                continue
+            for jaw_index, jaw_geoms in enumerate(self._left_jaw_geoms):
+                if pair & jaw_geoms:
+                    contacts[jaw_index] = True
         return contacts[0], contacts[1]
 
-    def privileged_left_touch_values(self) -> tuple[float, float]:
-        """Return left fingertip touch signals for expert-only grasp verification."""
+    def privileged_left_touch_values(self, index: int | None = None) -> tuple[float, float]:
+        """What each left jaw is doing to the object, in newtons.
+
+        Called **with** an object index, this is the normal force summed over every contact between
+        that jaw's chain and that object -- which is what "did we squeeze it" means, and what a
+        per-body touch sensor cannot answer here.  A `touch` sensor reports the force on the body
+        its site belongs to, and the jaw's contact moves between two bodies depending on the pose;
+        measured, both channels read exactly 0.0000 through a grasp that had nine contacts.
+
+        Called **without** one it is the raw fingertip sensors, unchanged, which is what
+        `evaluation` and the older callers have always read -- and which is *not* what the
+        observation vector uses either; that reads the sensors directly and is unaffected by any of
+        this.
+        """
+
+        if index is None:
+            return (
+                float(self._sensor("L_finger_inner_touch_sensor")[0]),
+                float(self._sensor("L_finger_outer_touch_sensor")[0]),
+            )
+        cookie_geoms = self._cookie_collision_geoms[index]
         return (
-            float(self._sensor("L_finger_inner_touch_sensor")[0]),
-            float(self._sensor("L_finger_outer_touch_sensor")[0]),
+            self._jaw_contact_force(self._left_jaw_geoms[0], cookie_geoms),
+            self._jaw_contact_force(self._left_jaw_geoms[1], cookie_geoms),
         )
 
     @property

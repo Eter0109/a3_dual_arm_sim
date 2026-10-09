@@ -335,6 +335,13 @@ class A3CookieTransferExpert:
     close_steps: int = 18
     grasp_stable_steps: int = 8
     release_stable_steps: int = 6
+    #: Normal force, in newtons, that a jaw has to be applying to the object for the grasp to count.
+    #:
+    #: It was the bare literal ``0.02`` applied to a `touch` sensor's reading.  The number is kept
+    #: and the quantity is now the contact's own normal force (`privileged_left_touch_values` with
+    #: an index), which is what the check always meant: whether the jaws are closed *on* the object
+    #: rather than merely near it.
+    grasp_touch_threshold_n: float = 0.02
     settle_steps: int = 3
     phase_timeout_steps: int = 180
     max_retries: int = 2
@@ -1306,9 +1313,18 @@ class A3CookieTransferExpert:
         )
 
     def _has_verified_grasp(self) -> bool:
-        contacts = self.env.privileged_left_finger_contacts(self._current_cookie())
-        touches = self.env.privileged_left_touch_values()
-        return all(contacts) and all(value >= 0.02 for value in touches)
+        # Both questions are asked **of the object**, and both now cover the jaw's whole chain.
+        # The contact flags used to look at one named geom per jaw, which on the Panda is the
+        # finger-bar mesh while the contacts land on the tip pad -- measured, nine contacts and
+        # `(False, False)`.  The force was a `touch` sensor on a body that was not the one in
+        # contact, which read exactly zero through the same grasp.  So a grasp that had already
+        # happened was reported as absent, and the expert retried it three times and failed.
+        index = self._current_cookie()
+        contacts = self.env.privileged_left_finger_contacts(index)
+        touches = self.env.privileged_left_touch_values(index)
+        return all(contacts) and all(
+            value >= self.grasp_touch_threshold_n for value in touches
+        )
 
     def _has_verified_lift(self) -> bool:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie())
