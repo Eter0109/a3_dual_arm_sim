@@ -72,16 +72,26 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=400)
     parser.add_argument("--every", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--clear-of-wall",
+        action="store_true",
+        help="slide the Cookie 40 mm away from the source bin's near wall",
+    )
     args = parser.parse_args()
 
+    layout = dict(
+        matched_cameras=True,
+        a3_single_cookie=True,
+        a3_layout_offset_m=(0.020, -0.200),
+    )
+    if args.clear_of_wall:
+        layout["a3_cookie_position_m"] = (0.1194, 0.0711)
     scene = libero_props_scene(
         task_name="a3_libero_panda_single_cookie",
         hold_steps=40,
         cartesian=True,
         panda=True,
-        matched_cameras=True,
-        a3_single_cookie=True,
-        a3_layout_offset_m=(0.020, -0.200),
+        **layout,
     )
     env = scene.build_env(0.0, 0.0)
     policy = scene.build_policy(env)

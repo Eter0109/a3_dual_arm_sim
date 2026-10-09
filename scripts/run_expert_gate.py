@@ -1,25 +1,17 @@
-"""Stage 1's gate: can one cookie expert drive either arm, and in which command space?
+"""Stage 1's gate, on the arm this repository collects with: LIBERO's Panda.
 
-Four runs, chosen so that each one moves a single axis away from a reference that is already
-known to work:
+The collection runs on the Panda and its parameters and low-level control are fixed, so A3's arm is
+not a configuration here.  What it is kept for is the *expert*: A3's scene is where the path
+planning, the phase machine and the recording were developed, and that is the reference for how a
+collection is driven rather than a thing to run.
 
-  * **a3 joint**        -- A3's arm, A3's own layout, joint commands.  The recorded baseline:
-                           3 of 3 solved, 143 steps.  A regression check on the refactor: if
-                           moving the command stage behind `command_space` changed the plan, it
-                           shows up here.
-  * **a3 cartesian**    -- same arm, same layout, cartesian commands.  Isolates the *command
-                           space* with the arm held fixed.
-  * **panda cartesian** -- same commands, same layout, LIBERO's arm.  Isolates the *arm*, with
-                           the command space held fixed.  This is the pair the plan turns on.
-  * **panda collect**   -- LIBERO's arm, cartesian, and the layout the scene actually needs: A3's
-                           arrangement slid 200 mm into LIBERO's camera frame.  This is the
-                           collection configuration, and it is the one that has to work.
+The two configurations differ in one axis, the layout:
 
-A3's arm is deliberately absent from the last two.  It cannot reach the offset layout -- recorded
-on the scene itself, and the reason the scene carries a note about fixing the expert "only when it
-is actually needed -- for collecting data" -- so asking it to try would measure its workspace again
-rather than this port.  The two behaviour probes measured the *Panda* reaching every object in that
-layout, which is what makes it the right arm for the job.
+  * **a3 layout**    -- A3's arrangement where A3 puts it.  The layout the expert was tuned
+                       against, so a failure here is about the expert or the arm.
+  * **collect**      -- the same arrangement slid 200 mm into LIBERO's camera frame, which is the
+                       configuration the dataset needs.  A failure that appears here and not above
+                       is about the offset.
 
 Usage:
 
@@ -59,11 +51,23 @@ COLLECT_LAYOUT = dict(
     a3_layout_offset_m=(0.020, -0.200),
 )
 
+#: The same, with the Cookie slid 40 mm away from the source bin's near wall.  A3's own placement
+#: puts it 17 mm from that wall, which is narrower than the jaw whose collision meshes measure
+#: 27 x 68 mm -- so the outer jaw lands on the bin before it can pinch, the Cookie takes a 0.03 mm
+#: graze carrying no force, and the grasp cannot verify.  This configuration exists to test that
+#: explanation and nothing else; the placement a dataset uses is Stage 4's draw, and its usable
+#: region is inset by this number rather than by the slab's.
+COLLECT_CLEAR_OF_WALL = dict(
+    matched_cameras=True,
+    a3_single_cookie=True,
+    a3_layout_offset_m=(0.020, -0.200),
+    a3_cookie_position_m=(0.1194, 0.0711),
+)
+
 CONFIGURATIONS = (
-    ("a3 joint", A3_LAYOUT, dict(panda=False, cartesian=False)),
-    ("a3 cartesian", A3_LAYOUT, dict(panda=False, cartesian=True)),
-    ("panda cartesian", A3_LAYOUT, dict(panda=True, cartesian=True)),
-    ("panda collect", COLLECT_LAYOUT, dict(panda=True, cartesian=True)),
+    ("a3 layout", A3_LAYOUT, dict(panda=True, cartesian=True)),
+    ("collect", COLLECT_LAYOUT, dict(panda=True, cartesian=True)),
+    ("collect clear of wall", COLLECT_CLEAR_OF_WALL, dict(panda=True, cartesian=True)),
 )
 
 
