@@ -192,6 +192,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
             _rows[1] - _rows[0] if len(_rows) > 1 else 2.0 * self.COOKIE_HALF_SIZE[1]
         )
         self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
+        # One sample per control step, for `_cookie_average_speed`.
+        self._cookie_pose_history: dict[int, list[tuple[float, np.ndarray, np.ndarray]]] = {}
         self.TARGET_SLOT_TOLERANCE = np.asarray(
             scene_config.target_slot_tolerance_m, dtype=np.float64
         )
@@ -772,7 +774,63 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.data.qpos[qpos_address : qpos_address + 3] = pos
         self.data.qpos[qpos_address + 3 : qpos_address + 7] = quaternion
         self.data.qvel[dof_address : dof_address + 6] = 0.0
+        # A teleport is not motion, and the window `_cookie_average_speed` measures must not see
+        # one: a Cookie moved here by a test or by a reset would otherwise look like a Cookie that
+        # had just travelled the whole distance in a single control step.
+        self._cookie_pose_history.pop(index, None)
         mujoco.mj_forward(self.model, self.data)
+
+    #: How many control steps of history the "is it still moving?" question is asked over.
+    #:
+    #: `qvel` cannot answer that question.  It is the velocity *inside* a physics substep, and the
+    #: substeps within one control step oscillate: a Cookie lying still on the target box floor on
+    #: the Panda is reported at 0.65 rad/s and 7.4 mm/s, while its pose moves 0.0145 mm and 0.027
+    #: degrees per control step -- 0.0275 rad/s and 0.29 mm/s, smaller by a factor of 25, which is
+    #: exactly the number of substeps in a control step (0.05 s / 0.002 s).  A predicate that reads
+    #: the substep therefore never sees a placed Cookie settle, and no placement can be accepted.
+    #: The window below measures the same thing `qvel` is meant to mean -- how fast the Cookie is
+    #: moving -- but over the control step rather than inside it.
+    SETTLE_WINDOW_SAMPLES = 10
+
+    def _cookie_average_speed(self, index: int) -> tuple[float, float]:
+        """The Cookie's average linear and angular speed over the last ``SETTLE_WINDOW_SAMPLES``.
+
+        Measured from the Cookie's **pose**, as the net change across the window divided by the
+        elapsed simulation time: a Cookie that is jittering in place has a large `qvel` and a small
+        net change, which is the distinction ``settled`` is actually asking about.
+
+        The samples are keyed by ``data.time`` so that calling this more than once in a control step
+        does not push the same instant twice, and a run whose clock has gone backwards -- a fresh
+        episode -- starts a new window rather than mixing two of them.  Until a window exists the
+        instantaneous reading is returned, so the first few steps behave as they used to.
+        """
+
+        history = self._cookie_pose_history.setdefault(index, [])
+        now = float(self.data.time)
+        if history and history[-1][0] > now:
+            history.clear()
+        if not history or history[-1][0] < now:
+            history.append(
+                (
+                    now,
+                    self.data.xpos[self._cookie_bodies[index]].copy(),
+                    self._cookie_rotation(index).copy(),
+                )
+            )
+            del history[: -self.SETTLE_WINDOW_SAMPLES]
+        if len(history) < 2:
+            return self._cookie_speed(index)
+        first_time, first_position, first_rotation = history[0]
+        last_time, last_position, last_rotation = history[-1]
+        elapsed = last_time - first_time
+        if elapsed <= 0.0:
+            return self._cookie_speed(index)
+        linear = float(np.linalg.norm(last_position - first_position)) / elapsed
+        relative = last_rotation @ first_rotation.T
+        angular = float(
+            np.arccos(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
+        ) / elapsed
+        return linear, angular
 
     def _cookie_speed(self, index: int, *, relative_to_target: bool = False) -> tuple[float, float]:
         dof_address = int(self.model.jnt_dofadr[self._cookie_joints[index]])
@@ -818,7 +876,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
             <= wall_top_z + self.CONTACT_CONTAINMENT_TOLERANCE_M
         )
         upright = bool(abs(float(rotation[2, 2])) >= np.cos(self.task_config.max_tilt_rad))
-        linear_speed, angular_speed = self._cookie_speed(index)
+        linear_speed, angular_speed = self._cookie_average_speed(index)
         settled = (
             linear_speed <= self.task_config.max_linear_speed_m_s
             and angular_speed <= self.task_config.max_angular_speed_rad_s
@@ -862,7 +920,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
             abs(float(r_rel[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
             or abs(float(c_mat[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
         )
-        linear_speed, angular_speed = self._cookie_speed(index, relative_to_target=True)
+        linear_speed, angular_speed = self._cookie_average_speed(index)
         settled = (
             linear_speed <= max(self.task_config.max_linear_speed_m_s, 0.09)
             and angular_speed <= self.task_config.max_angular_speed_rad_s
