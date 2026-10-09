@@ -68,6 +68,23 @@ else
     PYTHON=python
 fi
 
+# The render environment, one line per site fact, each overridable by the caller.
+# `MUJOCO_GL` is the one that matters and the reason this block exists at all: this
+# script renders every frame it writes, and an unset `MUJOCO_GL` on a headless node is
+# not a clean failure -- it raises `gladLoadGL error` here, but on a machine with an
+# X display it would quietly pick glfw and the dataset would be written from frames
+# nobody looked at.  `ablate_libero_panda.sh` and `guard.py`'s `CHILD_ENV` name the
+# same set, and a collection that disagrees with them is a collection whose videos
+# cannot be compared against theirs.
+#
+# `HF_HUB_OFFLINE=1` because the local cache already holds the stack: without it each
+# shard spends its first seconds on a network round trip to a hub this machine cannot
+# reach, and eight of those at once is how a run dies before its first episode.
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export HF_HOME="${HF_HOME:-/root/autodl-tmp/hf}"
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
 # `--fast-render` halves frame time.  It must match however the dataset is later
 # evaluated, or a checkpoint sees pixels it was not trained on; every other script
 # in this directory sets it unconditionally for the same reason.

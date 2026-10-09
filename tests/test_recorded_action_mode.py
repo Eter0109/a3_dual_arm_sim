@@ -27,15 +27,25 @@ from typing import Any
 import numpy as np
 import pytest
 
-from a3_dual_arm_sim.collection import scene_by_name
+from a3_dual_arm_sim.collection import registered_scenes, scene_by_name
 from a3_dual_arm_sim.env import A3DualArmEnv
 from a3_dual_arm_sim.recording import LeRobotV3Recorder, MemoryRecorder
-from a3_dual_arm_sim.runner import EpisodeRunner
+from a3_dual_arm_sim.runner import EpisodeRunner, stored_action_mode
 
 #: A scene whose left arm is A3's own, driven by a joint-position servo.
 JOINT_ARM_SCENE = "a3_cookie_single_piece"
 #: A scene whose left arm is robosuite's Panda, driven by operational-space control.
 TORQUE_ARM_SCENE = "a3_libero_panda_single_cookie"
+
+#: Every registered scene that mounts robosuite's Panda.  Written out rather than filtered
+#: from the registry because the registry records no such field, and a list that has to be
+#: kept right by hand is exactly what the test below it is for.
+PANDA_ARM_SCENES = (
+    "a3_libero_panda",
+    "a3_libero_panda_cookie",
+    "a3_libero_panda_single_cookie",
+    "a3_libero_panda_two_cookies",
+)
 
 
 class HoldPolicy:
@@ -234,3 +244,54 @@ def test_a_schema_of_the_wrong_width_is_refused_before_any_frame(tmp_path: Path)
             runner.run(seed=0, max_steps=1)
     finally:
         runner.close()
+
+
+def test_every_registered_scene_declares_a_space_that_can_be_named() -> None:
+    """The declaration is a closed set, and only two values are in it.
+
+    ``collect_dataset`` builds the dataset's schema from this field *before* the first episode,
+    so a value outside the set is not a wrong column -- it is no dataset at all, raised from
+    ``stored_action_mode`` and traceable to this line and nothing else.  Checked over the whole
+    registry because the cost is nil: the scene objects are closures, so naming every one builds
+    nothing and runs no physics.
+    """
+
+    for name in registered_scenes():
+        scene = scene_by_name(name)
+        assert scene.recorded_action in ("applied", "requested"), (name, scene.recorded_action)
+
+
+@pytest.mark.parametrize("name", PANDA_ARM_SCENES)
+def test_a_panda_arm_scene_records_the_space_its_own_policy_emits(name: str) -> None:
+    """A Panda scene's declared action space has to be one its own environment will name.
+
+    This is the defect that stopped the first two-Cookie collection, and it is worth stating in
+    full because *every* message it produced pointed somewhere else.  LIBERO's Panda is driven by
+    operational-space control, so the vector the actuators receive is a joint torque and
+    ``canonical_action_mode`` refuses to call it an action; and ``collect`` -- which reaches its
+    scenes through the registry -- therefore declared a schema it could never fill and died
+    before the first episode.  ``gate``, which builds its scenes by hand and passes
+    ``recorded_action="requested"`` itself, was green throughout.
+
+    Naming the space is only half of it.  The other half is ``cartesian``: the policy a scene
+    builds has to emit in the space its arm is driven in, and the registry was passing ``panda``
+    without ``cartesian``, so a *joint*-command policy was wired to a *torque* arm.  That one had
+    no error at all -- twenty episodes of 750-1100 steps each, ending with ``cookies_in_source``
+    still at 2, because the arm never reached a Cookie.  Both are asserted together here because
+    both are consequences of the same missing word in the same registry entry.
+    """
+
+    scene = scene_by_name(name)
+    env = scene.build_env(0.0, 0.0)
+    try:
+        assert str(env.action_mode) == "cartesian_delta"
+        assert stored_action_mode(env, scene.recorded_action) == "cartesian_delta"
+        # The policy's own space, read off the expert it built rather than assumed: a policy
+        # emitting joint targets into this environment is the silent half of the failure.
+        policy = scene.build_policy(env)
+        try:
+            assert str(policy.action_mode) == "cartesian_delta"
+        finally:
+            policy.close()
+    finally:
+        env.close()

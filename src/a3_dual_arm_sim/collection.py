@@ -966,7 +966,19 @@ def libero_props_scene(
     a3_cookie_quat_wxyz: tuple[float, ...] = (),
     a3_target_box_position_m: tuple[float, float, float] | None = None,
     a3_home_over_cookie: bool = False,
-    cartesian: bool = False,
+    #: Drive the arm with Cartesian deltas rather than raw joint targets.  Defaulted from
+    #: ``panda`` rather than to ``False``, because the two are one fact and leaving them
+    #: independent is how they came apart: the policy a scene builds has to emit in the space
+    #: its own arm is driven in, and LIBERO's Panda is driven by operational-space control, so a
+    #: ``panda=True`` scene that reported ``False`` here built a *joint*-command policy for a
+    #: *torque* arm.  All twenty gate and probe scripts passed both flags by hand and agreed;
+    #: only the registry in this module passed ``panda`` alone, and so only `collect` -- which
+    #: runs the registry -- built the broken pair.  The symptom was not an error: the arm simply
+    #: never reached a Cookie, and twenty episodes of 750-1100 steps each ended with
+    #: ``cookies_in_source = 2``.
+    #:
+    #: A caller may still force either value; this is a default, not a rule.
+    cartesian: bool | None = None,
     hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
@@ -992,6 +1004,10 @@ def libero_props_scene(
     episode should run its full budget so the recording shows what the policy does after
     the point where a Cookie task would have stopped.
     """
+
+    # Resolved once, up here, because ``build_env`` and ``build_policy`` both close over it and
+    # the whole point is that they cannot end up disagreeing.  See the parameter's note.
+    cartesian = panda if cartesian is None else cartesian
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
@@ -1263,6 +1279,21 @@ def libero_props_scene(
         # and the only variation left would be the policy's own sampling.
         randomize_placements=bool(a3_single_cookie),
         randomize_cookies=bool(a3_single_cookie),
+        # What the dataset may record, and it is not a preference.  `panda` selects LIBERO's arm,
+        # which is driven by operational-space control, so the action the actuators were given is a
+        # joint *torque*: it belongs to no action space a policy could emit or a checkpoint could be
+        # trained against, and `stored_action_mode` refuses it by name.  The other registrations of
+        # this builder (`a3_libero_props`, `a3_libero_props_matched`) drive A3's own position-servoed
+        # arm, where the applied command *is* the space, so there `applied` is the honest answer.
+        #
+        # Not `cartesian`: that flag picks the action *mode* and is orthogonal to which arm is
+        # mounted -- this scene sets it not at all while `panda` is True, and keying on `cartesian`
+        # left `collect` declaring a schema it could never fill.
+        #
+        # Consequence of getting it wrong: no dataset at all, because the schema is declared before
+        # the first episode.  The gate has always passed `requested` to `EpisodeRunner` by hand,
+        # which is why `gate` never saw this and only `collect` did.
+        recorded_action="requested" if panda else "applied",
         details={
             "config": (
                 "configs/libero_props.yaml with A3's `cookie_transfer` props from "
