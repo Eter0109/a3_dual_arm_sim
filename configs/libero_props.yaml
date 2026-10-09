@@ -118,12 +118,20 @@ libero_fidelity: true
 # measured one at a time or neither result means anything.
 # arm_servo_bandwidth: 4.0
 randomization:
-  source_bin_x_m: 0.0
-  source_bin_y_m: 0.0
-  source_bin_yaw_rad: 0.0
-  target_bin_x_m: 0.0
-  target_bin_y_m: 0.0
-  target_bin_yaw_rad: 0.0
+  # Stage 3: the boxes move, the Cookies do not (they are placed relative to the live
+  # source bin, so moving that bin carries them and moves nothing else).  The strength is the
+  # decided one -- 10 mm and 0.030 rad, which is the reference's `basic` profile.
+  #
+  # Written as symmetric ranges because the nominal poses are where the arm was measured to work;
+  # the ranges in this file are asymmetric by design where the workspace is (see AxisRange), and if
+  # these ten millimetres turn out to cost reach on one side the fix is to tilt the range, not to
+  # narrow it.  The gate reports failures per axis, which is what would say which side.
+  source_bin_x_m: [-0.010, 0.010]
+  source_bin_y_m: [-0.010, 0.010]
+  source_bin_yaw_rad: [-0.030, 0.030]
+  target_bin_x_m: [-0.010, 0.010]
+  target_bin_y_m: [-0.010, 0.010]
+  target_bin_yaw_rad: [-0.030, 0.030]
   arm_home_rad: 0.0
   min_box_clearance_m: 0.020
 cookie_transfer:

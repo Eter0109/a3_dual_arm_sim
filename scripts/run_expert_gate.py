@@ -100,8 +100,11 @@ CONFIGURATIONS = (
 )
 
 
-def run_one(scene, seeds, steps, task, quiet):
-    env = scene.build_env(0.0, 0.0)
+def run_one(scene, seeds, steps, task, quiet, position_noise_m=0.0, yaw_noise_rad=0.0):
+    # The Cookie jitter is a *build* argument, not a config field: the scene closes over it, and
+    # `collect` is the only caller that has ever passed anything but zero.  A gate that always
+    # passed zero would therefore measure the box randomization and nothing else.
+    env = scene.build_env(position_noise_m, yaw_noise_rad)
     policy = scene.build_policy(env)
     runner = EpisodeRunner(
         env,
@@ -157,6 +160,18 @@ def main() -> int:
     parser.add_argument("--task", default="")
     parser.add_argument("--only", default="", help="run only the named configuration")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--position-noise",
+        type=float,
+        default=0.0,
+        help="Per-Cookie XY jitter in metres, passed to the scene builder",
+    )
+    parser.add_argument(
+        "--yaw-noise",
+        type=float,
+        default=0.0,
+        help="Per-Cookie yaw jitter in radians, passed to the scene builder",
+    )
     args = parser.parse_args()
 
     seeds = [int(value) for value in args.seeds.split(",") if value.strip()]
@@ -175,7 +190,15 @@ def main() -> int:
         print(f"\n  {label}")
         started = time.monotonic()
         try:
-            rows = run_one(scene, seeds, args.steps, task, args.quiet)
+            rows = run_one(
+                scene,
+                seeds,
+                args.steps,
+                task,
+                args.quiet,
+                position_noise_m=args.position_noise,
+                yaw_noise_rad=args.yaw_noise,
+            )
         except Exception as exc:  # noqa: BLE001 - a gate reports; it does not kill the sweep
             print(f"    FAILED to run: {type(exc).__name__}: {exc}")
             summary.append((label, None, None, time.monotonic() - started))
