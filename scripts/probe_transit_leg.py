@@ -224,7 +224,24 @@ def main() -> int:
                     print(
                         f"      {names[0]:<30} <-> {names[1]:<30}"
                         f" dist {contact.dist * 1000:+7.3f} mm  normal {force[0]:+8.4f} N"
+                        f"  at world {np.round(contact.pos * 1000, 1)}"
                     )
+                # Where the Cookie is, by three different routes, because they disagree and the
+                # disagreement is the thing to settle.
+                body = env._cookie_bodies[index]
+                box_position = np.asarray(env.data.xpos[env._target_bin_body], dtype=np.float64)
+                box_rotation = np.asarray(
+                    env.data.xmat[env._target_bin_body], dtype=np.float64
+                ).reshape(3, 3)
+                manual = box_rotation.T @ (env.data.xpos[body] - box_position)
+                helper = env.privileged_cookie_target_position(index)
+                print(
+                    f"      Cookie world {np.round(env.data.xpos[body] * 1000, 1)}"
+                    f"   box world {np.round(box_position * 1000, 1)}"
+                    f"\n      manual box frame {np.round(manual * 1000, 1)}"
+                    f"   helper box frame {np.round(np.asarray(helper) * 1000, 1)}"
+                    f"   slot {np.round(np.asarray(env.TARGET_SLOTS_LOCAL[expert._current_slot()]) * 1000, 1)}"
+                )
             previous_up = in_tool[:, 2].copy()
 
         if args.dump_at and step == args.dump_at:
