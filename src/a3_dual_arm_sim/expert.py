@@ -365,6 +365,16 @@ class A3CookieTransferExpert:
     #: the jaws from 0.0 to 0.25 and put a 12.57 rad/s spin into the Cookie; the joint path was
     #: never affected, because there it is the length of a precomputed queue.
     grasp_stable_steps: int = 8
+    #: Height of the staging pose the arm retreats through between the bins.
+    #:
+    #: Only the height is kept from the fixed world point this used to be, because the height is the
+    #: part of it that was not the problem; the horizontal position is decided in `reset`.
+    transit_height_m: float = 0.89
+    #: The staging pose this planner used to hard-code, as (x, y).
+    #:
+    #: It is still used, for the scene it was tuned for: see `reset` for the test that decides
+    #: between it and one taken from the scene.
+    fixed_transit_xy: tuple[float, float] = (0.10, 0.30)
     release_stable_steps: int = 6
     #: Normal force, in newtons, that a jaw has to be applying to the object for the grasp to count.
     #:
@@ -632,8 +642,34 @@ class A3CookieTransferExpert:
 
     def reset(self, context: EpisodeContext | None = None) -> None:
         del context
+        # Which staging pose: the fixed one, or one over this scene's own bin?
+        #
+        # The fixed point is `(0.10, 0.30, 0.89)`.  In A3's scene it sits **over the source bin** --
+        # 70 mm and 38 mm from the bin's centre, both inside the bin's own 119 x 101 mm inner
+        # footprint -- which is what it was tuned for, and the batch scenes cannot reach one over
+        # their bin at all: measured, a bin-centred pose is 4.33 mm past their IK's 4 mm acceptance
+        # and every batch test fails on it.
+        #
+        # In the Panda scene the same point is 95 mm and 185 mm from the bin's centre, so it is off
+        # the end of that bin and on the far side of it from the target box.  `MOVE_TO_SLOT` drives
+        # there before driving to the place pose, so every Cookie was carried away from the box
+        # first: measured, the tool went from world y = 54 mm out to y = 297 mm and back, a
+        # **250 mm** excursion against a 150 mm trip.  That is the swing out and return visible in
+        # the recordings after every grasp.  Over the bin it is 70 mm instead.
+        #
+        # Two other placements were measured and rejected as well: the midpoint between the bins
+        # and the bin's near edge.  Both sit between the two boxes, and under either of them the
+        # placement descent stops converging and all four gate configurations fail -- so this pose
+        # also decides the arm's configuration when the descent starts, not just the direction of a
+        # leg.
+        source = np.asarray(self.env.SOURCE_CENTER, dtype=np.float64)
+        offset = np.abs(np.asarray(self.fixed_transit_xy, dtype=np.float64) - source)
+        over_the_bin = bool(np.all(offset <= np.asarray(self.env.SOURCE_INNER_HALF_SIZE)))
+        staging = np.asarray(self.fixed_transit_xy, dtype=np.float64) if over_the_bin else source
         self.q_transit = self._solve_l(
-            np.array([0.10, 0.30, 0.89]), self._target_quat_canonical, self.q_branch_seed
+            np.array([staging[0], staging[1], self.transit_height_m]),
+            self._target_quat_canonical,
+            self.q_branch_seed,
         )
         self.phase = CookiePhase.SELECT_COOKIE
         self.phase_steps = 0
@@ -827,7 +863,6 @@ class A3CookieTransferExpert:
             elif self._timed_out():
                 self._retry("transfer timed out without arriving")
             return action
-
         if self.phase is CookiePhase.DESCEND_TO_PLACE:
             local_position = self.env.privileged_cookie_target_position(self._current_cookie())
             target_xy = np.asarray(self.env.TARGET_SLOTS_LOCAL[self._current_slot()])
