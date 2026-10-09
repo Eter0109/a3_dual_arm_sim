@@ -35,6 +35,15 @@ class _CounterEnv:
 
     action_mode = "joint_position"
 
+    #: What the environment calls the command it actually applied.  The runner asks for this
+    #: before it records a single frame (`stored_action_mode`), and a stub that stopped at
+    #: ``action_mode`` was enough until it did.  A property rather than a second class attribute
+    #: because on a joint-servo arm the two really are one fact and on a torque arm they are not;
+    #: here they agree, and that agreement is the only thing a stub of this kind may assume.
+    @property
+    def canonical_action_mode(self) -> str:
+        return "joint_position"
+
     def __init__(self, trajectory: list[int]) -> None:
         self._trajectory = trajectory
         self._index = 0
