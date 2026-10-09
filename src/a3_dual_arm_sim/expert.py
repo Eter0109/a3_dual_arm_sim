@@ -333,6 +333,14 @@ class A3CookieTransferExpert:
     closed_gripper: float = 0.0
     release_gripper: float = 0.25
     close_steps: int = 18
+    release_steps: int = 10
+    #: How many commands the jaws take to open when the Cookie is set down.
+    #:
+    #: Only the Cartesian path reads this, and it is the reason the release does not throw the
+    #: Cookie: the pads are still touching the Cookie for the first part of the opening, so the
+    #: opening has to be *spread out*.  Before this was wired through, a single Cartesian step took
+    #: the jaws from 0.0 to 0.25 and put a 12.57 rad/s spin into the Cookie; the joint path was
+    #: never affected, because there it is the length of a precomputed queue.
     grasp_stable_steps: int = 8
     release_stable_steps: int = 6
     #: Normal force, in newtons, that a jaw has to be applying to the object for the grasp to count.
@@ -525,6 +533,9 @@ class A3CookieTransferExpert:
         self._motion_actions: list[np.ndarray] = []
         self._motion_key: tuple[bytes, float, int] | None = None
         self._motion_done = False
+        self._commanded_gripper = float(self.closed_gripper)
+        self._gripper_key: tuple[float, int] | None = None
+        self._gripper_steps_left = 0
         self._recovering = False
         self._initial_cookie_positions = np.asarray(
             [
@@ -858,7 +869,7 @@ class A3CookieTransferExpert:
 
         if self.phase is CookiePhase.OPEN:
             action = self._trajectory_command(
-                self._waypoints["place"], self.release_gripper, min_steps=10
+                self._waypoints["place"], self.release_gripper, min_steps=self.release_steps
             )
             if self._motion_done:
                 self._advance(CookiePhase.VERIFY_RELEASE)
@@ -1136,11 +1147,10 @@ class A3CookieTransferExpert:
         self, target: np.ndarray, gripper: float, *, min_steps: int = 12
     ) -> np.ndarray:
         if self.command_space == "cartesian":
-            # `min_steps` is deliberately unused.  A floor on a step count is a statement about a
-            # precomputed queue: how many commands to spread a joint delta over.  There is no
-            # queue here -- see `_cartesian_command` for why the arm's own controller makes one
-            # unnecessary -- and inventing a floor would only make the arm dwell.
-            return self._cartesian_command(target, gripper)
+            # `min_steps` is not a queue here -- see `_cartesian_command` -- but it is still what
+            # spreads the *gripper* over several commands, which is the whole reason OPEN is
+            # slower than one step.
+            return self._cartesian_command(target, gripper, min_steps=min_steps)
         key = (target.tobytes(), float(gripper), min_steps)
         if self._motion_key != key:
             start = self.env.last_applied_action.copy()
@@ -1238,7 +1248,52 @@ class A3CookieTransferExpert:
             rotation_vector = rotation.reshape(3, 3) @ rotation_vector
         return goal_position - current_position, rotation_vector
 
-    def _cartesian_command(self, target: np.ndarray, gripper: float) -> np.ndarray:
+    def _ramp_gripper(self, gripper: float, min_steps: int) -> float:
+        """Where the jaws should actually be told to go this step, on their way to ``gripper``.
+
+        The joint path spreads an opening over several commands because it precomputes a queue of
+        them; the Cartesian path has no queue, so the same care has to be taken explicitly.  It is
+        not cosmetic.  Sending the whole opening in one step throws the Cookie out of the jaws:
+        measured on the Panda, ``0.0 -> 0.25`` in a single step put a **12.57 rad/s** spin into the
+        Cookie in that step, and it survives as a permanent 0.65 rad/s turn.  Nothing can damp it:
+        the release leaves the Cookie balanced on an edge, and an object touching the floor at one
+        point has no torsional resistance at all -- 3000 held-still steps left the spin unchanged.
+
+        The rate is the joint path's own: ``max_gripper_step`` per command, with ``min_steps`` as a
+        floor on how many commands the whole opening is spread over.
+        """
+
+        target = float(gripper)
+        key = (target, int(min_steps))
+        if self._gripper_key != key:
+            # The step count is decided once per new target, from the whole span, the way the joint
+            # path decides its queue length from the whole delta.  Recomputing it every step would
+            # make the step shrink as it closes in and the opening would only ever approach its
+            # target -- which is a hang, because `_motion_done` waits for the jaws to get there.
+            span = target - self._commanded_gripper
+            self._gripper_key = key
+            self._gripper_steps_left = (
+                0
+                if abs(span) < 1e-12
+                else max(
+                    int(np.ceil((abs(span) - 1e-9) / self.max_gripper_step)),
+                    max(1, int(min_steps)),
+                )
+            )
+        if self._gripper_steps_left > 0:
+            remaining = target - self._commanded_gripper
+            if self._gripper_steps_left == 1:
+                self._commanded_gripper = target
+            else:
+                self._commanded_gripper = self._commanded_gripper + remaining / (
+                    self._gripper_steps_left
+                )
+            self._gripper_steps_left -= 1
+        return self._commanded_gripper
+
+    def _cartesian_command(
+        self, target: np.ndarray, gripper: float, *, min_steps: int = 1
+    ) -> np.ndarray:
         """One ``cartesian_delta`` step towards the pose the joint target ``target`` implies.
 
         No interpolated queue and no step count, because the operational-space controller holds a
@@ -1262,10 +1317,12 @@ class A3CookieTransferExpert:
         action[3:6] = np.clip(
             rotation_error / self.env.config.cartesian_rotation_scale_rad, -1.0, 1.0
         )
-        action[6] = float(np.clip(2.0 * float(gripper) - 1.0, -1.0, 1.0))
+        jaws = self._ramp_gripper(gripper, min_steps)
+        action[6] = float(np.clip(2.0 * jaws - 1.0, -1.0, 1.0))
         self._motion_done = bool(
             float(np.linalg.norm(position_error)) <= self.cartesian_arrival_tolerance_m
             and float(np.linalg.norm(rotation_error)) <= self.cartesian_arrival_tolerance_rad
+            and abs(jaws - float(gripper)) < 1e-12
         )
         return action
 
