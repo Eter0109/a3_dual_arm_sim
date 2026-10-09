@@ -331,6 +331,29 @@ class A3CookieTransferExpert:
     # two gaps flanking the target.
     grasp_clearance_m: float = 0.0004
     closed_gripper: float = 0.0
+    #: Turn the grasp orientation to follow the Cookie's own heading.
+    #:
+    #: A Cookie waiting in the source bin drifts about the vertical axis.  Measured with the policy
+    #: doing nothing, it turned 79.6 degrees in 400 steps (20 s) at y=0.0711, 71.5 at y=0.1108 and
+    #: 18.8 at A3's own row, and the direction depends on where it stands, so it is a solver
+    #: artifact rather than physics -- a Cookie at rest should not rotate at all, and its friction
+    #: tuple's torsional term is 0.003, below MuJoCo's own default of 0.005.
+    #:
+    #: The grasp orientation was planned from the target box alone, so at 51 degrees of drift the
+    #: pads came down across the Cookie's 50 mm face instead of its 6.4 mm thickness.  The first
+    #: touch was the finger mesh's corner on the Cookie's **top face**, at a pad separation of
+    #: 16.46 mm -- impossible for a vertical pad against a 6.33 mm slab -- and it knocked the
+    #: Cookie flat.  Reading the Cookie's heading instead makes the grasp independent of the drift,
+    #: which is also what free Cookie yaw in Stage 4b needs.
+    grasp_follows_cookie_yaw: bool = True
+    #: Which way the tool turns for a given Cookie heading.
+    #:
+    #: The rotation is applied about the tool's **own approach axis**, so a tool pointing down
+    #: turns the opposite way from a Cookie measured about the world's up axis, and -1 is what
+    #: follows the Cookie.  Measured on the two-Cookie scene, where the second Cookie has drifted
+    #: about 51 degrees by the time its turn comes: at +1 the second Cookie still ends flat on the
+    #: floor (90.0 degrees of tilt) and at -1 it ends at 0.3.
+    grasp_yaw_sign: float = -1.0
     release_gripper: float = 0.25
     close_steps: int = 18
     release_steps: int = 10
@@ -627,6 +650,9 @@ class A3CookieTransferExpert:
         self.retry_reasons = []
         self._waypoints = {}
         self._grasp_target_world = None
+        #: Set once a Cookie has been picked, by `_plan_current_cookie`; the re-aim in
+        #: `_aim_descent` reads it, so it has to exist before the first plan.
+        self._grasp_quat = self._target_quat_canonical.copy()
         self._descent_aims = 0
         self._grasp_stable_count = 0
         self._release_stable_count = 0
@@ -1005,7 +1031,7 @@ class A3CookieTransferExpert:
         try:
             self._waypoints["grasp"] = self._solve_l(
                 self._grasp_target_world + error,
-                self._target_quat_canonical,
+                self._grasp_quat,
                 self.data.qpos[self._l_qpos],
             )
         except RuntimeError:
@@ -1052,6 +1078,42 @@ class A3CookieTransferExpert:
             aperture = thickness + self.grasp_clearance_m
         return float(np.clip(aperture / (2.0 * self.env.GRIPPER_RANGE_M), 0.0, 1.0))
 
+    def _cookie_heading(self, index: int) -> float:
+        """The Cookie's heading about the vertical axis, in radians.
+
+        Measured from its pose rather than from the configured spawn orientation, because the two
+        stop agreeing: a Cookie left standing in the bin turns on its own.
+        """
+
+        rotation = self.env._cookie_rotation(index)
+        return float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+
+    def _grasp_quaternion_for(self, index: int) -> np.ndarray:
+        """The grasp orientation turned to follow the Cookie's own heading.
+
+        The turn is applied about the tool's **own** approach axis, which is the one rotation that
+        changes which way the pads face without changing the direction the tool comes in from or
+        the height it grasps at.  The Cookie's heading is measured about the world's up axis, so if
+        the tool comes in pointing down the two have opposite senses and ``grasp_yaw_sign`` says
+        which -- measured, not derived.
+        """
+
+        canonical = np.empty(9, dtype=np.float64)
+        mujoco.mju_quat2Mat(canonical, self._target_quat_canonical)
+        if not self.grasp_follows_cookie_yaw:
+            return self._target_quat_canonical.copy()
+        turn_quaternion = np.empty(4, dtype=np.float64)
+        mujoco.mju_axisAngle2Quat(
+            turn_quaternion,
+            np.asarray([0.0, 0.0, 1.0], dtype=np.float64),
+            self.grasp_yaw_sign * self._cookie_heading(index),
+        )
+        turn = np.empty(9, dtype=np.float64)
+        mujoco.mju_quat2Mat(turn, turn_quaternion)
+        grasp = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(grasp, (canonical.reshape(3, 3) @ turn.reshape(3, 3)).ravel())
+        return grasp
+
     def _plan_current_cookie(self) -> None:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie()).copy()
         approach_position = np.array(
@@ -1065,6 +1127,7 @@ class A3CookieTransferExpert:
         grasp_position[2] += self._grasp_height_offset()
         # Where the tool should end up, kept so DESCEND can close the loop on it.
         self._grasp_target_world = grasp_position.copy()
+        self._grasp_quat = self._grasp_quaternion_for(self._current_cookie())
         self._descent_aims = 0
         lift_position = approach_position.copy()
         target_position = self.data.xpos[self._tb_id].copy()
@@ -1089,11 +1152,9 @@ class A3CookieTransferExpert:
             [tool_xy[0], tool_xy[1], tool_height]
         )
         slot_pre = slot_place + target_rotation[:, 2] * 0.07
-        q_approach = self._solve_l(
-            approach_position, self._target_quat_canonical, self.q_branch_seed
-        )
-        q_grasp = self._solve_l(grasp_position, self._target_quat_canonical, q_approach)
-        q_lift = self._solve_l(lift_position, self._target_quat_canonical, q_grasp)
+        q_approach = self._solve_l(approach_position, self._grasp_quat, self.q_branch_seed)
+        q_grasp = self._solve_l(grasp_position, self._grasp_quat, q_approach)
+        q_lift = self._solve_l(lift_position, self._grasp_quat, q_grasp)
         place_quat = self._target_quat_tilted.copy()
         try:
             q_pre = self._solve_l(slot_pre, place_quat, self.q_branch_seed)
