@@ -200,13 +200,21 @@ Two things the draw must also respect, and neither is in the table above:
   already treats an expert's raised refusal as a rejected attempt rather than a crash
   (`collection.py:300-320`), so refusing is cheap and is the honest option.
 
-  **This is not hypothetical, and it is what the first Panda grasp attempt actually hit.**  A3's
-  own placement puts the Cookie in the source bin's near-left corner, and with the Panda closing on
-  it the outer jaw arrived against the **bin's wall** -- `('source_bin_right_wall',
-  'L_finger_inner_geom')` at 0.45 mm -- before it could pinch the Cookie, which took a 0.03 mm
-  graze carrying no force.  The jaws stopped 6.5 mm short of closed and the grasp could not verify.
-  So the usable region for a *drawn* Cookie is inset by the jaw's own footprint, not by the slab's,
-  and the number is `scripts/probe_panda_grasp.py`'s to report rather than this document's to guess.
+  **A jaw did once arrive against the wall**, and the measurement stands: closing on A3's placement
+  the outer jaw met `source_bin_right_wall` at 0.45 mm -- `('source_bin_right_wall',
+  'L_finger_inner_geom')` -- before it could pinch, taking a 0.03 mm graze that carried no force,
+  and the grasp could not verify.  That was measured before the jaw-geometry and jaw-chain fixes,
+  and it is no longer the binding constraint where it was observed: at the same placement the grasp
+  now verifies.
+
+  **What binds now is convergence, and it is measured.**  `scripts/probe_panda_wall_clearance.py`
+  walks the Cookie away from the near wall in 1 mm steps, and a Cookie nearer than about **10 mm**
+  beyond A3's placement costs **275 extra steps** an episode (431 against 157) while still
+  succeeding: DESCEND and CLOSE run to their 120- and 180-step escape timeouts because the arm does
+  not converge on the grasp pose, and `expert.retry_reasons` stays empty.  The offset with the
+  worst cost is 126 mm from that wall, so the two mechanisms are not the same thing and the inset
+  this section is about is the **reachability** one.  A collision bound for the jaw is still owed
+  as a separate number, and `scripts/probe_panda_grasp.py` is where it should come from.
 
   Related, and measured so that it can be ruled out: the gripper is **not** too small for the
   object.  Closed, its two jaw collision meshes are 0.21 mm apart -- it closes completely -- and
@@ -305,7 +313,7 @@ baseline, at every step of this work.
 | configuration | outcome |
 |---|---|
 | A3's arm, joint | **5/5**, median 143 steps |
-| Panda, cartesian, A3's layout | 0/3 -- places the Cookie 17 mm from the bin wall, which is the corner case the wall-clearance requirement is about |
+| Panda, cartesian, A3's layout | 0/3 -- see the reachability inset below; this layout is inside the band the arm cannot converge in |
 | Panda, cartesian, collection layout | **3/3**, median 431 steps |
 | Panda, cartesian, collection layout, clear of the wall | **3/3**, median 155 steps |
 
@@ -333,16 +341,29 @@ it, and four only exist on the cartesian path:
    placement could ever be accepted.  Fixed by `_cookie_average_speed`, which measures the same
    quantity over the control step instead of inside it; the thresholds are unchanged.
 
-Two of these are worth carrying forward as questions rather than fixed code.  The Cookie's resting
-angular speed of 0.0275 rad/s is real and so is its 0.29 mm/s creep, so the scene is never *exactly*
-static; the window is what makes the two thresholds meaningful rather than a shorter wait.  And the
-placement at 431 steps is over this section's 200-step gate -- the clear-of-wall run shows where the
-budget goes, so that is the number to work on next, not the predicate.
+**The step budget is measured and explained.**  `collect clear of wall` places a Cookie in 155 steps
+and `collect` in 431, from the same code and the same Cookie count, and the difference is **not**
+retries: `expert.retry_reasons` is empty and the phase path is identical in both.  It is that the
+arm does not converge on the grasp pose where the Cookie stands in `collect`.
 
-**The step budget is now the open item.**  `collect clear of wall` places a Cookie in 155 steps and
-`collect` in 431, from the same code and the same Cookie count, so the difference is the extra
-retries the corner placement costs.  That is Stage 3's problem too: box randomization moves the
-target, and the reach window for the Panda has to be re-measured before it can be set.
+`scripts/probe_panda_wall_clearance.py` walks the Cookie away from the near wall in 1 mm steps:
+
+| offset from A3's placement | steps | DESCEND | CLOSE |
+|---|---|---|---|
+| 0 - 8 mm | 431 | 120 | 180 |
+| 9 mm | 254 | 110 | 12 |
+| 10 mm and out | 157 | **15** | **12** |
+
+DESCEND and CLOSE both end on `_motion_done`, which in Cartesian space needs the site within 4 mm
+and 0.02 rad *and* the jaw ramp finished, and both carry an escape timeout (120 and 180 steps).
+Inside the band those timeouts are exactly the phase counts; outside it the same phases take 15 and
+12.  The grasp succeeds either way, so the 275 extra steps buy nothing -- they are the timeout.
+
+So this is a **reachability inset, not a collision one**.  The plan had assumed the jaw would hit
+the wall; it does not, and the offset with the worst cost is 126 mm from that wall.  It also means
+the `collect` config sits inside the unusable band, which is why its number is over this section's
+gate: the gate's step criterion is met by the Cookie being inside the usable region, and
+`collect clear of wall` is the config that measures that.
 
 ### Stage 2 -- two Cookies, sequential, fixed layout
 
@@ -378,6 +399,14 @@ scene needs.
 
 Position draw with a measured minimum separation and wall inset; yaw aligned to the bin in v1.
 Refusals counted, not crashed.
+
+The **inset is now measured**: a Cookie nearer than about 10 mm beyond A3's placement costs 275 extra
+steps while still succeeding, because the arm does not converge on the grasp pose there (see the
+reachability paragraph above).  The draw has to keep the Cookie out of that band, and the band is a
+property of the *arm's reach at that x*, so it should be re-measured once the box randomization of
+Stage 3 moves the bin rather than carried over as a fixed offset.  A second, tighter inset for the
+jaw's own collision footprint is still owed and is a separate number from this one -- the two were
+conflated until the sweep separated them.
 
 **Gate:** 9 of 10, and the failures understood -- the failure modes here are new (a piece near a
 wall, a piece the first grasp nudged) and each one needs a name before it can be fixed.
