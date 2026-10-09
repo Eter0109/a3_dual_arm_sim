@@ -187,9 +187,18 @@ class A3CookieTransferEnv(A3DualArmEnv):
         # Row spacing, and the thickness of one jaw pad along the closing axis.
         # The expert needs both to place the pads in the groove between two
         # neighbours rather than on top of a Cookie's top face.
+        #
+        # The pitch is a property of the **bin**, so when the caller knows it -- a scene that
+        # instantiates two Cookies out of a packed column does -- that value is used.  Deriving it
+        # from the instantiated list is only right when the list *is* the packed column: a sparse
+        # layout 70.7 mm apart made the pitch 70.7 mm, which put the descent opening at 0.51
+        # instead of 0.08 and stopped the grasp verifying on every seed.
+        configured_pitch = scene_config.cookie_source_row_pitch_m
         _rows = sorted({float(p[1]) for p in scene_config.cookie_source_positions_m})
         self.COOKIE_PITCH_Y = (
-            _rows[1] - _rows[0] if len(_rows) > 1 else 2.0 * self.COOKIE_HALF_SIZE[1]
+            float(configured_pitch)
+            if configured_pitch is not None
+            else (_rows[1] - _rows[0] if len(_rows) > 1 else 2.0 * self.COOKIE_HALF_SIZE[1])
         )
         self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
         # One sample per control step, for `_cookie_average_speed`.

@@ -51,12 +51,12 @@ COLLECT_LAYOUT = dict(
     a3_layout_offset_m=(0.020, -0.200),
 )
 
-#: The same, with the Cookie slid 40 mm away from the source bin's near wall.  A3's own placement
-#: puts it 17 mm from that wall, which is narrower than the jaw whose collision meshes measure
-#: 27 x 68 mm -- so the outer jaw lands on the bin before it can pinch, the Cookie takes a 0.03 mm
-#: graze carrying no force, and the grasp cannot verify.  This configuration exists to test that
-#: explanation and nothing else; the placement a dataset uses is Stage 4's draw, and its usable
-#: region is inset by this number rather than by the slab's.
+#: The same, with the Cookie slid 40 mm further into the bin.  This configuration exists because
+#: the cost of a Cookie that stands near A3's own placement is large, and measuring it is how that
+#: number was found: 431 steps against 157, with DESCEND and CLOSE running to their 120- and
+#: 180-step escape timeouts because the arm does not converge on the grasp pose there.  It is a
+#: **reachability** inset and not a collision one -- see `probe_panda_wall_clearance.py`, which
+#: sweeps it, and the plan's Stage 4, which is where the number is used.
 COLLECT_CLEAR_OF_WALL = dict(
     matched_cameras=True,
     a3_single_cookie=True,
@@ -64,10 +64,39 @@ COLLECT_CLEAR_OF_WALL = dict(
     a3_cookie_position_m=(0.1194, 0.0711),
 )
 
+#: Stage 2: two Cookies, in the same column and ten rows apart (about 71 mm), so the second is not
+#: the first one's neighbour when the first is lifted out.  Row 2 rather than row 0 because row 0 is
+#: A3's own placement, which the sweep above shows sits inside the band the arm cannot converge in.
+TWO_COOKIES_LAYOUT = dict(
+    matched_cameras=True,
+    a3_single_cookie=True,
+    a3_layout_offset_m=(0.020, -0.200),
+    a3_cookie_positions_m=((0.1194, 0.04875), (0.1194, 0.11941667)),
+)
+
+#: (label, task name, layout, overrides).  The task name is per configuration rather than fixed
+#: because the two-Cookie scene declares its own task -- it asks for two pieces and its success
+#: rule counts two, so a summary that borrowed the single-piece contract would be wrong.
 CONFIGURATIONS = (
-    ("a3 layout", A3_LAYOUT, dict(panda=True, cartesian=True)),
-    ("collect", COLLECT_LAYOUT, dict(panda=True, cartesian=True)),
-    ("collect clear of wall", COLLECT_CLEAR_OF_WALL, dict(panda=True, cartesian=True)),
+    ("a3 layout", "a3_libero_panda_single_cookie", A3_LAYOUT, dict(panda=True, cartesian=True)),
+    (
+        "collect",
+        "a3_libero_panda_single_cookie",
+        COLLECT_LAYOUT,
+        dict(panda=True, cartesian=True),
+    ),
+    (
+        "collect clear of wall",
+        "a3_libero_panda_single_cookie",
+        COLLECT_CLEAR_OF_WALL,
+        dict(panda=True, cartesian=True),
+    ),
+    (
+        "two cookies",
+        "a3_libero_panda_two_cookies",
+        TWO_COOKIES_LAYOUT,
+        dict(panda=True, cartesian=True),
+    ),
 )
 
 
@@ -133,11 +162,11 @@ def main() -> int:
     seeds = [int(value) for value in args.seeds.split(",") if value.strip()]
     print(f"seeds {seeds}   cap {args.steps} steps per episode")
     summary = []
-    for label, layout, overrides in CONFIGURATIONS:
+    for label, task_name, layout, overrides in CONFIGURATIONS:
         if args.only and args.only != label:
             continue
         scene = libero_props_scene(
-            task_name="a3_libero_panda_single_cookie",
+            task_name=task_name,
             hold_steps=40,
             **layout,
             **overrides,

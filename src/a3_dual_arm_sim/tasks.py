@@ -95,6 +95,13 @@ _SINGLE_PIECE_PROMPT = (
     "pick up the one yellow block from the source bin and put it in the target box"
 )
 
+#: The same instruction for two, which is what the collection actually asks for.  The words it
+#: uses -- `block`, `source bin`, `target box` -- occur zero times in LIBERO's vocabulary, so a
+#: policy has to be taught them rather than infer them.
+_TWO_PIECE_PROMPT = (
+    "pick up the two yellow blocks from the source bin and put them in the target box"
+)
+
 TASKS: dict[str, TaskSpec] = {
     "a3_grasp": TaskSpec(
         name="a3_grasp",
@@ -182,6 +189,14 @@ TASKS: dict[str, TaskSpec] = {
         name="a3_libero_panda_single_cookie",
         prompt=_SINGLE_PIECE_PROMPT,
         success_contract="released_1_upright_settled_contained_0_remain",
+    ),
+    # Stage 2's scene: the same rule as the single-Cookie task, twice, in one episode.  The
+    # contract names two rather than one because that is the denominator a run of this scene
+    # would be divided by, and a summary that borrowed the single-piece rule would be wrong.
+    "a3_libero_panda_two_cookies": TaskSpec(
+        name="a3_libero_panda_two_cookies",
+        prompt=_TWO_PIECE_PROMPT,
+        success_contract="released_2_upright_settled_contained_0_remain",
     ),
     "a3_libero_props": TaskSpec(
         name="a3_libero_props",

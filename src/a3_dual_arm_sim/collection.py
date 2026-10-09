@@ -959,6 +959,10 @@ def libero_props_scene(
     a3_single_cookie: bool = False,
     a3_layout_offset_m: tuple[float, float] = (0.0, 0.0),
     a3_cookie_position_m: tuple[float, float] | None = None,
+    #: Several Cookies at once, for the stages that place more than one.  The singular
+    #: ``a3_cookie_position_m`` is what the single-Cookie scenes use and stays as it is; this is
+    #: only read when it is given, and the Cookie count follows its length rather than being one.
+    a3_cookie_positions_m: tuple[tuple[float, float], ...] | None = None,
     a3_cookie_quat_wxyz: tuple[float, ...] = (),
     a3_target_box_position_m: tuple[float, float, float] | None = None,
     a3_home_over_cookie: bool = False,
@@ -1136,6 +1140,18 @@ def libero_props_scene(
                 if a3_cookie_position_m is None
                 else a3_cookie_position_m
             )
+            # One Cookie, or as many as the caller named.  Everything below that used to read
+            # `cookie_xy` reads this instead, so the count is in one place.
+            cookie_positions = (
+                (cookie_xy,) if a3_cookie_positions_m is None else a3_cookie_positions_m
+            )
+            # The **bin's** row pitch, read off A3's full grid before it is reduced to one or two
+            # positions.  The expert needs it to find the groove between two packed neighbours,
+            # and taking it from the reduced list would describe the gap between the two pieces
+            # this scene happens to place instead -- 70.7 mm rather than 8.83 mm, which made the
+            # descent opening 0.51 instead of 0.08 and stopped the grasp verifying.
+            full_rows = sorted({float(position[1]) for position in a3_transfer.cookie_source_positions_m})
+            cookie_row_pitch = full_rows[1] - full_rows[0] if len(full_rows) > 1 else None
             loaded = replace(
                 loaded,
                 cookie_transfer=replace(
@@ -1143,7 +1159,8 @@ def libero_props_scene(
                     libero_props=(),
                     box_lift_m=a3_transfer.box_lift_m,
                     box_tilt_deg=a3_transfer.box_tilt_deg,
-                    cookie_source_positions_m=(cookie_xy,),
+                    cookie_source_positions_m=cookie_positions,
+                    cookie_source_row_pitch_m=cookie_row_pitch,
                     cookie_source_quat_wxyz=a3_cookie_quat_wxyz,
                     source_bin_center_m=(
                         a3_transfer.source_bin_center_m[0] + offset_x,
@@ -1178,8 +1195,8 @@ def libero_props_scene(
                 ),
             )
         task_config = CookieTransferTaskConfig(
-            cookie_count=1,
-            required_cookies=1,
+            cookie_count=len(cookie_positions) if a3_single_cookie else 1,
+            required_cookies=len(cookie_positions) if a3_single_cookie else 1,
             position_noise_m=position_noise_m,
             yaw_noise_rad=yaw_noise_rad,
             require_exact_slots=False,
@@ -1353,6 +1370,21 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
             a3_layout_offset_m=(0.020, -0.200),
             a3_cookie_position_m=(0.2343, -0.0932),
             a3_cookie_quat_wxyz=(0.7071067811865476, 0.0, 0.0, 0.7071067811865476),
+            **kwargs
+        ),
+        # Stage 2: two Cookies, fixed layout, one pass each.  Both stand in the **same column**
+        # -- the one the wall-clearance sweep measured, where A3's own x is reachable -- and ten
+        # rows apart, so at 8.83 mm a row that is about 71 mm of separation.  That is well past
+        # the plan's measured minimum and leaves the second Cookie undisturbed when the first
+        # is lifted out, which is the hazard this stage exists to find.
+        #
+        # Rows 2 and 10 rather than 0 and 8: the sweep says a Cookie nearer than about 10 mm
+        # beyond A3's placement costs 275 extra steps an episode, and row 0 is A3's placement.
+        "a3_libero_panda_two_cookies": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_panda_two_cookies",
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_cookie_positions_m=((0.1194, 0.04875), (0.1194, 0.11941667)),
             **kwargs
         ),
         # ------------------------------------------------------------------ behaviour probes

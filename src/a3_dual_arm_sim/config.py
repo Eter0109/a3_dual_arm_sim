@@ -160,6 +160,13 @@ class CookieSceneConfig:
     cookie_solref: tuple[float, ...] = (0.01, 1.0)
     cookie_solimp: tuple[float, ...] = (0.9, 0.95, 0.001, 0.5, 2.0)
     cookie_source_positions_m: tuple[tuple[float, ...], ...] = COOKIE_SOURCE_POSITIONS
+    #: The row pitch of the source bin's own grid, when the positions above are a *subset* of it.
+    #:
+    #: A scene that instantiates one or two Cookies out of A3's packed column still has to tell
+    #: the expert how far apart the rows of that column are, because the expert places the pads
+    #: in the groove between two neighbours with this number.  ``None`` means the positions above
+    #: *are* the column and the pitch can be read off them, which is the case for A3's own scenes.
+    cookie_source_row_pitch_m: float | None = None
     cookie_model_z_m: float = 0.7685
     cookie_reset_z_m: float = 0.7688
     #: Orientation given to every Cookie at spawn, as ``(w, x, y, z)``.  Empty is the
