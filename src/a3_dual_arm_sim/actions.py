@@ -37,6 +37,30 @@ class CartesianDeltaAdapter:
             raise ValueError(f"model is missing joint {name}")
         return result
 
+    @property
+    def left_site(self) -> int:
+        """The left arm's site, i.e. where this adapter's delta is applied.
+
+        The same question `OperationalSpaceAdapter.left_site` answers, so a caller that has to
+        express a goal as a pose can ask the controller in use rather than assume one arm's
+        convention.
+        """
+
+        return int(self._sites[0])
+
+    @property
+    def rotation_frame(self) -> str:
+        """Which frame this adapter reads a `cartesian_delta`'s rotation part in.
+
+        From the config, and verified against it rather than trusted: the same measurement as
+        `OperationalSpaceAdapter.rotation_frame` -- driving towards a goal 0.300 rad away and
+        watching whether the distance to it falls or rises -- gives 0.300 -> 0.033 rad for a
+        world-frame delta and 0.300 -> 0.807 for a tool-frame one, so this adapter is the world
+        one and the operational-space controller on the Panda is not.
+        """
+
+        return str(self.config.cartesian_rotation_frame)
+
     def convert(self, data: mujoco.MjData, action: np.ndarray) -> np.ndarray:
         command = validate_action(action, "cartesian_delta").reshape(2, 7)
         work = mujoco.MjData(self.model)

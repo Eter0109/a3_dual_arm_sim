@@ -962,6 +962,7 @@ def libero_props_scene(
     a3_cookie_quat_wxyz: tuple[float, ...] = (),
     a3_target_box_position_m: tuple[float, float, float] | None = None,
     a3_home_over_cookie: bool = False,
+    cartesian: bool = False,
     hold_steps: int = 40,
 ) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
@@ -1189,7 +1190,12 @@ def libero_props_scene(
             # branches keep it off because there is no success for them to terminate on.
             terminate_on_success=bool(a3_single_cookie),
         )
-        return A3CookieTransferEnv(loaded, task_config=task_config, render_cameras=True)
+        return A3CookieTransferEnv(
+            loaded,
+            task_config=task_config,
+            action_mode="cartesian_delta" if cartesian else "joint_position",
+            render_cameras=True,
+        )
 
     def build_policy(env: A3DualArmEnv) -> Policy:
         # The single-piece expert, which is the honest choice for every branch here: it is the
@@ -1203,9 +1209,15 @@ def libero_props_scene(
         # it is a *legitimate* way for a rollout to end.  It cost nothing while nothing here
         # ran the expert; `a3_libero_panda_single_cookie` does, and reported 0/20 with every
         # episode one step long.  The value is A3's own: `cookie_single_piece_scene`'s default.
+        mode: ActionMode = "cartesian_delta" if cartesian else "joint_position"
         return CookieCollectionPolicy(
-            expert=A3SinglePieceExpert(env),  # type: ignore[arg-type]
+            expert=A3SinglePieceExpert(  # type: ignore[arg-type]
+                env,
+                action_mode=mode,
+                command_space="cartesian" if cartesian else "joint",
+            ),
             hold_steps=hold_steps,
+            action_mode=mode,
         )
 
     return CollectionScene(

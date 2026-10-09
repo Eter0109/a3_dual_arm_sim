@@ -141,11 +141,48 @@ class OperationalSpaceAdapter:
         self._jacobian_position = np.zeros((3, model.nv), dtype=np.float64)
         self._jacobian_rotation = np.zeros((3, model.nv), dtype=np.float64)
 
+    @property
+    def rotation_frame(self) -> str:
+        """Which frame this controller reads a `cartesian_delta`'s rotation part in.
+
+        **Measured, because the code reads the other way.**  `convert` takes
+        ``rotation.T @ (delta * scale)`` and hands it to `mju_quatIntegrate`, which composes
+        about the tool's axes -- so the arithmetic says a caller should send a *world*-frame
+        rotation.  It does not.  Driving one arm towards a goal a known angle away and watching
+        whether the distance to that goal falls or rises, for both conventions and both arms
+        (`scripts/probe_rotation_sign.py`):
+
+            caller assumes   A3 arm (CartesianDeltaAdapter)   Panda (this controller)
+            world            0.300 -> 0.033 rad  converges    0.300 -> 0.683  diverges
+            tool             0.300 -> 0.807 rad  diverges     0.300 -> 0.090  converges
+
+        So the two controllers disagree, and there is no derivation to appeal to -- which is why
+        this is a property of the controller rather than a constant in the caller.  Sending the
+        wrong one does not produce a small error: the arm turns *away* until the two orientations
+        are near antipodal, then the shorter arc flips and it oscillates there, which is how a
+        Panda rollout spends 900 steps in APPROACH with a rotation error parked at 3.1 rad.
+        """
+
+        return "tool"
+
     def _qpos_address(self, name: str) -> int:
         joint = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
         if joint < 0:
             raise ValueError(f"the operational space controller needs a joint named {name}")
         return int(self.model.jnt_qposadr[joint])
+
+    @property
+    def left_site(self) -> int:
+        """The site whose pose the goal is expressed in.
+
+        Public because a caller that wants to command this controller has to build its delta at
+        **this** point, and the answer is not `L_eef`.  The two are rigidly attached to the same
+        hand but they are not the same point, so a delta computed at one of them moves the other
+        by that delta and leaves it short of its own goal by the offset between them -- which is
+        81 mm here, and which the arm would hold as a steady error rather than report.
+        """
+
+        return int(self._site)
 
     def _dof_address(self, name: str) -> int:
         joint = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)

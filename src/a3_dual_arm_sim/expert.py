@@ -9,9 +9,35 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from .box_support import BoxSupportController
-from .contracts import LEFT_JOINTS, RIGHT_JOINTS, STATE, ActionMode, EpisodeContext
+from .contracts import (
+    CARTESIAN_ACTION_DIM,
+    LEFT_JOINTS,
+    RIGHT_JOINTS,
+    STATE,
+    ActionMode,
+    EpisodeContext,
+)
 from .cookie_transfer import A3CookieTransferEnv
 from .grasp import A3GraspEnv
+
+
+def _rotation_vector(quaternion: np.ndarray) -> np.ndarray:
+    """A unit quaternion as a rotation vector, in radians, along the shorter arc.
+
+    ``q`` and ``-q`` are the same rotation, and taking the shorter arc is not an optimisation:
+    a quaternion with a negative real part turns a 0.2 rad correction into a 6.1 rad one, in the
+    other direction.  Four vectors of a pose error are a place where that is invisible until the
+    arm spins.
+    """
+
+    w = float(quaternion[0])
+    vector = np.asarray(quaternion[1:4], dtype=np.float64)
+    if w < 0.0:
+        w, vector = -w, -vector
+    norm = float(np.linalg.norm(vector))
+    if norm < 1e-12:
+        return np.zeros(3, dtype=np.float64)
+    return np.ascontiguousarray(vector * (2.0 * np.arctan2(norm, w) / norm))
 
 
 class GraspPhase(Enum):
@@ -251,8 +277,7 @@ class A3CookieTransferExpert:
     env: A3CookieTransferEnv
     action_mode: ActionMode = "joint_position"
     max_joint_step_rad: float = 0.020
-    max_gripper_step: float = 0.060
-    #: Largest joint step the placement descent may take.  A safety limit rather than a
+    max_gripper_step: float = 0.060    #: Largest joint step the placement descent may take.  A safety limit rather than a
     #: motion plan: the descent lowers a held Cookie into a 6.7 mm cell with neighbours on
     #: both sides, and the failure mode of overshooting is knocking the row over.
     #:
@@ -313,6 +338,59 @@ class A3CookieTransferExpert:
     settle_steps: int = 3
     phase_timeout_steps: int = 180
     max_retries: int = 2
+    #: Height of the transit/approach waypoint above the table, in metres.
+    #:
+    #: It was a literal `0.86` in `_plan_current_cookie`, which is a number about **A3's arm**:
+    #: its shoulder geometry puts a comfortable overhead pose there.  LIBERO's Panda reaches the
+    #: same table from a different base with a different workspace, and the two probes that put
+    #: its fingertip within 10.9-28 mm of the Cookie did so at the Cookie's own height (0.768 m),
+    #: not 92 mm above it.  Measured on the Panda in the collection layout, the approach command
+    #: stalls 38 mm short in y and 0.225 rad off in orientation with the command at 78% of full
+    #: scale -- not saturated, which is what reaching a limit looks like -- so the height is the
+    #: thing to vary, and it is a field so that varying it is a measurement rather than an edit.
+    approach_height_m: float = 0.86
+    #: How the arm is commanded, and therefore which action space this expert produces.
+    #:
+    #: ``"joint"`` is the original: the planner's joint targets are emitted directly, which is the
+    #: arm's own space for A3's position-servo arms and is what every scene used until now.
+    #:
+    #: ``"cartesian"`` converts each joint target into the **pose it implies** and emits a
+    #: `cartesian_delta` instead.  That is not a preference.  LIBERO's Panda is driven by
+    #: `OperationalSpaceAdapter`, which takes a Cartesian goal and solves for torque, so on that
+    #: arm the joint targets are written to motor actuators as Newton-metres.  Measured, same
+    #: scene and same layout and only the arm swapped: A3's arm solves it **3 of 3 in 143 steps**,
+    #: the Panda **0 of 3 in 640**.
+    #:
+    #: **It has to live here rather than in a wrapper around the expert, and that is a
+    #: measurement rather than a taste.**  `_trajectory_command` both interpolates the motion and
+    #: decides how many steps it should take, from `env.last_applied_action` -- which under
+    #: operational-space control is a torque vector.  A wrapper that converted the finished joint
+    #: command would still have had the expert choose its step count from torques and interpolate
+    #: through poses that no arm could ever be at.
+    command_space: str = "joint"
+    #: How close the controlled site has to be to its goal before a cartesian move counts as
+    #: finished.  `_motion_done` is what ends APPROACH, LIFT, MOVE_TO_SLOT and RETRACT, so a
+    #: tolerance the controller cannot hold leaves those phases to their timeouts, while too
+    #: loose a one ends them before the arm has gone anywhere.
+    #:
+    #: **Set from what the controllers were measured to hold, not from what a grasp would like.**
+    #: Driving towards a waypoint and watching the residual settle (`scripts/probe_cartesian_convergence.py`):
+    #:
+    #:     A3's arm, closing on a grasped Cookie     floor about 2.0-2.3 mm, creeping
+    #:     the Panda, descending towards the pinch     floor about 7.0 mm, creeping
+    #:
+    #: Both creep *towards* the goal rather than stopping, at roughly 0.1 mm per twenty steps, so
+    #: this is a slow approach to a limit rather than a ballistics error -- and both are above the
+    #: 2 mm this used to be, which is why nothing ever arrived.  It matters which side of the
+    #: floor this sits on, because a phase whose arrival never fires has no escape at all (see
+    #: the timeouts in `act`), so too tight a value is not a small error, it is a hang.
+    #:
+    #: This is a *coarse* arrival on purpose.  Precision is done by the loops that were built for
+    #: it: `_aim_descent` re-aims until the tool's **measured** position is within `tool_tolerance_m`
+    #: (1 mm), the placement descent settles on the **Cookie's** measured pose against the slot
+    #: (4 mm), and the grasp is confirmed by contact.  None of those read this.
+    cartesian_arrival_tolerance_m: float = 0.008
+    cartesian_arrival_tolerance_rad: float = 0.02
 
     TOOL_SLOT_TARGETS_LOCAL: ClassVar[np.ndarray] = np.asarray(
         [
@@ -331,11 +409,31 @@ class A3CookieTransferExpert:
     )
 
     def __post_init__(self) -> None:
+        if self.command_space not in ("joint", "cartesian"):
+            raise ValueError(
+                f"command_space must be 'joint' or 'cartesian', got {self.command_space!r}"
+            )
+        if self.command_space == "cartesian" and self.action_mode != "cartesian_delta":
+            # The two are one decision.  A scene builds this expert and also decides the action
+            # space its environment accepts, and a mismatch between them fails on the first step
+            # with a shape error that names neither.
+            raise ValueError(
+                f"command_space='cartesian' needs action_mode='cartesian_delta', "
+                f"not {self.action_mode!r}"
+            )
         self.model = self.env.model
         self.data = self.env.data
         self._l_qpos = np.asarray(
             [self.env._qpos_ids[name] for name in LEFT_JOINTS], dtype=np.int32
         )
+        # The site the **controller in use** drives, which is not `L_eef`: the operational-space
+        # adapter tracks robosuite's own grasp site.  A delta computed at the wrong one of the two
+        # moves the other by that delta and leaves its own goal short by the offset between them,
+        # held as steady error rather than reported.
+        self._command_site = self.env.ik.left_site
+        # One scratch state for forward kinematics, beside `_solve_l`'s own.  Only the cartesian
+        # path allocates it, because only it needs the pose a joint target implies.
+        self._scratch = mujoco.MjData(self.model) if self.command_space == "cartesian" else None
         self._r_qpos = np.asarray(
             [self.env._qpos_ids[name] for name in RIGHT_JOINTS], dtype=np.int32
         )
@@ -345,11 +443,34 @@ class A3CookieTransferExpert:
             [self.model.jnt_range[self.env._joint_ids[name]] for name in LEFT_JOINTS]
         )
 
-        rot_canonical = np.asarray(
-            [[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=np.float64
-        )
+        # **The grasp orientation, read off the arm rather than written as a constant.**  It used
+        # to be the literal `[[0,0,1],[-1,0,0],[0,-1,0]]`, and that matrix is *exactly* A3's
+        # `L_eef` at its own start pose -- measured, 0.0 degrees from it.  So the constant was
+        # never a statement about the task ("grasp from above"); it was a statement about one
+        # robot's flange frame, and the same numbers mean a physically different tool pose on any
+        # other arm: LIBERO's Panda at its start has its tool pointing **down** (z = -0.998) and
+        # is **121.7 degrees** away from that matrix, so the expert asked it for a horizontal
+        # wrist and then could not understand why it never arrived.
+        #
+        # Deriving it from the arm's own start pose is what makes the statement portable, and it
+        # is also what makes it *verifiable*: on A3 it reproduces the old constant bit for bit,
+        # so nothing about A3's behaviour can change, while the Panda gets the orientation it
+        # actually starts in -- which is the top-down grasp both arms' homes are built for.
+        #
+        # The reachability oracle below (`_solve_l`) checks only the **position** residual, so a
+        # waypoint whose orientation the arm cannot hold is accepted as reachable.  That hole is
+        # why this was invisible: on A3 the constant is attainable by construction, and there is
+        # no second arm to notice it on.
+        home = np.asarray(self.env.DEPLOYMENT_HOME[:7], dtype=np.float64)
+        reference = mujoco.MjData(self.model)
+        reference.qpos[:] = self.data.qpos
+        reference.qpos[self._l_qpos] = home
+        mujoco.mj_kinematics(self.model, reference)
+        rot_canonical = np.asarray(reference.site_xmat[self._l_site]).reshape(3, 3).copy()
         self._target_quat_canonical = np.empty(4, dtype=np.float64)
-        mujoco.mju_mat2Quat(self._target_quat_canonical, rot_canonical.reshape(-1))
+        mujoco.mju_mat2Quat(
+            self._target_quat_canonical, np.ascontiguousarray(rot_canonical).reshape(-1)
+        )
 
         theta = np.deg2rad(10.0)
         R_world_target = np.array(
@@ -552,7 +673,7 @@ class A3CookieTransferExpert:
 
         self.phase_steps += 1
         if self.phase is CookiePhase.FAILED:
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         if self.phase is CookiePhase.DONE:
             return self._hold_command(self.q_transit, self.open_gripper)
 
@@ -565,6 +686,15 @@ class A3CookieTransferExpert:
                     self._reset_motion()
                 else:
                     self._advance(CookiePhase.ALIGN)
+            elif self._timed_out():
+                # **A phase whose arrival never fires has no escape unless the timeout stands on
+                # its own.**  In the joint path that could not happen: `_motion_done` means "the
+                # interpolated queue is empty", which is true after a fixed number of steps
+                # whatever the arm does.  In Cartesian space it means "the arm is at the goal",
+                # which a real controller can fail to reach -- and then this phase, which had no
+                # timeout at all, waits forever: measured, a Panda sitting in APPROACH for its
+                # whole 900-step budget with `reason=None` and no retries.
+                self._retry("approach timed out without arriving")
             return action
 
         if self.phase is CookiePhase.ALIGN:
@@ -581,16 +711,24 @@ class A3CookieTransferExpert:
             ):
                 if self._aim_descent():
                     self._advance(CookiePhase.CLOSE)
-            elif self._motion_done and self._timed_out(120):
+            elif self._timed_out(120):
                 # Something below is holding the pads up (a neighbour's corner, a
                 # wall, or the servos bottomed out).  Close anyway rather than spin
                 # here, and let VERIFY_GRASP judge whether a Cookie was caught.
+                #
+                # The `_motion_done` that used to gate this was a second reason the Cartesian
+                # path could not escape: it is exactly the condition that fails when a controller
+                # cannot reach the goal, so requiring it here made the timeout unreachable.
                 self._advance(CookiePhase.CLOSE)
             return action
 
         if self.phase is CookiePhase.CLOSE:
             action = self._trajectory_command(self._waypoints["grasp"], self.closed_gripper)
             if self._motion_done:
+                self._advance(CookiePhase.VERIFY_GRASP)
+            elif self._timed_out():
+                # As in DESCEND: let VERIFY_GRASP judge whether a Cookie was caught, rather than
+                # spinning in a phase whose only exit is "arrived".
                 self._advance(CookiePhase.VERIFY_GRASP)
             return action
 
@@ -642,36 +780,51 @@ class A3CookieTransferExpert:
                     self._reset_motion()
                 else:
                     self._advance(CookiePhase.DESCEND_TO_PLACE)
+            elif self._timed_out():
+                self._retry("transfer timed out without arriving")
             return action
 
         if self.phase is CookiePhase.DESCEND_TO_PLACE:
-            action = self.env.last_applied_action.copy()
-            action[7] = self.closed_gripper
-            action[8:15] = self.q_r_hold
-            action[15] = self.right_gripper
             local_position = self.env.privileged_cookie_target_position(self._current_cookie())
             target_xy = np.asarray(self.env.TARGET_SLOTS_LOCAL[self._current_slot()])
             body = self.env._cookie_bodies[self._current_cookie()]
             box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
             cookie_rotation = self.data.xmat[body].reshape(3, 3)
             relative_rotation = box_rotation.T @ cookie_rotation
-            position_error = box_rotation @ (
-                np.r_[target_xy, self._placement_height] - local_position
-            )
-            rotation_error = (
-                sum(np.cross(cookie_rotation[:, i], box_rotation[:, i]) for i in range(3)) * 0.5
-            )
-            jacp = np.zeros((3, self.model.nv))
-            jacr = np.zeros((3, self.model.nv))
-            mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self._l_site)
-            dofs = [self.env._dof_ids[name] for name in LEFT_JOINTS]
-            jac = np.vstack((jacp[:, dofs], jacr[:, dofs]))
-            dq = jac.T @ np.linalg.solve(
-                jac @ jac.T + 0.02**2 * np.eye(6), np.r_[position_error, rotation_error] * 0.15
-            )
-            limit = self.place_step_limit_rad
-            action[:7] = self.data.qpos[self._l_qpos] + np.clip(dq, -limit, limit)
-            self._waypoints["place"] = action[:7].copy()
+            if self.command_space == "cartesian":
+                # `_plan_place_from_grasp` already solved the tool pose that puts the *held*
+                # Cookie at the slot, from the measured Cookie-to-tool transform, and the arm's
+                # own controller closes that loop -- so this phase commands the pose and judges
+                # the result from the Cookie's measured pose, which is what the joint version's
+                # Jacobian servo is doing the long way round.
+                #
+                # The judgement below is shared, and that is deliberate: it is the part that
+                # knows what "placed" means.
+                action = self._cartesian_command(self._waypoints["place"], self.closed_gripper)
+            else:
+                action = self._stay_command()
+                action[7] = self.closed_gripper
+                action[8:15] = self.q_r_hold
+                action[15] = self.right_gripper
+                position_error = box_rotation @ (
+                    np.r_[target_xy, self._placement_height] - local_position
+                )
+                rotation_error = (
+                    sum(np.cross(cookie_rotation[:, i], box_rotation[:, i]) for i in range(3))
+                    * 0.5
+                )
+                jacp = np.zeros((3, self.model.nv))
+                jacr = np.zeros((3, self.model.nv))
+                mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self._l_site)
+                dofs = [self.env._dof_ids[name] for name in LEFT_JOINTS]
+                jac = np.vstack((jacp[:, dofs], jacr[:, dofs]))
+                dq = jac.T @ np.linalg.solve(
+                    jac @ jac.T + 0.02**2 * np.eye(6),
+                    np.r_[position_error, rotation_error] * 0.15,
+                )
+                limit = self.place_step_limit_rad
+                action[:7] = self.data.qpos[self._l_qpos] + np.clip(dq, -limit, limit)
+                self._waypoints["place"] = action[:7].copy()
             aligned = (
                 np.linalg.norm(local_position[:2] - target_xy) < 0.004
                 and abs(relative_rotation[2, 2]) > np.cos(np.deg2rad(8))
@@ -679,15 +832,21 @@ class A3CookieTransferExpert:
             )
             self._settle_count = self._settle_count + 1 if aligned else 0
             if self._settle_count >= 8:
+                if self.command_space == "cartesian":
+                    # Hold where the descent actually finished.  The settle test judges the
+                    # *Cookie's* pose, so the tool is where it needed to be and not necessarily
+                    # where it was planned to be -- and the joint path makes the same substitution
+                    # above, for the same reason.
+                    self._waypoints["place"] = self.data.qpos[self._l_qpos].copy()
                 self._advance(CookiePhase.OPEN)
             elif self._cookie_dropped():
                 self._fail("Cookie released before reaching its slot; holding position")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             elif self._timed_out():
                 self._fail(
                     "placement descent timed out; holding position to protect packed Cookies"
                 )
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             return action
 
         if self.phase is CookiePhase.OPEN:
@@ -695,6 +854,11 @@ class A3CookieTransferExpert:
                 self._waypoints["place"], self.release_gripper, min_steps=10
             )
             if self._motion_done:
+                self._advance(CookiePhase.VERIFY_RELEASE)
+            elif self._timed_out():
+                # VERIFY_RELEASE already waits a fixed five steps before RETRACT, so advancing
+                # here gives the jaws at least that much travel; see the timeouts in APPROACH for
+                # why every "arrived"-gated phase needs one.
                 self._advance(CookiePhase.VERIFY_RELEASE)
             return action
 
@@ -873,7 +1037,7 @@ class A3CookieTransferExpert:
     def _plan_current_cookie(self) -> None:
         cookie_position = self.env.privileged_cookie_position(self._current_cookie()).copy()
         approach_position = np.array(
-            [cookie_position[0], cookie_position[1], 0.86], dtype=np.float64
+            [cookie_position[0], cookie_position[1], self.approach_height_m], dtype=np.float64
         )
         grasp_position = cookie_position.copy()
         # Pinch the upper edge: deep grasps collide with adjacent upright
@@ -964,6 +1128,12 @@ class A3CookieTransferExpert:
     def _trajectory_command(
         self, target: np.ndarray, gripper: float, *, min_steps: int = 12
     ) -> np.ndarray:
+        if self.command_space == "cartesian":
+            # `min_steps` is deliberately unused.  A floor on a step count is a statement about a
+            # precomputed queue: how many commands to spread a joint delta over.  There is no
+            # queue here -- see `_cartesian_command` for why the arm's own controller makes one
+            # unnecessary -- and inventing a floor would only make the arm dwell.
+            return self._cartesian_command(target, gripper)
         key = (target.tobytes(), float(gripper), min_steps)
         if self._motion_key != key:
             start = self.env.last_applied_action.copy()
@@ -993,6 +1163,11 @@ class A3CookieTransferExpert:
         return action
 
     def _hold_command(self, target: np.ndarray, gripper: float) -> np.ndarray:
+        if self.command_space == "cartesian":
+            # "Hold" and "move towards" are the same operation in Cartesian space: the command is
+            # a delta from where the arm is, so a goal the arm is already at produces a zero
+            # delta.  That is why this needs no separate branch beyond the conversion.
+            return self._cartesian_command(target, gripper)
         action = np.zeros(16, dtype=np.float64)
         action[:7] = target
         action[7] = gripper
@@ -1000,12 +1175,130 @@ class A3CookieTransferExpert:
         action[15] = self.right_gripper
         return action
 
+    def _site_pose(self) -> tuple[np.ndarray, np.ndarray]:
+        """Where the controlled site is now, as a position and a unit quaternion."""
+
+        position = np.asarray(self.data.site_xpos[self._command_site], dtype=np.float64).copy()
+        quaternion = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(quaternion, self.data.site_xmat[self._command_site])
+        return position, quaternion
+
+    def _pose_of(self, joints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The controlled site's pose if the left arm were at ``joints``.
+
+        Forward kinematics on a scratch state, the same way `_solve_l` moves a copy of the
+        model's `qpos` to evaluate a candidate.  **Exact rather than approximate**: a joint
+        target from this planner came *from* an IK solve against a pose, so the pose it means is
+        recoverable rather than merely close by.
+        """
+
+        assert self._scratch is not None
+        self._scratch.qpos[:] = self.data.qpos
+        self._scratch.qpos[self._l_qpos] = joints
+        mujoco.mj_kinematics(self.model, self._scratch)
+        position = np.asarray(
+            self._scratch.site_xpos[self._command_site], dtype=np.float64
+        ).copy()
+        quaternion = np.empty(4, dtype=np.float64)
+        mujoco.mju_mat2Quat(quaternion, self._scratch.site_xmat[self._command_site])
+        return position, quaternion
+
+    def _goal_error(self, target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Position error, and rotation error in the frame **the controller reads**.
+
+        The pose error itself is a well-defined thing, and so is the rotation vector that takes
+        the current orientation to the goal's: ``log(q_current^-1 @ q_goal)``, expressed in the
+        tool's own axes.  What is *not* well defined is which frame the controller wants it in,
+        and the two controllers in this repository want different ones -- measured, see
+        `OperationalSpaceAdapter.rotation_frame`.  So the tool-frame vector is what is computed
+        here and the conversion to world is applied only for a controller that asks for it.  A
+        caller that guessed wrong sends the arm away from its goal, so this asks rather than
+        assumes.
+
+        The conjugate is written out rather than taken from `mju_negQuat`: that function negates
+        all four components, which is the same rotation under the double cover and not the
+        conjugate, which negates only the vector part.
+        """
+
+        goal_position, goal_quaternion = self._pose_of(target)
+        current_position, current_quaternion = self._site_pose()
+        conjugate = np.r_[current_quaternion[0], -current_quaternion[1:4]]
+        relative = np.empty(4, dtype=np.float64)
+        mujoco.mju_mulQuat(relative, conjugate, goal_quaternion)
+        rotation_vector = _rotation_vector(relative)
+        if self.env.ik.rotation_frame == "world":
+            rotation = np.asarray(self.data.site_xmat[self._command_site], dtype=np.float64)
+            rotation_vector = rotation.reshape(3, 3) @ rotation_vector
+        return goal_position - current_position, rotation_vector
+
+    def _cartesian_command(self, target: np.ndarray, gripper: float) -> np.ndarray:
+        """One ``cartesian_delta`` step towards the pose the joint target ``target`` implies.
+
+        No interpolated queue and no step count, because the operational-space controller holds a
+        goal as a **delta from where the arm is now**: commanding the whole remaining error,
+        clipped to the action's own range, is already a closed loop that decelerates into the goal
+        of its own accord.  What the joint path spends a queue buying -- covering a delta without
+        exceeding a rate limit -- the arm's controller does per step, so `_motion_done` here is
+        read off the measured pose rather than off an exhausted list.
+
+        The right arm is left at zeros rather than at `q_r_hold`.  A zero translation and rotation
+        for an arm means "stay where you are commanded to be" in both adapters -- the environment's
+        own `step` substitutes the last *commanded* pose for exactly that reason -- so the idle arm
+        holds the pose the scene gave it, which is what `q_r_hold` is for.
+        """
+
+        position_error, rotation_error = self._goal_error(target)
+        action = np.zeros(CARTESIAN_ACTION_DIM, dtype=np.float64)
+        action[0:3] = np.clip(
+            position_error / self.env.config.cartesian_translation_scale_m, -1.0, 1.0
+        )
+        action[3:6] = np.clip(
+            rotation_error / self.env.config.cartesian_rotation_scale_rad, -1.0, 1.0
+        )
+        action[6] = float(np.clip(2.0 * float(gripper) - 1.0, -1.0, 1.0))
+        self._motion_done = bool(
+            float(np.linalg.norm(position_error)) <= self.cartesian_arrival_tolerance_m
+            and float(np.linalg.norm(rotation_error)) <= self.cartesian_arrival_tolerance_rad
+        )
+        return action
+
+    def _stay_command(self) -> np.ndarray:
+        """A command that moves nothing, expressed in whichever space this expert speaks.
+
+        The joint path already had one -- repeat the last applied command -- and for a
+        position-servo arm that holds the pose, because the command *is* the pose.  It is returned
+        **verbatim**, gripper entry included, because that is what "hold" means when a Cookie is
+        in the jaws: the entry already carries the opening that was commanded.
+
+        In Cartesian space the same idea is a **zero delta**, because the command is relative to
+        where the arm is.  `env.last_applied_action` there is the *canonical* vector: 16 wide, and
+        on the Panda a torque vector, so returning it as an action is a shape error at best and a
+        full-speed lunge in an arbitrary direction at worst.  Its gripper entry therefore has to be
+        built from the **measured** opening rather than left at zero -- a delta's gripper entry of
+        zero means "half open", which is a real command and would let go of the Cookie this exists
+        to keep hold of.
+        """
+
+        if self.command_space == "cartesian":
+            opening = float(np.clip(self.env.current_joint_action[7], 0.0, 1.0))
+            action = np.zeros(CARTESIAN_ACTION_DIM, dtype=np.float64)
+            action[6] = float(np.clip(2.0 * opening - 1.0, -1.0, 1.0))
+            return action
+        return self.env.last_applied_action.copy()
+
     def _reset_motion(self) -> None:
         self._motion_actions = []
         self._motion_key = None
         self._motion_done = False
 
     def _reached(self, target: np.ndarray, *, tolerance: float | None = None) -> bool:
+        if self.command_space == "cartesian":
+            position_error, rotation_error = self._goal_error(target)
+            del tolerance
+            return bool(
+                float(np.linalg.norm(position_error)) <= self.cartesian_arrival_tolerance_m
+                and float(np.linalg.norm(rotation_error)) <= self.cartesian_arrival_tolerance_rad
+            )
         joints = self.env.current_joint_action[:7]
         return bool(
             np.max(np.abs(joints - target))
