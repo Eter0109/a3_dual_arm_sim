@@ -119,10 +119,26 @@ class A3SinglePieceExpert(A3CookieTransferExpert):
         reads the live tool, Cookie and box poses and writes only ``_waypoints``,
         ``_placement_height`` and the slot index, none of which the following phases read until
         the plan is complete.
+
+        With **more than one** piece the order is not disposable after all, and this loop has to
+        say so.  It used to start from ``_slot_order[0]`` every time, so the second Cookie was
+        planned back into the cell the first one was standing in: measured on the two-Cookie scene,
+        ``_select_cookie`` chose slot 9 and this overwrote it with 8, and the second Cookie was set
+        down on top of the first -- contact ``cookie_0_top_geom <-> cookie_1_bottom_geom`` carrying
+        0.88 N -- and both ended up leaning at 45 degrees.  The slot the selection already chose is
+        therefore the first candidate, and the cells already occupied are left out.  The one-piece
+        behaviour is unchanged: there the chosen slot is 8, it is reachable, and the candidate list
+        is ``_slot_order`` itself.
         """
 
+        taken = set(self._slot_order[: len(self.completed_cookie_indices)])
+        preferred = self.target_slot_index
+        candidates = [slot for slot in self._slot_order if slot not in taken]
+        if preferred in candidates:
+            candidates.remove(preferred)
+            candidates.insert(0, preferred)
         last_error: RuntimeError | None = None
-        for slot in self._slot_order:
+        for slot in candidates:
             self.target_slot_index = slot
             try:
                 super()._plan_place_from_grasp()
