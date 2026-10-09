@@ -35,13 +35,13 @@ from a3_dual_arm_sim.collection import libero_props_scene
 
 #: Kept in step with `scripts/run_expert_gate.py`.
 LAYOUTS = {
-    "a3": dict(matched_cameras=True, a3_single_cookie=True, a3_layout_offset_m=(0.0, 0.0)),
-    "clear": dict(
-        matched_cameras=True,
-        a3_single_cookie=True,
-        a3_layout_offset_m=(0.020, -0.200),
-        a3_cookie_position_m=(0.1194, 0.0711),
-    ),
+    "a3": {"matched_cameras": True, "a3_single_cookie": True, "a3_layout_offset_m": (0.0, 0.0)},
+    "clear": {
+        "matched_cameras": True,
+        "a3_single_cookie": True,
+        "a3_layout_offset_m": (0.020, -0.200),
+        "a3_cookie_position_m": (0.1194, 0.0711),
+    },
 }
 
 
@@ -58,7 +58,6 @@ def dump_mechanism(env, expert) -> None:
     import mujoco
 
     index = expert._current_cookie()
-    tool_matrix = np.asarray(env.data.site_xmat[env.ik.left_site]).reshape(3, 3)
     target_matrix = np.empty(9, dtype=np.float64)
     mujoco.mju_quat2Mat(target_matrix, expert._grasp_quat)
     box_matrix = env.data.xmat[env._target_bin_body].reshape(3, 3)
