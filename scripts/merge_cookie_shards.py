@@ -41,6 +41,54 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+#: The fields a `collection_summary.json` carries **once per shard** rather than once per
+#: collection.  Everything else in a shard's summary is a statement about the collection -- what
+#: scene it was, which cameras, and above all how much the scene was allowed to vary -- and is
+#: carried through unchanged by `combine_summaries`.
+_PER_SHARD_FIELDS = frozenset({"repo_id", "shard_index", "shard_count", "results"})
+
+
+def combine_summaries(
+    summaries: list[dict], *, repo_id: str, shard_names: list[str], accepted_episodes: int
+) -> dict:
+    """One collection's summary from its shards' summaries.
+
+    Written as "take everything, then fix up what is per shard" rather than "take these fields",
+    because the enumerated version had to be edited every time the summary schema grew and nobody
+    edited it: the merged summary of a fully randomized collection listed neither
+    `scene_randomization_m` nor `placements_randomized` nor `cookies_jittered`, so the one field
+    that says the boxes were drawn from a range -- the thing that makes this dataset different
+    from a fixed-layout one -- was missing from the artifact people train on, while every shard's
+    own summary had it.
+
+    The caller supplies ``shard_names`` rather than reading them off the summaries because the
+    merge writes them in the order it concatenated, which is the order the episode indices follow.
+    """
+
+    if not summaries:
+        raise ValueError("no shard summaries to combine")
+    if len(shard_names) != len(summaries):
+        raise ValueError(
+            f"{len(shard_names)} shard names for {len(summaries)} shard summaries"
+        )
+
+    combined = {key: value for key, value in summaries[0].items() if key not in _PER_SHARD_FIELDS}
+    attempts = sum(int(summary.get("attempts", 0)) for summary in summaries)
+    combined.update(
+        repo_id=repo_id,
+        shards=list(shard_names),
+        shard_count=len(summaries),
+        requested_episodes=sum(int(summary.get("requested_episodes", 0)) for summary in summaries),
+        # The merged dataset's own episode count, not the shards' claims about themselves: this
+        # is the number of records the merge actually produced, and a summary that disagreed with
+        # its own dataset is the failure this field exists to make visible.
+        accepted_episodes=accepted_episodes,
+        attempts=attempts,
+        success_rate=accepted_episodes / attempts if attempts else 0.0,
+    )
+    return combined
+
+
 def main() -> int:
     args = parse_args()
     shards: list[Path] = [path.expanduser().resolve() for path in args.shards]
@@ -89,28 +137,15 @@ def main() -> int:
             f"Frame count mismatch after merge: info={info['total_frames']} metadata={expected_frames}"
         )
 
-    first = json.loads((shards[0] / SUMMARY_NAME).read_text(encoding="utf-8"))
-    attempts = 0
-    for shard in shards:
-        attempts += json.loads((shard / SUMMARY_NAME).read_text(encoding="utf-8")).get("attempts", 0)
-    combined = {
-        "schema_version": 2,
-        "task": first["task"],
-        "success_contract": first["success_contract"],
-        "prompt": first["prompt"],
-        "repo_id": args.repo_id,
-        "shards": [shard.name for shard in shards],
-        "shard_count": len(shards),
-        "position_noise_m": first["position_noise_m"],
-        "yaw_noise_rad": first["yaw_noise_rad"],
-        "requested_episodes": sum(
-            json.loads((shard / SUMMARY_NAME).read_text(encoding="utf-8"))["requested_episodes"]
-            for shard in shards
-        ),
-        "accepted_episodes": len(merged),
-        "attempts": attempts,
-        "success_rate": len(merged) / attempts if attempts else 0.0,
-    }
+    shard_summaries = [
+        json.loads((shard / SUMMARY_NAME).read_text(encoding="utf-8")) for shard in shards
+    ]
+    combined = combine_summaries(
+        shard_summaries,
+        repo_id=args.repo_id,
+        shard_names=[shard.name for shard in shards],
+        accepted_episodes=len(merged),
+    )
     (output / SUMMARY_NAME).write_text(
         json.dumps(combined, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -118,7 +153,7 @@ def main() -> int:
     print()
     print(f"  episodes    : {info['total_episodes']}")
     print(f"  frames      : {info['total_frames']}")
-    print(f"  attempts    : {attempts}")
+    print(f"  attempts    : {combined['attempts']}")
     print(f"  success rate: {combined['success_rate']:.1%}")
     print(f"  output      : {output}")
     return 0
