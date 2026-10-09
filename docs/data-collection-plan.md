@@ -285,6 +285,34 @@ Port the command stage, not the state machine.  Drive the Panda, one Cookie, no 
 expert with the same code* solving the A3 arm 3 of 3, which is what proves the port did not
 change the plan.
 
+**Status: the port is in (`104bf0f`), the gate is not green.**  A3's arm, joint commands -- the
+regression check -- is **5 of 5 at a median 143 steps** with the full phase path, byte-identical to
+the recorded baseline.  Everything else is measured and named rather than hanging:
+
+| configuration | outcome |
+|---|---|
+| A3's arm, joint | **5/5**, median 143 steps |
+| A3's arm, cartesian | 0/3, reaches DESCEND_TO_PLACE, fails "placement descent timed out" |
+| Panda, cartesian, A3's layout | 0/3, reaches VERIFY_GRASP, does not verify the grasp |
+| Panda, cartesian, collection layout | 0/3, reaches VERIFY_GRASP, does not verify the grasp |
+
+Four things came out of the port, and three of them only exist on the cartesian path: the two
+controllers read a `cartesian_delta`'s **rotation part in different frames** (measured, A/B in
+`docs`; `rotate(0.3 rad)` converges to 0.033 rad on A3's arm as world-frame and to 0.090 on the
+Panda as tool-frame); the grasp orientation was a **constant that is exactly A3's own start pose**,
+121.7 degrees away from the Panda's; and several phases that wait on "arrived" had **no timeout at
+all**, which is a hang rather than a failure when arrival is a thing a controller can miss.  The
+fourth is that three places returned `env.last_applied_action` as a "stay put" command, which under
+`cartesian_delta` is a 16-wide canonical vector.
+
+**What is left is geometry, not wiring.**  The remaining two failures are both about where the
+pads land: A3's arm grasps and lifts and then fails to place, and the Panda reaches the pinch pose
+and does not close on the Cookie.  The next measurement is the **jaw gap at the pinch height**
+relative to the Cookie, on both arms -- the two failures are plausibly one geometry question seen
+from either end.  That measurement is why `approach_height_m` exists as a field: lowering it was
+measured and is worse (57 mm residual at 0.86 m against 160 mm at 0.76), so the height is not the
+problem and the gaps are what to look at.
+
 ### Stage 2 -- two Cookies, sequential, fixed layout
 
 `cookie_count=2`, `required_cookies=2`, `require_exact_slots=False` (required: `__post_init__`
