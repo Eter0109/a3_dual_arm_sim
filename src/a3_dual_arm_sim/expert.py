@@ -367,9 +367,13 @@ class A3CookieTransferExpert:
     grasp_stable_steps: int = 8
     #: Height of the staging pose the arm retreats through between the bins.
     #:
-    #: Only the height is kept from the fixed world point this used to be, because the height is the
-    #: part of it that was not the problem; the horizontal position is decided in `reset`.
+    #: This is a **floor**, not the height itself: `reset` raises it if the geometry needs more.  It
+    #: was the whole story once, and 0.89 happened to be enough -- measured on the a3-layout
+    #: configuration, the carried Cookie's lowest corner passes 54.4 mm above the target box's wall
+    #: top.  Nothing made that true, so nothing would have kept it true.
     transit_height_m: float = 0.89
+    #: Clearance the carried Cookie must keep above a box wall while it is over that box.
+    transit_clearance_m: float = 0.02
     #: The staging pose this planner used to hard-code, as (x, y).
     #:
     #: It is still used, for the scene it was tuned for: see `reset` for the test that decides
@@ -667,7 +671,7 @@ class A3CookieTransferExpert:
         over_the_bin = bool(np.all(offset <= np.asarray(self.env.SOURCE_INNER_HALF_SIZE)))
         staging = np.asarray(self.fixed_transit_xy, dtype=np.float64) if over_the_bin else source
         self.q_transit = self._solve_l(
-            np.array([staging[0], staging[1], self.transit_height_m]),
+            np.array([staging[0], staging[1], self._transit_height()]),
             self._target_quat_canonical,
             self.q_branch_seed,
         )
@@ -746,6 +750,22 @@ class A3CookieTransferExpert:
                 if displacement > 0.006 or abs(rotation[2, 2]) < np.cos(np.deg2rad(12)):
                     self._fail(f"packed Cookie {index} disturbed; holding position")
                     break
+        # A Cookie that is being carried must not touch a box wall.  Measured on the a3-layout
+        # configuration without the staging leg: the Cookie's end came within 0.2 mm of the target
+        # box's wall top and then struck it at 6.69 N, which turned the Cookie 16 degrees inside the
+        # jaws and left it leaning 19.5 degrees.  Without this check that episode runs on for another
+        # fifty steps and fails at the uprightness test, which names the lean and not the wall.
+        if self.phase in (
+            CookiePhase.LIFT,
+            CookiePhase.VERIFY_LIFT,
+            CookiePhase.MOVE_TO_SLOT,
+            CookiePhase.DESCEND_TO_PLACE,
+        ):
+            wall = self._carried_cookie_wall_contact()
+            if wall is not None:
+                self._fail(
+                    f"carried Cookie {self._current_cookie()} touched {wall}; holding position"
+                )
         # SELECT_COOKIE has no physical action. Resolve it immediately so every
         # returned command belongs to a meaningful motion/verification phase.
         if self.phase is CookiePhase.SELECT_COOKIE:
@@ -1238,6 +1258,53 @@ class A3CookieTransferExpert:
         place = self._solve_l(target_tool, quat, pre)
         self._waypoints["preplace"] = pre
         self._waypoints["place"] = place
+
+    def _transit_height(self) -> float:
+        """How high the carry has to cross, from the box and the Cookie rather than a constant.
+
+        The Cookie hangs below the tool -- the pinch is `_grasp_height_offset` above its centre and
+        the slab reaches its own half-extents beyond that -- and a Cookie is 50 mm long, longer than
+        the tool is wide.  So while any part of it is over a box, it is **its own end** that meets
+        that box's wall first, and the tool has to be high enough for that end to clear the wall top.
+
+        Measured on the a3-layout configuration with the constant 0.89 alone: 54.4 mm of clearance,
+        which is comfortable.  Without the leg entirely: 0.2 mm, and then 6.69 N on the next step as
+        the end struck the wall's top inner edge, which turned the Cookie 16 degrees inside the jaws
+        and left it leaning 19.5 degrees -- a placement the expert refuses three phases later for a
+        reason that says nothing about the wall.
+
+        The hang is taken as the worst case over the Cookie's own half-extents, so a Cookie that ends
+        up pinched along a different axis is still covered, and the height is only ever raised: the
+        configured value stays the floor, because it is also the height the arm was shown to reach.
+        """
+
+        half = np.asarray(self.env.COOKIE_HALF_SIZE, dtype=np.float64)
+        hang = self._grasp_height_offset() + float(np.max(half))
+        highest_wall = self.data.xpos[self._tb_id][2] + self.env.TARGET_WALL_HEIGHT
+        return float(max(self.transit_height_m, highest_wall + hang + self.transit_clearance_m))
+
+    def _carried_cookie_wall_contact(self) -> str | None:
+        """The name of a box wall the held Cookie is touching, if any.
+
+        Only the carried phases ask this.  Once the Cookie has been released it is the box's floor and
+        its already-packed neighbours that it is entitled to touch, and a Cookie resting against a
+        wall is a placement question for later phases to judge, not a carry question.
+        """
+
+        index = self._current_cookie()
+        if index is None:
+            return None
+        cookie_geoms = set(self.env._cookie_collision_geoms[index])
+        for contact_index in range(self.data.ncon):
+            contact = self.data.contact[contact_index]
+            pair = {int(contact.geom1), int(contact.geom2)}
+            if not pair & cookie_geoms:
+                continue
+            other = int(contact.geom2) if int(contact.geom1) in cookie_geoms else int(contact.geom1)
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, other) or ""
+            if "wall" in name:
+                return name
+        return None
 
     def _trajectory_command(
         self, target: np.ndarray, gripper: float, *, min_steps: int = 12
