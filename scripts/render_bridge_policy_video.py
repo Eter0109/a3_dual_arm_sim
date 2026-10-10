@@ -357,8 +357,13 @@ def main() -> int:
             action = gateway.act(observation, task)
             observation, _, terminated, truncated, info = env.step(action)
             # Recorded after the step, because the correction is the difference
-            # between what was asked for and what the environment applied.
-            trace.record(requested=action, applied=info["applied_action"])
+            # between what was asked for and what the environment applied -- and those two
+            # have to be in the same space to be subtracted.  `action` is the *policy's*
+            # vector, which is fourteen Cartesian deltas here while `applied_action` is
+            # always sixteen joints; `commanded_action` is the environment's own pre-limit
+            # target, in its own space, and on a joint-target arm it equals `action`
+            # exactly.  See `runner.py`'s call for the same distinction.
+            trace.record(requested=info["commanded_action"], applied=info["applied_action"])
 
             if step % 50 == 0:
                 elapsed = time.perf_counter() - started

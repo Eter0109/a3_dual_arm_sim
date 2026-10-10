@@ -1,0 +1,129 @@
+# The first A3 fine-tune of π0.5 on the **two-Cookie Cartesian** task, served through the bridge.
+#
+# Why this file exists rather than reusing `pi05_a3_adv40k.yaml`
+# -------------------------------------------------------------
+# Everything about the interface differs, and each difference is silent if it is wrong:
+#
+#   action space   joint_position, 16 wide          ->  cartesian_delta, 14 wide
+#   dataset        a3_cookie_adv_1000 (joint)       ->  a3_two_cookie_500 (Cartesian)
+#   prompt         five blocks, ten slots           ->  two yellow blocks
+#   scene          A3's own batch scene             ->  a3_libero_panda_two_cookies
+#
+# The action width is the one that bites hardest: the checkpoint's real output is 14 wide
+# (see `output_features.action.shape` inside it -- lerobot adapts the head to the dataset),
+# and the adapter has to be told, because π0.5 pads everything to `max_action_dim` 32 and a
+# declared width is a capacity rather than a shape.  `dims=14` and the `action.dim: 14`
+# below have to agree; the adapter says so and refuses otherwise.
+#
+# `state_dims=16` is separate on purpose: the state is A3's native 16-joint vector (seven
+# per arm plus a gripper), which is what this dataset recorded, and it is **not** the
+# action's width.  π0.5 carries proprioception into the model only through the language
+# prompt -- discretised into 256 bins -- so an unnormalised state silently produces a
+# prompt the model was never trained on, which is why the statistics matter here.
+#
+# The prompt is deliberately **not** in this file's `evaluation.prompt_kind: free_text`
+# sense of "the caller supplies it": it comes from the scene.  `render_bridge_policy_video.py`
+# and `a3-sim compare` both default `--task` to the scene's own task string, and for
+# `a3_libero_panda_two_cookies` that is `_TWO_PIECE_PROMPT` -- the exact sentence this
+# checkpoint was trained on.  Passing `--task` from the old five-block wording
+# (`COOKIE_PROMPT`, which `render_cookie_policy_video.py` hardcodes) would condition the
+# policy on a different task and read as a capability failure.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_15k.yaml
+
+name: pi05-a3-two-cookie-15k
+notes: >
+  π0.5 (lerobot/pi05_base) fine-tuned for 15,000 steps at batch 4 on 500 two-Cookie
+  episodes: the vision tower and all 18 PaliGemma language layers trainable (3.09 B of
+  3.617 B), the action expert and projections, plain pi0.5 proprioception (no state
+  projector).  Loss 0.506 -> 0.010, flat after about 10-12k steps.  Cartesian 14-wide
+  action, A3's 16-joint state, LIBERO-matched cameras on the A3 arm and renderer.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_unfreeze_15k/checkpoints/015000/pretrained_model
+    # The action width, 14, and the state width, 16.  See the header.
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    # The space the checkpoint emits, which the adapter cannot recover from the weights and
+    # the gateway cross-checks against `action.space` below.  It used to be the constant
+    # `joint_position` in the adapter, so a Cartesian fine-tune was refused outright.
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    # Offline because the gated `google/paligemma-3b-pt-224` name resolves through the
+    # cache entry `scripts/setup_paligemma_tokenizer_cache.py` populates, and online it
+    # reaches for `chat_template.jinja`, which the ungated mirror does not carry.
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    # One vector, because π0.5's preprocessor consumes the state as a single tensor and
+    # discretises it into the language prompt -- there is no state projector.
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  # Inclusive bounds applied after normalisation, which for a *normalised* space is the
+  # whole point: ±1 is full scale (25 mm and 0.10 rad per step), so a value past it is a
+  # request with no physical meaning.  π0.5's flow-matching head is unbounded -- it does not
+  # know the target space has edges -- and it does overshoot: dims 0-2 of this dataset
+  # saturate at ±1 and normalise with a span of exactly 2.0, so any extrapolation lands
+  # outside and the environment refuses the command outright
+  # (`cartesian_delta action values must remain in [-1, 1]`).
+  #
+  # Clipping is the intended treatment rather than a workaround: `bridge/action_bridge.py`
+  # applies it, and the manifest validator *requires* this exact pair for `cartesian_delta`.
+  # The joint path does the same thing at the other end -- the environment clips and rate
+  # limits joint commands and the report counts it in `corrected` / `rate limited` -- so an
+  # overshooting policy is measured there and merely bounded here.
+  clip: [-1.0, 1.0]
+  # 50, not A3's own quarter-second 16: the checkpoint's config.json carries
+  # `n_action_steps: 50` next to `chunk_size: 50`, so it executes the whole plan per call.
+  # Trimming to 16 would throw away the second half of every plan and re-plan four times
+  # as often, drawing fresh flow-matching noise each time.
+  execute: 50
+  dt: 0.05
+  normalize:
+    # The checkpoint's own postprocessor already inverted the QUANTILES transform using
+    # the statistics saved at training time, which travel with the weights.
+    mode: none
+
+success:
+  # The environment decides, so this model is measured on the same ruler as every other.
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

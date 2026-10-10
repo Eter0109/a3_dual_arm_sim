@@ -246,10 +246,26 @@ def _policy_compare(args: argparse.Namespace) -> int:
         manifests.append(manifest)
 
     def env_factory() -> A3DualArmEnv:
+        # No `action_mode` here, deliberately.  This used to request `joint_position`
+        # unconditionally, and `_make_env` correctly refuses that for any registered scene
+        # that drives `cartesian_delta` -- which is the whole LIBERO-Panda family, so the
+        # scenes every `pi05_libero_*.yaml` manifest exists to evaluate could not be
+        # compared at all.  The error names the scene's action space and reads as a
+        # problem with the scene rather than with this line.
+        #
+        # The guard is for catching a *caller* that asks for a space the scene does not
+        # have, and `compare` is not such a caller: each manifest declares the space the
+        # **model** emits, and the bridge converts between that and the environment's own
+        # (see `docs/external-policy-bridge.md`).  A scene that pins its own mode is then
+        # the only author of the environment side, which is what it already is for its
+        # task config.
+        #
+        # Non-registered scenes are unaffected: `A3DualArmEnv` and `A3CookieTransferEnv`
+        # both default to `joint_position`, so dropping the argument leaves `sandbox`,
+        # `cookie_transfer` and `--config` runs byte-identical.
         return _make_env(
             args.scene,
             args.config,
-            action_mode="joint_position",
             render_cameras=True,
             fast_render=args.fast_render,
             visual_style=args.visual_style,

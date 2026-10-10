@@ -347,6 +347,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         requested = validate_action(action, self.action_mode)
         if self._safety_stop:
             applied = self._current_joint_action()
+            # Nothing was commanded, so what the controllers were told to track is what they are
+            # already tracking.  A stopped arm's correction is zero, which is what the
+            # comparison should read rather than a missing value.
+            commanded = applied.copy()
         else:
             canonical = (
                 requested
@@ -359,6 +363,15 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 for offset, start in ((0, 0), (7, 8)):
                     if not np.any(requested[offset:offset + 6]):
                         canonical[start:start + 7] = self._last_applied_action[start:start + 7]
+            #: The targets the controllers are about to be given, one step before the
+            #: environment's own limits are applied to them.  Recorded because
+            #: ``applied_action`` is always a sixteen-wide joint vector while
+            #: ``requested_action`` is whatever the *policy* emitted -- fourteen Cartesian
+            #: values for this scene -- and the two cannot be subtracted.  This one is in the
+            #: environment's own space and is what "how far did the environment have to move
+            #: the command" is actually a question about.  On a joint-target arm it is equal
+            #: to ``requested_action`` by construction, so nothing about those runs changes.
+            commanded = canonical.copy()
             applied = self._limit_joint_action(canonical)
             self._apply_controls(applied)
             for _ in range(self.config.substeps):
@@ -383,6 +396,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         info = {
             "applied_action": applied.copy(),
             "requested_action": requested.copy(),
+            "commanded_action": commanded.copy(),
             "safety_reason": self._safety_reason,
             "step": self._step_count,
         }

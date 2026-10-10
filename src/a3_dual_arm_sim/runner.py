@@ -146,10 +146,23 @@ class EpisodeRunner:
 
     def run(self, *, seed: int = 0, max_steps: int | None = None) -> EpisodeResult:
         context = EpisodeContext(seed=seed, task=self.task, action_mode=self.env.action_mode)
-        # Ask before the first step, so an impossible combination fails on a scene that has
-        # not yet run rather than 500 episodes into a collection.  The dataset's schema is
-        # created from this same answer, and the recorder asserts the two agree.
-        mode = stored_action_mode(self.env, self.recorded_action)
+        # Asked before the first step when something is going to be *written*, because the
+        # dataset's schema is created from this same answer, the recorder asserts the two
+        # agree, and an impossible combination should fail on a scene that has not yet run
+        # rather than 500 episodes into a collection.
+        #
+        # Not asked otherwise.  `stored_action_mode` names the space of the recorded column,
+        # and on a torque arm it *refuses* to name the applied command -- there is no action
+        # space whose entries are Newton-metres (see `A3DualArmEnv.canonical_action_mode`).
+        # Resolving it unconditionally therefore failed every caller that never records, on
+        # every LIBERO-Panda scene, with an error about a column that does not exist; `compare`
+        # was one, and its report said `failure:` with no episodes rather than anything a
+        # reader could connect to an action space.
+        mode = (
+            stored_action_mode(self.env, self.recorded_action)
+            if self.recorder is not None
+            else None
+        )
         observation, _ = self.env.reset(seed=seed, options=self.reset_options)
         self.policy.reset(context)
         if self.recorder is not None:
@@ -191,7 +204,19 @@ class EpisodeRunner:
                 # command, and only the environment knows that.
                 observe_step = getattr(self.policy, "observe_step", None)
                 if observe_step is not None:
-                    observe_step(requested=action, applied=info["applied_action"], info=info)
+                    # `commanded_action`, not the policy's own vector: the trace asks how far
+                    # the environment had to move the command before applying it, and that is
+                    # a joint-space question.  For a Cartesian policy the two are different
+                    # spaces entirely -- fourteen Cartesian deltas in, sixteen joint targets
+                    # out -- and the runner used to pass the former, so every behaviour
+                    # comparison on a `cartesian_delta` scene died on the shape before it
+                    # could measure anything.  On a joint-target arm `commanded_action` *is*
+                    # the policy's vector, so those runs are unchanged.
+                    observe_step(
+                        requested=info["commanded_action"],
+                        applied=info["applied_action"],
+                        info=info,
+                    )
                 recording_enabled = bool(getattr(self.policy, "recording", True))
                 if self.recorder is not None and recording_enabled:
                     recorded = (
