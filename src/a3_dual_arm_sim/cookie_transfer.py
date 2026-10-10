@@ -898,6 +898,28 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
 
     def _cookie_inside_target(self, index: int) -> bool:
+        return self._containment_clauses(index)["in_target"]
+
+    def privileged_target_containment(self, index: int) -> dict[str, Any]:
+        """Every clause of the verdict, so a caller can report *why* rather than just *no*.
+
+        `privileged_cookie_in_target` answers one bit, and one bit cannot separate a Cookie
+        that never reached the box from one that is inside it a layer too high.  A recorded
+        roll-out was misread exactly that way -- as a placement rejected for resting on
+        another Cookie -- and the reading could not be checked against anything, because the
+        verdict was all there was.  This is the same computation, exposed.
+
+        Read-only: `_cookie_average_speed` keys its samples on `data.time`, so calling this
+        as often as a renderer likes does not change what `settled` sees.  Verified rather
+        than assumed, because a diagnostic that perturbs the thing it reports is worse than
+        no diagnostic.
+        """
+
+        return dict(self._containment_clauses(index))
+
+    def _containment_clauses(self, index: int) -> dict[str, Any]:
+        """The clauses of `privileged_target_containment`, computed once for both callers."""
+
         tb_pos = self.data.xpos[self._target_bin_body]
         tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
         c_pos = self.data.xpos[self._cookie_bodies[index]]
@@ -917,14 +939,21 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.config.cookie_transfer.target_floor_z_m
             + self.config.cookie_transfer.bin_wall_thickness_m / 2
         )
-        vertically_inside = bool(
-            p_rel[2] - half_extent[2] >= floor_top - 0.003
-            and p_rel[2] - half_extent[2] < self.TARGET_WALL_HEIGHT
-        )
+        # The Cookie's lowest face, in the box's own frame: the one number that says where in
+        # the box it is, and the one a reader wants when a placement is refused.
+        bottom = float(p_rel[2] - half_extent[2])
+        #: Inside the box's interior volume: above the floor and below the rim.
+        below_rim = bool(bottom < self.TARGET_WALL_HEIGHT)
+        above_floor = bool(bottom >= floor_top - 0.003)
+        #: Resting on the *floor* of the box, which is a stronger claim than being inside it,
+        #: and the one that catches a Cookie perched on the rim.  See
+        #: `tests/test_cookie_stacked_containment.py` for why it is not merely stacking.
+        on_the_floor = bool(bottom <= floor_top + 0.004)
+        vertically_inside = bool(below_rim and above_floor)
         if self.task_config.require_released:
-            vertically_inside = vertically_inside and p_rel[2] - half_extent[2] <= floor_top + 0.004
-        if not footprint_inside or not vertically_inside:
-            return False
+            vertically_inside = vertically_inside and on_the_floor
+        # No early return: every clause is computed even when an earlier one has already
+        # decided the verdict, because the point of this function is to be read.
         upright = bool(
             abs(float(r_rel[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
             or abs(float(c_mat[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
@@ -938,13 +967,27 @@ class A3CookieTransferEnv(A3DualArmEnv):
             not self.task_config.require_released
             or not any(self.privileged_left_finger_contacts(index))
         )
-        return (
-            footprint_inside
-            and vertically_inside
-            and (upright or not self.task_config.require_upright)
-            and settled
-            and released
-        )
+        return {
+            "in_target": bool(
+                footprint_inside
+                and vertically_inside
+                and (upright or not self.task_config.require_upright)
+                and settled
+                and released
+            ),
+            # The named clauses, in the order a failure is worth reading them.
+            "footprint": footprint_inside,
+            "above_floor": above_floor,
+            "below_rim": below_rim,
+            "on_the_floor": on_the_floor,
+            "upright": upright,
+            "settled": settled,
+            "released": released,
+            # Measurements, for a report that has to say how far off something was.
+            "bottom_above_floor_m": bottom - floor_top,
+            "tilt_deg": float(np.degrees(np.arccos(np.clip(abs(float(r_rel[2, 2])), -1.0, 1.0)))),
+            "box_xy_mm": (float(p_rel[0]) * 1000.0, float(p_rel[1]) * 1000.0),
+        }
 
     def _cookie_inside_source(self, index: int) -> bool:
         return self._cookie_region_status(

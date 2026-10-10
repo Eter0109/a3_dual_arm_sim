@@ -183,6 +183,54 @@ def progress_line(info: dict[str, Any]) -> str | None:
     return f"in target {placed}/{required}   in source {source}"
 
 
+#: Read in the order a refusal is worth explaining, and printed in this order.
+CONTAINMENT_CLAUSES = (
+    "footprint",
+    "above_floor",
+    "below_rim",
+    "on_the_floor",
+    "upright",
+    "settled",
+    "released",
+)
+
+
+def containment_lines(env: Any) -> list[str]:
+    """One line per Cookie: is it in the box, and if not, which clause says not.
+
+    The scene's own computation, not a copy of it (`privileged_target_containment`), because a
+    diagnostic that re-derives the predicate is how the two come apart -- and this one has to
+    be trusted when it contradicts a viewer.
+
+    Empty for a scene that has no Cookies.
+    """
+
+    inquiry = getattr(env, "privileged_target_containment", None)
+    task_config = getattr(env, "task_config", None)
+    if inquiry is None or task_config is None:
+        return []
+    lines = []
+    for index in range(int(task_config.cookie_count)):
+        clause = inquiry(index)
+        above_floor_mm = 1000.0 * float(clause["bottom_above_floor_m"])
+        tilt = float(clause["tilt_deg"])
+        if clause["in_target"]:
+            lines.append(
+                f"cookie {index}: IN    floor {above_floor_mm:+.1f} mm   tilt {tilt:.1f} deg"
+            )
+            continue
+        failed = ",".join(name for name in CONTAINMENT_CLAUSES if not clause[name])
+        # A Cookie still in the jaws is not a placement at all, and saying so first is the
+        # difference between "it dropped it outside the box" and "it never let go": every
+        # other clause is then a statement about a Cookie in mid-air, which is why this one
+        # is printed first rather than in its position in the list.
+        label = "HELD " if not clause["released"] else "OUT  "
+        lines.append(
+            f"cookie {index}: {label} {failed}   floor {above_floor_mm:+.1f} mm   tilt {tilt:.1f} deg"
+        )
+    return lines
+
+
 class _SceneExpertDriver:
     """The scene's own scripted expert behind the gateway's three-member interface.
 
@@ -313,7 +361,23 @@ def main() -> int:
         gateway.reset(EpisodeContext(seed=args.seed, task=task, action_mode=env.action_mode))
 
         while not terminated and not truncated and step < args.steps:
+            action = gateway.act(observation, task)
+            observation, _, terminated, truncated, info = env.step(action)
             step += 1
+            # Recorded after the step, because the correction is the difference
+            # between what was asked for and what the environment applied -- and those two
+            # have to be in the same space to be subtracted.  `action` is the *policy's*
+            # vector, which is fourteen Cartesian deltas here while `applied_action` is
+            # always sixteen joints; `commanded_action` is the environment's own pre-limit
+            # target, in its own space, and on a joint-target arm it equals `action`
+            # exactly.  See `runner.py`'s call for the same distinction.
+            trace.record(requested=info["commanded_action"], applied=info["applied_action"])
+            # The frame is composited **after** the step, not before it.  Rendering first made
+            # a video's last frame always one step short of the outcome -- and for an episode
+            # that ended *because* of its last step (success, or a safety stop) that is the one
+            # step worth seeing.  It also put every label one step ahead of the state beside
+            # it, which is how a mid-episode frame came to be read as the final state of a
+            # successful roll-out and reported as a failure.
             view = (
                 env.render_view("front", height=args.view_size, width=args.view_size)
                 if args.view_size
@@ -349,21 +413,21 @@ def main() -> int:
             progress = progress_line(info)
             if progress is not None:
                 lines.insert(0, progress)
+            # And immediately after it, one line per Cookie saying which clause of the success
+            # contract each one is failing.  "in target 1/2" is the number a viewer reads a
+            # roll-out by and it is also the one that cannot be interpreted on its own: a
+            # Cookie on the floor outside the box, one inside it but tilted past the limit and
+            # one perched on the rim all print the same way.  The scene can say which, and it
+            # is the scene's own computation rather than a copy of it, because a recorded
+            # roll-out was once read as a correct placement rejected for resting on another
+            # Cookie and there was nothing in the frame to check that against.
+            first_cookie_line = 1 if progress is not None else 0
+            for offset, line in enumerate(containment_lines(env)):
+                lines.insert(first_cookie_line + offset, line)
             frame = composer.compose(view, cameras, lines, title=title)
             for packet in stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")):
                 container.mux(packet)
             frames += 1
-
-            action = gateway.act(observation, task)
-            observation, _, terminated, truncated, info = env.step(action)
-            # Recorded after the step, because the correction is the difference
-            # between what was asked for and what the environment applied -- and those two
-            # have to be in the same space to be subtracted.  `action` is the *policy's*
-            # vector, which is fourteen Cartesian deltas here while `applied_action` is
-            # always sixteen joints; `commanded_action` is the environment's own pre-limit
-            # target, in its own space, and on a joint-target arm it equals `action`
-            # exactly.  See `runner.py`'s call for the same distinction.
-            trace.record(requested=info["commanded_action"], applied=info["applied_action"])
 
             if step % 50 == 0:
                 elapsed = time.perf_counter() - started
@@ -384,6 +448,12 @@ def main() -> int:
 
         for packet in stream.encode():
             container.mux(packet)
+        # Captured here rather than after the `finally` below, which closes the environment:
+        # the containment lines are read out of `env.data`.  The outcome has to be the *final*
+        # one -- the per-50-step line is a progress report, and reading it as the result is how
+        # a successful roll-out was reported as a failure.
+        final_outcome = progress_line(info)
+        final_containment = containment_lines(env)
     finally:
         container.close()
         gateway.close()
@@ -393,8 +463,15 @@ def main() -> int:
     summary = trace.summary()
     print()
     print(f"frames     : {frames} in {elapsed:.1f}s ({frames / max(elapsed, 1e-6):.1f} fps)")
-    print(f"terminated : {terminated}   truncated: {truncated}")
+    print(
+        f"episode     : terminated={terminated} truncated={truncated}"
+        + (f"   safety: {info.get('safety_reason')}" if info.get("safety_reason") else "")
+    )
     print(f"behaviour  : {summary}")
+    if final_outcome is not None:
+        print(f"final      : {final_outcome}")
+    for line in final_containment:
+        print(f"final      : {line}")
     print(f"output     : {args.output}")
     return 0
 
