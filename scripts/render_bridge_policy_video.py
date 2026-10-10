@@ -308,7 +308,17 @@ def main() -> int:
     # The same trace the comparison uses, so the numbers on the video and the
     # numbers in a report are computed by one implementation.
     trace = BehaviorTrace()
-    trace.bind_limits(_arm_limits(env), getattr(env.config, "max_joint_step_rad", None))
+    # The behaviour figures are subtractions between the commanded and the applied action,
+    # so they are radians only while those entries are joint targets.  On this scene's arm
+    # they are the torques the operational-space controller solved for -- the same question
+    # `compare.run_manifest` asks -- and a trace that is not told so reports them anyway:
+    # 7 rad of "motion" per step against a 0.1 rad cap, with `corrected` at exactly zero.
+    joint_target = bool(getattr(env, "applied_action_is_joint_target", True))
+    trace.bind_limits(
+        _arm_limits(env),
+        getattr(env.config, "max_joint_step_rad", None) if joint_target else None,
+        joint_target=joint_target,
+    )
 
     fps = args.fps or int(getattr(env.config, "control_hz", 20))
     composer = FrameComposer(args.view_size, args.panel_size)
@@ -394,16 +404,13 @@ def main() -> int:
             # script printed "no model self-report" for a model that was reporting a
             # value estimate every step.
             model_info = gateway.metrics
+            # The step's behaviour figures, or the reason there are none.  They are ``None``
+            # rather than numbers on this scene -- see `_behaviour_lines` -- so the old
+            # ``summary.get(key, 0.0):.3f`` here would have raised on the first frame.
+            behaviour = _behaviour_lines(summary)
             lines = [
-                (
-                    f"step {step}   corrected {summary.get('corrected_fraction', 0.0):.3f}"
-                    f"   rate limited {summary.get('rate_limited_fraction', 0.0):.3f}"
-                    f"   saturated {summary.get('saturated_fraction', 0.0):.3f}"
-                ),
-                (
-                    f"correction max {summary.get('correction_max_rad', 0.0):.3f} rad"
-                    f"   motion mean {summary.get('motion_mean_rad', 0.0):.3f} rad"
-                ),
+                f"step {step}   {behaviour[0]}",
+                *behaviour[1:],
                 _model_line(model_info),
             ]
             # The scene's own counters go first when it has any: on a cookie scene
@@ -439,8 +446,7 @@ def main() -> int:
                 # cost.
                 outcome = progress_line(info)
                 print(
-                    f"  step {step:>4}  corrected {summary.get('corrected_fraction', 0.0):.3f}"
-                    f"  saturated {summary.get('saturated_fraction', 0.0):.3f}"
+                    f"  step {step:>4}  {_behaviour_lines(summary)[0]}"
                     + (f"  {outcome}" if outcome else "")
                     + f"  ({step / max(elapsed, 1e-6):.1f} steps/s)",
                     flush=True,
@@ -474,6 +480,34 @@ def main() -> int:
         print(f"final      : {line}")
     print(f"output     : {args.output}")
     return 0
+
+
+def _behaviour_lines(summary: dict[str, Any]) -> list[str]:
+    """One or two lines of per-step behaviour, or one line saying there is none.
+
+    The figures are subtractions between the commanded and the applied action, so they are
+    radians only while those entries are joint targets.  On this scene's arm they are the
+    torques the controller solved for -- see `_joint_target` in `bridge/compare.py` -- and
+    `BehaviorTrace.summary` returns them as ``None`` rather than as numbers it cannot
+    stand behind.  It carries the reason, and this prints it: an overlay that quietly
+    dropped the lines would read as a measurement that came out empty.
+
+    No step prefix, so both callers can label the lines their own way.
+    """
+
+    if summary.get("corrected_fraction") is None:
+        return ["behaviour n/a   (operational-space arm: the applied action is joint torque)"]
+    return [
+        (
+            f"corrected {summary['corrected_fraction']:.3f}"
+            f"   rate limited {summary['rate_limited_fraction']:.3f}"
+            f"   saturated {summary['saturated_fraction']:.3f}"
+        ),
+        (
+            f"correction max {summary['correction_max_rad']:.3f} rad"
+            f"   motion mean {summary['motion_mean_rad']:.3f} rad"
+        ),
+    ]
 
 
 def _model_line(info: dict[str, Any]) -> str:

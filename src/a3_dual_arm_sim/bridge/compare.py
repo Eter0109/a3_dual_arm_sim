@@ -78,12 +78,28 @@ class BehaviorTrace:
     #: needed because a motion figure that equals it is otherwise unreadable: every
     #: model would appear to move at exactly the same speed.
     _rate_limit: float | None = None
+    #: Whether the arm entries of the recorded vectors are joint targets at all.
+    #: False under an operational-space adapter, where they are torques; see
+    #: `Env.applied_action_is_joint_target` and `summary`.
+    _joint_target: bool = True
 
-    def bind_limits(self, limits: np.ndarray, rate_limit: float | None = None) -> None:
-        """Attach the fourteen arm-joint ``(low, high)`` pairs and the step cap."""
+    def bind_limits(
+        self,
+        limits: np.ndarray,
+        rate_limit: float | None = None,
+        *,
+        joint_target: bool = True,
+    ) -> None:
+        """Attach the fourteen arm-joint ``(low, high)`` pairs and the step cap.
+
+        ``joint_target=False`` says the vectors this trace is about to be fed are not
+        joint targets -- which is the case on any scene whose arm is driven by
+        `OperationalSpaceAdapter`, and is not something the trace can see for itself.
+        """
 
         self._limits = np.asarray(limits, dtype=np.float64)
         self._rate_limit = None if rate_limit is None else float(rate_limit)
+        self._joint_target = bool(joint_target)
 
     def record(self, requested: Any, applied: Any) -> None:
         """Fold one step in.  ``requested`` is what the policy asked for."""
@@ -95,6 +111,19 @@ class BehaviorTrace:
                 "behaviour tracing needs the environment's sixteen-dimensional action "
                 f"vector, got requested={wanted.shape} applied={got.shape}"
             )
+        self.steps += 1
+        if not self._joint_target:
+            # Every number below is a subtraction between two entries of these vectors
+            # compared against a bound in radians, and on a torque-driven arm that is
+            # a torque compared against a radian cap.  It is not a small error: on the
+            # two-Cookie scene -- LIBERO's Panda under `OperationalSpaceAdapter` -- the
+            # table reported 7.7 rad of mean "motion" per step against a 0.1 rad cap,
+            # and `corrected` read exactly zero for every step because
+            # `_limit_joint_action` deliberately neither clips nor rate-limits torques.
+            # A reader told that `corrected` is "the clearest single sign that a model
+            # is not driving this robot" would have read both as facts about the model.
+            # Counted, and reported as unavailable; see `summary`.
+            return
         arms = _arm_indices()
         correction = float(np.max(np.abs(got[arms] - wanted[arms])))
         self.correction_rad.append(correction)
@@ -117,7 +146,6 @@ class BehaviorTrace:
                 # scale is wrong for this robot, not merely clipped at a limit.
                 self.rate_limited_steps += 1
         self._previous = got.copy()
-        self.steps += 1
 
     def reset(self) -> None:
         """Clear the per-episode counters, keeping the environment's constants.
@@ -142,6 +170,27 @@ class BehaviorTrace:
 
         if self.steps == 0:
             return {}
+        if not self._joint_target:
+            # Keys present and null rather than absent: a consumer that looks them up
+            # gets "unknown" instead of a default, and the table renders the em dash.
+            # The reason travels with them, because a null column is otherwise read as
+            # a missing measurement rather than as a measurement that means nothing here.
+            return {
+                "behaviour_steps": self.steps,
+                "behaviour_joint_space": False,
+                "behaviour_note": (
+                    "the arm is driven by operational-space control, so the applied "
+                    "action is joint torque: correction, saturation and motion are not "
+                    "radians and are not reported"
+                ),
+                "corrected_fraction": None,
+                "saturated_fraction": None,
+                "rate_limited_fraction": None,
+                "correction_mean_rad": None,
+                "correction_max_rad": None,
+                "motion_mean_rad": None,
+                "motion_max_rad": None,
+            }
         correction = np.asarray(self.correction_rad, dtype=np.float64)
         motion = np.asarray(self.motion_rad, dtype=np.float64) if self.motion_rad else np.zeros(1)
         samples = max(1, len(self.motion_rad))
@@ -179,8 +228,14 @@ class PolicyTrace:
         self.action_mode = policy.action_mode
         self.trace = BehaviorTrace()
 
-    def bind_limits(self, limits: np.ndarray, rate_limit: float | None = None) -> None:
-        self.trace.bind_limits(limits, rate_limit)
+    def bind_limits(
+        self,
+        limits: np.ndarray,
+        rate_limit: float | None = None,
+        *,
+        joint_target: bool = True,
+    ) -> None:
+        self.trace.bind_limits(limits, rate_limit, joint_target=joint_target)
 
     def observe_step(self, *, requested: Any, applied: Any, info: Mapping[str, Any]) -> None:
         self.trace.record(requested, applied)
@@ -468,7 +523,17 @@ def run_manifest(
         try:
             gateway = policy_factory(manifest, env)
             trace = PolicyTrace(gateway)
-            trace.bind_limits(_arm_limits(env), getattr(env.config, "max_joint_step_rad", None))
+            # The behaviour numbers are subtractions between entries of the commanded
+            # and applied action vectors, so they are only radians while those entries
+            # are joint targets.  On a torque-driven arm they are not, and the trace is
+            # told so rather than left to report them anyway -- see
+            # `BehaviorTrace.record` for what that produced before.
+            joint_target = bool(getattr(env, "applied_action_is_joint_target", True))
+            trace.bind_limits(
+                _arm_limits(env),
+                getattr(env.config, "max_joint_step_rad", None) if joint_target else None,
+                joint_target=joint_target,
+            )
             runner = EpisodeRunner(
                 env,
                 trace,
@@ -698,6 +763,14 @@ def format_table(report: ComparisonReport) -> str:
                 "environment cannot overrule a command to stand still. A low value "
                 "beside a low **motion mean** is inaction, not competence, so the "
                 "progress column is the one to lead with."
+            ),
+            (
+                "- **an em dash in the five figures from `corrected` to `motion mean`** "
+                "— the scene's arm is driven by operational-space control, so the applied "
+                "action is joint **torque** and every one of those figures is a torque "
+                "compared against a bound in radians. They are reported as `null` in the "
+                "JSON (with `behaviour_note` saying why) and as `—` here, rather than as "
+                "the `0.000` a reader would take for a model driving the arm cleanly."
             ),
             (
                 "- **rate limited** — the subset of those corrections caused by the "

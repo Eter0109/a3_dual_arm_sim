@@ -1,0 +1,82 @@
+# The 15,000-step two-Cookie π0.5 fine-tune, read at its 5,000-step checkpoint.
+#
+# This file exists for one question and nothing else: **is the run still improving
+# when it stops?**  Three manifests that differ only in which checkpoint they load
+# are how that is asked -- a single number at 15k cannot distinguish "converged"
+# from "still climbing", and the training loss answers it only for the objective,
+# not for the task.  Measured on one `a3-sim compare` invocation, the three share
+# a seed sweep, so the layouts each sees are the same and the only difference
+# between the columns is how long the same run trained.
+#
+# Every field below is `pi05_a3_two_cookie_15k.yaml`'s, verbatim except for
+# `name`, `notes` and the checkpoint path.  Why each value is what it is --
+# `dims: 14` against a 16-wide state, `execute: 50` from the checkpoint's own
+# `n_action_steps`, the `clip` pair `cartesian_delta` requires -- is written out
+# there and is not repeated here.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_5k.yaml
+
+name: pi05-a3-two-cookie-5k
+notes: >
+  The same fine-tune as `pi05-a3-two-cookie-15k`, read at step 5,000 of 15,000.
+  One point on a convergence curve, not a policy to deploy.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_unfreeze_15k/checkpoints/005000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

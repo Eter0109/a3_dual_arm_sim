@@ -91,6 +91,31 @@ def test_a_torque_arm_refuses_to_name_its_command() -> None:
         env.close()
 
 
+def test_the_question_a_trace_asks_answers_for_both_arms() -> None:
+    """`applied_action_is_joint_target` is the form a caller can act on.
+
+    `canonical_action_mode` raises for a torque-driven arm, which is the right answer for a
+    recorder -- there is no space to store those numbers in.  A behavioural trace is not
+    storing the vector, it is subtracting it, so it has to be able to ask "is this a
+    distance in radians?" and get an answer.  It could not, so it assumed yes, and the
+    comparison table printed the result: 7.7 rad of mean per-step "motion" against a 0.1 rad
+    cap, with ``corrected`` -- "the clearest single sign that a model is not driving this
+    robot" -- at exactly zero.
+    """
+
+    joint = scene_by_name(JOINT_ARM_SCENE).build_env(0.0, 0.0)
+    try:
+        assert joint.applied_action_is_joint_target is True
+    finally:
+        joint.close()
+
+    torque = scene_by_name(TORQUE_ARM_SCENE).build_env(0.0, 0.0)
+    try:
+        assert torque.applied_action_is_joint_target is False
+    finally:
+        torque.close()
+
+
 def test_the_runner_refuses_to_store_torque_as_joint_positions() -> None:
     """The default recording choice must fail loudly rather than write the wrong numbers.
 

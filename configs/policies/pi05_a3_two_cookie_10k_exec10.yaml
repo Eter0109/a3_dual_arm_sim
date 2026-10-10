@@ -1,0 +1,107 @@
+# The same 10,000-step checkpoint, re-planned every 10 steps instead of every 50.
+#
+# Why this exists
+# ---------------
+# Twenty seeds at each of 5k/10k/15k put task success at **0/20 for all three** and
+# `success_peak` at 0/20 for all three, while the rate at which *one* Cookie ever
+# entered the box rose 1/20 -> 8/20 -> 6/20.  So the run had converged on the
+# sub-skill it did learn by 10k, and the second placement is not a training-length
+# problem: nothing in sixty rollouts ever reached two Cookies in the box.
+#
+# What the sixty rollouts do say is that the second grasp is barely attempted, and
+# that 12 of them ended at step 23-27 on `joint velocity exceeded safety threshold`
+# -- a stop the expert tripped **zero** times in 522 collection attempts.  The
+# policy commands motion outside anything the demonstrations contain.
+#
+# `execute: 50` is the obvious amplifier of that: at 20 Hz it is 2.5 seconds of
+# blind motion per inference, and both failure modes named here (a grasp that
+# topples, a phase that never starts) are ones a long open loop hides.  The finding
+# that justified `execute: 50` (`docs/policy-interface.md` 12) measured *agreement
+# with the demonstrated actions in radians* on the joint task, and its own
+# conclusion is conditioned on a CPU-only host.  Neither applies here: this
+# checkpoint's `request_mean_ms` is 223, so re-planning five times as often costs
+# about 9 seconds of a 34-second episode.
+#
+# The risk this experiment has to be read against: `ChunkBuffer` drops the tail
+# rather than ensembling overlapping plans, so a smaller `execute` also means fresh
+# flow-matching noise five times as often.  If the closed loop measures *worse*,
+# that is the reason to expect, and the answer is temporal ensembling rather than
+# a return to 50.
+#
+# Every field below is `pi05_a3_two_cookie_10k.yaml`'s except `name`, `notes` and
+# `execute`; that file, and `pi05_a3_two_cookie_15k.yaml`, say why each other value
+# is what it is.
+#
+# Run against its own baseline in one invocation, so the two columns share a seed
+# sweep and the layouts are identical seed for seed:
+#   a3-sim compare --scene a3_libero_panda_two_cookies \
+#     --manifest configs/policies/pi05_a3_two_cookie_10k.yaml \
+#     --manifest configs/policies/pi05_a3_two_cookie_10k_exec10.yaml \
+#     --seeds 0-19 --steps 400 --fast-render
+
+name: pi05-a3-two-cookie-10k-exec10
+notes: >
+  The 10,000-step two-Cookie checkpoint with `execute: 10` instead of 50: 0.5 s of
+  open loop per inference instead of 2.5 s.  Tests whether the second placement
+  depends on closing the loop, at the checkpoint where the first placement is best.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_unfreeze_15k/checkpoints/010000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  # The one difference from the 10k manifest.  Still a whole chunk is predicted;
+  # only the first ten rows are executed before the next observation.
+  execute: 10
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

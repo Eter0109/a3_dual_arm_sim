@@ -275,6 +275,27 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         return "joint_position"
 
     @property
+    def applied_action_is_joint_target(self) -> bool:
+        """Whether ``applied_action``'s arm entries are joint targets.
+
+        The question `canonical_action_mode` refuses to answer for a torque-driven
+        arm, asked in the form a caller can act on.  A behavioural trace has to know
+        this before it subtracts anything: under `OperationalSpaceAdapter` the arm
+        entries are the torques the controller solved for, so a subtraction against
+        them is not a distance in radians and a bound in radians is not the bound it
+        was compared against.
+
+        Derived from `canonical_action_mode` rather than from a second ``isinstance``
+        check, so the two cannot drift apart: one place decides what this vector is.
+        """
+
+        try:
+            self.canonical_action_mode
+        except ValueError:
+            return False
+        return True
+
+    @property
     def current_joint_action(self) -> np.ndarray:
         return self._current_joint_action()
 

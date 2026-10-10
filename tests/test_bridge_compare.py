@@ -25,6 +25,7 @@ from a3_dual_arm_sim.bridge.compare import (
     ComparisonReport,
     ManifestResult,
     PolicyTrace,
+    _cell,
     _self_report,
     format_table,
     regime_groups,
@@ -334,10 +335,58 @@ def test_a_second_episode_is_measured_with_the_same_constants() -> None:
         assert summary["rate_limited_fraction"] == 1.0, "the cap must survive too"
 
 
+def test_a_torque_arm_is_reported_as_unavailable_rather_than_in_radians() -> None:
+    """The five radian figures are not numbers on an arm that is commanded in torques.
+
+    Each one is a subtraction between entries of the commanded and applied action compared
+    against a bound in radians, and on the Panda scenes those entries are the torques the
+    operational-space controller solved for.  Reporting them anyway is how the two-Cookie
+    table came to show 7.7 rad of mean per-step "motion" against a 0.1 rad cap, and to read
+    ``corrected`` -- "the clearest single sign that a model is not driving this robot" -- as
+    exactly zero, which is what a model driving the arm perfectly well reads as too.
+    """
+
+    trace = BehaviorTrace()
+    trace.bind_limits(limits(), rate_limit=0.05, joint_target=False)
+    trace.record(requested=action(j0=0.5), applied=action(j0=0.5))
+    # A four-fold overrule between the two vectors.  On a joint arm this is a correction of
+    # 2.5 rad and must be counted; here it is two torques being subtracted.
+    trace.record(requested=action(j0=0.5), applied=action(j0=3.0))
+
+    summary = trace.summary()
+
+    assert summary["behaviour_steps"] == 2, "the steps were observed and are still counted"
+    assert summary["behaviour_joint_space"] is False
+    assert "operational-space" in summary["behaviour_note"]
+    for key in (
+        "corrected_fraction",
+        "saturated_fraction",
+        "rate_limited_fraction",
+        "correction_mean_rad",
+        "correction_max_rad",
+        "motion_mean_rad",
+        "motion_max_rad",
+    ):
+        assert summary[key] is None, f"{key} means nothing here and must not be a number"
+        assert _cell(summary[key]) == "—", "the table must say so, not print 0.000"
+
+
+def test_the_trace_is_told_which_kind_of_arm_it_is_measuring() -> None:
+    """`PolicyTrace` forwards the flag, because the loop that drives it holds only a policy."""
+
+    wrapped = PolicyTrace(FakePolicy())
+    wrapped.bind_limits(limits(), rate_limit=0.05, joint_target=False)
+    wrapped.observe_step(requested=action(j0=0.5), applied=action(j0=3.0), info={})
+
+    summary = wrapped.trace.summary()
+
+    assert summary["behaviour_steps"] == 1
+    assert summary["corrected_fraction"] is None, "a torque difference is not a correction"
+
+
 # ---------------------------------------------------------------------------
 # the report
 # ---------------------------------------------------------------------------
-
 
 def result(name: str, regime: str, **aggregate: object) -> ManifestResult:
     item = ManifestResult(

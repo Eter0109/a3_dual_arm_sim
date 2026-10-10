@@ -1,0 +1,80 @@
+# The 15,000-step two-Cookie π0.5 fine-tune, read at its 10,000-step checkpoint.
+#
+# See `pi05_a3_two_cookie_5k.yaml` for what the three checkpoints are for; this is
+# the middle point, and it is the one that matters most for the decision the set
+# exists to make.  The training log puts the loss flat from about 10-12k, so if
+# the task metric also stops moving between 10k and 15k, the run had converged by
+# 10k and more steps are not the lever; if the metric is still climbing there
+# while the loss is flat, then the objective and the task disagree and the loss
+# curve was never evidence about the task.
+#
+# Every field below is `pi05_a3_two_cookie_15k.yaml`'s, verbatim except for
+# `name`, `notes` and the checkpoint path; that file says why each value is what
+# it is.
+#
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_10k.yaml
+
+name: pi05-a3-two-cookie-10k
+notes: >
+  The same fine-tune as `pi05-a3-two-cookie-15k`, read at step 10,000 of 15,000.
+  The flat point of the training loss, so it is the checkpoint that decides
+  whether the loss curve says anything about the task.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_unfreeze_15k/checkpoints/010000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
