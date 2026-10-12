@@ -1,6 +1,6 @@
 # SmolVLA 训练与测试全流程
 
-统一任务入口、500 步数量评分、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](project_status.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
+统一任务入口、500 步数量评分、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](limitations.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
 
 本流程以 A3 MuJoCo 左臂装盒为示例。示例数据为
 [`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)，
@@ -25,9 +25,9 @@ a3-sim train-smolvla --help
 
 ## 2. 下载与版本记录
 
-发布验证使用的 Hub revision：
+发布验证使用的 Hub 版本：
 
-| 资源 | revision |
+| 资源 | 版本 |
 | --- | --- |
 | 数据 | `8fdd8a7caf8275eba8be8a83b53a99176a084062` |
 | SmolVLA 基座 | `d9f33c94a60fb382c90dea2164c96845bd955e28` |
@@ -43,7 +43,7 @@ a3-sim download-smolvla \
   --manifest outputs/download_manifest.json
 ```
 
-下载器保存数据、完整基座及其 VLM 配置/tokenizer 依赖，记录真实 commit 与本地路径。完整 SmolVLA 基座已含 VLM 权重；辅助快照只下载配置和 tokenizer，不重复下载 VLM 权重或示例视频。VLM 放 Hugging Face 缓存，模型目录的 `a3_dependencies.json` 指向对应快照。可用 `HF_HOME`、`HF_HUB_CACHE` 指定缓存位置；移动缓存后需重新下载/更新依赖记录。下载目录必须为空，或由本下载器标记为同一 repo/revision；相同 revision 的中断下载可重试，不混入旧数据。
+下载器保存数据、完整基座及其 VLM 配置/tokenizer 依赖，记录真实 commit 与本地路径。完整 SmolVLA 基座已含 VLM 权重；辅助快照只下载配置和 tokenizer，不重复下载 VLM 权重或示例视频。VLM 放 Hugging Face 缓存，模型目录的 `a3_dependencies.json` 指向对应快照。可用 `HF_HOME`、`HF_HUB_CACHE` 指定缓存位置；移动缓存后需重新下载/更新依赖记录。下载目录必须为空，或由本下载器标记为同一 repo/版本；相同版本的中断下载可重试，不混入旧数据。
 
 也可以使用标准 Hugging Face CLI 手动下载：
 
@@ -67,9 +67,9 @@ python examples/audit_smolvla_data.py \
   --output outputs/data_audit.json
 ```
 
-预期数据契约：v3.0、100 episodes、42,681 帧、20 FPS，8D state/action，三路 256×256 RGB。审计遍历 parquet 检查维度、有限值、episode/frame 数、连续索引、时间戳及统计量；每 episode 抽检一帧三路图像。`collection_summary.json` 和 `a3_episode_metadata.jsonl` 必须与数据一致且满足成功演示契约。图像抽样审计不代表全部图像已解码验证，动作对齐还需回放检查。
+预期数据契约：v3.0、100 回合、42,681 帧、20 FPS，8D 状态/动作，三路 256×256 RGB。审计遍历 parquet 检查维度、有限值、回合数和帧数、连续索引、时间戳及统计量；每回合抽检一帧三路图像。`collection_summary.json` 和 `a3_episode_metadata.jsonl` 必须与数据一致且满足成功演示契约。图像抽样审计不代表全部图像已解码验证，动作对齐还需回放检查。
 
-失败时先检查是否下载完整、选错 revision 或把 16D 数据误当作 8D。不要通过跳过校验强行训练。
+失败时先检查是否下载完整、选错版本或把 16D 数据误当作 8D。不要通过跳过校验强行训练。
 
 ## 4. 配置适配与训练冒烟
 
@@ -98,7 +98,7 @@ a3-sim train-smolvla \
   --seed 1000 --device cuda 2>&1 | tee outputs/smolvla_smoke/train.log
 ```
 
-运行前确保 `outputs/smolvla_smoke` 已由 dry-run 创建，或手动 `mkdir -p outputs/smolvla_smoke`。预期输出：`model_launch.json`、训练日志、检查点中的配置、processor、权重及训练状态。末次训练退出必须为 0，并保存有效检查点。公开训练入口禁用环境评估（`eval_freq=0`）；本项目用自己的 MuJoCo benchmark 测试。
+运行前确保 `outputs/smolvla_smoke` 已由试运行创建，或手动 `mkdir -p outputs/smolvla_smoke`。预期输出：`model_launch.json`、训练日志、检查点中的配置、处理器、权重及训练状态。末次训练退出必须为 0，并保存有效检查点。公开训练入口禁用环境评估（`eval_freq=0`）；本项目用自己的 MuJoCo 评测测试。
 
 ## 5. 完整训练与恢复
 
@@ -126,7 +126,7 @@ python -m lerobot.scripts.lerobot_train \
   --resume=true
 ```
 
-恢复依赖同一环境、数据、源模型和 optimizer 状态；不要修改训练配置后冒充同一次 run。保留 launch、下载 manifest 和各阶段日志。
+恢复依赖同一环境、数据、源模型和 optimizer 状态；不要修改训练配置后冒充同一次实验运行。保留 launch、下载 manifest 和各阶段日志。
 
 ## 6. 检查点与离线误差
 
@@ -143,9 +143,9 @@ python examples/smolvla_offline_error.py \
   --output outputs/smolvla_20k/offline_error.json
 ```
 
-检查点需包含 `config.json`、`model.safetensors`、processor 配置与状态。训练公开版只保存普通权重，不传入本地分支专用 EMA 参数；可显式部署已有 `pretrained_model_ema`。传 run 根目录时解析器选择最新数字步数目录，并优先同一步 EMA；可重复比较必须传完整目录，不能依赖自动选择。
+检查点需包含 `config.json`、`model.safetensors`、处理器配置与状态。训练公开版只保存普通权重，不传入本地分支专用 EMA 参数；可显式部署已有 `pretrained_model_ema`。传实验运行根目录时解析器选择最新数字步数目录，并优先同一步 EMA；可重复比较必须传完整目录，不能依赖自动选择。
 
-离线脚本在训练数据上抽取每 episode 至多五帧，报告 teacher-forced 首动作关节 MAE 与夹爪误差，不是 held-out 泛化指标，也不是装盒成功率。
+离线脚本在训练数据上抽取每回合至多五帧，报告基于真实观测的首动作关节 MAE 与夹爪误差，不是独立留出泛化指标，也不是装盒成功率。
 
 ## 7. 20 控制步部署冒烟
 
@@ -163,7 +163,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 预期模型重新加载、三相机渲染、动作反归一化和 8D→16D 执行链路正常，并写报告。20 步通常无法完成任务，`success=false` 不自动表示加载故障；检查实际执行步数和失败原因。该结果只用于接口冒烟。
 
-## 8. 多 episode 闭环评估与诊断
+## 8. 多回合闭环评估与诊断
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
@@ -173,7 +173,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --episodes 20 --seed-start 1000 --max-steps 500 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --output outputs/smolvla_20k/dev20.json
-# 单 episode 动作与三路视频追踪；diagnostic-dir 必须为新目录
+# 单 回合 动作与三路视频追踪；diagnostic-dir 必须为新目录
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --policy "smolvla:$CHECKPOINT" --dataset-root datasets/a3_front_close_left_100 \
   --episodes 1 --seed-start 1000 --max-steps 500 --workers 1 \
@@ -182,7 +182,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --output outputs/smolvla_20k/trace_result.json
 ```
 
-正式验收用单独 seed 区间（例如 3000–3019），开发调参不要提前使用。对照专家时保持 seed、随机化、场景和最大步数一致。主要报告最终平均入盒数、总入盒数和逐 episode 数量；完整成功标志保留作诊断，同时记录失败原因、控制/物理频率、预测与执行 horizon、检查点类型、权重 SHA256、数据 revision 与推理 seed。默认扰动盒和饼干；固定布局需要两个 `--no-randomize-*` 开关。
+正式验收用单独随机种子区间（例如 3000–3019），开发调参不要提前使用。对照专家时保持随机种子、随机化、场景和最大步数一致。主要报告最终平均入盒数、总入盒数和逐回合数量；完整成功标志保留作诊断，同时记录失败原因、控制/物理频率、预测与执行动作时域、检查点类型、权重 SHA256、数据版本与推理随机种子。默认扰动盒和饼干；固定布局需要两个 `--no-randomize-*` 开关。
 
 诊断区分 `raw_action`、`processed_action`、`applied_action`：分别是反归一化预测、策略后处理结果与环境应用动作。部署默认不启用夹爪锐化、右臂规则锚定、动作平滑或几何修正；左臂模型的右臂保持仍是必要接口行为。高级对照工具见 [入口索引](experiments.md)。
 
@@ -190,14 +190,14 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 | 症状 | 检查与处理 |
 | --- | --- |
-| Hub SSL/超时 | 重试相同 revision，检查网络与代理；不关闭 TLS 校验 |
+| Hub SSL/超时 | 重试相同版本，检查网络与代理；不关闭 TLS 校验 |
 | 离线找不到 tokenizer/VLM | 先完整下载依赖；确认 `HF_HOME` 与下载时一致，在线模式默认允许获取缺失文件 |
 | `unrecognized arguments` | 检查是否使用锁定公开 LeRobot 0.5.1，避免加载本机分支 |
 | CUDA 不可用 / OOM | 核对 Torch 与驱动，降低批大小；CPU 只建议少量验证 |
 | 8D/16D 或相机键不匹配 | 重跑审计，确认使用适配后的检查点与对应训练数据 |
-| processor stats 不匹配 | 不要混用其他数据统计或旧检查点，核对保存的 processor |
+| 处理器 stats 不匹配 | 不要混用其他数据统计或旧检查点，核对保存的处理器 |
 | EGL 相机加载失败 | 检查驱动和渲染后端，先跑相机预览 |
-| loss 很低但空抓/失败 | 检查动作轨迹、执行 horizon、首抓与恢复；不要用训练 loss 代替闭环对照 |
+| 损失很低但空抓/失败 | 检查动作轨迹、执行动作时域、首抓与恢复；不要用训练损失代替闭环对照 |
 | 输出目录已存在 | 新训练用新目录；恢复用训练器 resume，不覆盖旧结果 |
 
-本次实际完成的下载、短训练和部署验证，以及未完成事项，统一见 [发布检查](release_checklist.md)。
+环境兼容性与功能边界见 [已知限制](limitations.md)。

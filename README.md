@@ -11,7 +11,7 @@ A3 机器人双臂仿真项目，提供规则专家、键盘遥操作、可替�
 
 ## 安装与快速运行
 
-推荐 Linux、Python 3.12；本次实际验证环境见 [发布检查](docs/release_checklist.md)。在仓库根目录执行：
+推荐 Linux、Python 3.12；环境要求与依赖兼容问题见 [已知限制](docs/limitations.md)。在仓库根目录执行：
 
 ```bash
 python -m venv .venv
@@ -37,87 +37,26 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 [`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)。
 仓库不附带数据、模型权重或训练结果；首次使用需要下载。完整命令见训练手册。
 
+## 学生使用建议
+
+先在独立虚拟环境安装，再按快速运行检查仿真；随后沿完整流程指南依次完成少量采集、数据审计、短训练和评测。训练依赖固定为公开版 `lerobot==0.5.1`，不要混用其他 LeRobot 开发仓库。2×5 模型用于 2×10 时属于迁移实验，不应直接作为已经解决该任务的演示模型；使用边界见 [已知限制](docs/limitations.md)。
+
 ## 文档导航
 
-从采集到部署优先阅读 [完整流程指南](docs/workflow_guide.md)，覆盖已有策略采集、SmolVLA/ACT 训练、统一 benchmark、六项网格测试及自定义 policy。当前完整度与改进优先级见 [项目检查](docs/project_status.md)。
+从采集到部署优先阅读 [完整流程指南](docs/workflow_guide.md)，覆盖已有策略采集、SmolVLA/ACT 训练、统一评测、六项网格测试及自定义策略。使用范围与兼容性边界见 [已知限制](docs/limitations.md)。
 
 - [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
-- [操作手册](docs/operations.md)：场景、专家、遥操作、相机、采集和回放。
 - [2×5 分级随机化与专家采集](docs/randomization.md)：两批各五个，配置强度、来源列和外观，采集与续采。
 - [2×10 专家演示与数据采集](docs/cookie_2x10.md)：配置首夹数量，运行四次抓取、图形演示与采集。
 - [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
 - [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
-- [发布检查与限制](docs/release_checklist.md)：验证记录与待解决的发布阻碍。
-
-## 2×5 数据采集
-
-在仓库根目录、已安装训练与数据依赖的环境中执行：
-
-```bash
-MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
-  --randomization-config configs/randomization.yaml \
-  --episodes 5 --max-attempts 15 \
-  --root datasets/cookie_advanced_random_trial \
-  --repo-id local/cookie-advanced-random-trial
-```
-
-先在 `configs/randomization.yaml` 中设置 `profile: advanced` 和
-`source_column: random`。`profile` 选择 basic/medium/advanced，`source_column`
-独立选择 1/2/3/4/random；所有幅度与颜色也在该文件中调整。
-上述采集脚本不接受 `--profile` 和 `--source-column`，这两个覆盖参数属于统一 benchmark。基础档保持原有小范围布局变化，
-中级增加轻微相机和光照变化，高级进一步增大变化并从四种饼干颜色中每轮选择一种。
-三档共用专家主体，并针对不同列调整控制策略，仍采集单盒、两批各五块的整任务
-LeRobot v3 数据，不使用 Planner/Verifier，也不切分 skill。
-
-`--episodes` 是目标成功保存条数，`--max-attempts` 是包括失败在内的总尝试上限。
-随机列均衡的是尝试分配，不保证最终成功数据各列等量。每组设置使用独立数据目录；
-不要直接续采旧版缺少随机化元数据的数据集。详细参数、恢复采集和评估方式见
-[随机化说明](docs/randomization.md)。上述 EGL 写法适用于 Linux 无头服务器；
-Windows 使用 PowerShell 时省略 `MUJOCO_GL=egl` 前缀，并将多行命令合成一行。
-
-## 2×10 专家演示与数据采集
-
-在 `configs/randomization_2x10.yaml` 设置：
-
-```yaml
-profile: basic        # basic / medium / advanced
-source_column: 1      # 1 / 2 / 3 / 4 / random
-first_grasp: random   # 0–9 / random
-```
-
-三个选项分别控制环境扰动强度、来源列和首夹数量。`first_grasp: 3` 执行
-`[3,7,3,7]`，前两次填满目标第 1 列，后两次填满第 2 列；`0` 跳过第 1、3 次。
-数量 `random` 每个 episode 抽一次，首夹与第三夹共用该数量。
-来源列 `random` 按原有的四列均衡规则抽样，与数量和强度独立。
-
-在仓库根目录、已激活的 Python 环境中执行：
-
-```bash
-# 查看计划与实际任务指令。
-python examples/collect_cookie_2x10.py --dry-run
-
-# 在桌面环境中观看专家抓取。
-env -u MUJOCO_GL python examples/run_cookie_2x10.py --render
-
-# 采集完整回合。
-MUJOCO_GL=egl python examples/collect_cookie_2x10.py \
-  --randomization-config configs/randomization_2x10.yaml \
-  --episodes 5 --max-attempts 15 \
-  --root datasets/cookie_2x10_trial --repo-id local/cookie-2x10-trial
-```
-
-默认读取 2×10 采集配置。复制配置后可通过 `--randomization-config` 指定实验文件。
-续采使用相同配置、数据目录、repo-id 和 seed 起点，加 `--resume`。
-成功要求目标两列各十个、共二十个，源盒保留六十个。详细用法见
-[2×10 使用说明](docs/cookie_2x10.md)。
-正式采集前先用不同 seed 试跑，并抽查三路视频；采集允许失败尝试，训练集只保留
-通过数量、抬升和释放检查的完整回合。采集完成后再审计数据并训练 SmolVLA。
+- [使用范围与已知限制](docs/limitations.md)：环境兼容性、任务边界及数据注意事项。
 
 ## 统一评测与网格测试
 
-两个任务统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task 2x5|2x10` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。按 episode 结束时的目标盒饼干数量计分，2×5 满分 10、2×10 满分 20。
+两个任务统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task 2x5|2x10` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。按回合结束时的目标盒饼干数量计分，2×5 满分 10、2×10 满分 20。
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
@@ -141,4 +80,4 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
 源码包和 wheel 附带仿真配置、URDF 与必要网格，不需要其他项目目录。
 数据、下载模型与输出分别放在 `datasets/`、`models/<模型名>/`、`outputs/`；
 评估截图和诊断产物放在 `artifacts/`，这些产物不提交 Git。
-机器人资源来源与第三方声明见 [PROVENANCE](assets/a3/PROVENANCE.md)。源码及 A3 原始资源的再分发授权尚需维护者确认；当前整理不代表已解决公开发布许可。
+机器人资源来源与第三方声明见 [资源来源声明](assets/a3/PROVENANCE.md)。源码与项目文档采用 [MIT 许可证](LICENSE)。维护者已确认 A3 资源的公开再分发授权；第三方资源的适用范围见资源来源声明。

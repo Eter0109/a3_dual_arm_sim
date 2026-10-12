@@ -7,6 +7,7 @@ name = "a3-dual-arm-sim"
 version = "0.1.0"
 description = "Policy-neutral MuJoCo sandbox and LeRobot recorder for the A3 dual-arm robot"
 readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.12"
 dependencies = [
   "gymnasium>=1.0,<2",

@@ -70,7 +70,9 @@ def test_discarded_episode_leaves_no_staged_frames(tmp_path: Path, use_videos: b
         use_videos=use_videos,
     )
     try:
-        recorder.start_episode(EpisodeContext(seed=1, task="discard test", action_mode="joint_position"), "test")
+        recorder.start_episode(
+            EpisodeContext(seed=1, task="discard test", action_mode="joint_position"), "test"
+        )
         for _ in range(4):
             observation, action = fake_frame(rng)
             recorder.add_frame(observation, action)
@@ -97,7 +99,9 @@ def test_saved_episode_leaves_no_staged_frames(tmp_path: Path) -> None:
         use_videos=True,
     )
     try:
-        recorder.start_episode(EpisodeContext(seed=1, task="save test", action_mode="joint_position"), "test")
+        recorder.start_episode(
+            EpisodeContext(seed=1, task="save test", action_mode="joint_position"), "test"
+        )
         for _ in range(4):
             observation, action = fake_frame(rng)
             recorder.add_frame(observation, action)

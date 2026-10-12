@@ -4,24 +4,24 @@
 随机化强度和来源列是两个独立选项；`source_column: random` 只随机选列，
 每批数量固定为五个。2×10 用法见 [2×10 专家演示与数据采集](cookie_2x10.md)。
 
-| 参数 / Parameter | basic | medium | advanced |
+| 参数 | basic | medium | advanced |
 |---|---:|---:|---:|
-| 源盒、目标盒 XY 各轴 / box XY | ±10 mm | ±15 mm | ±20 mm |
-| 目标盒 yaw | ±0.030 rad | ±0.050 rad | ±0.080 rad |
-| 饼干 XY、yaw | ±0.3 mm、±0.015 rad | 相同 | 相同 |
-| 固定相机位置各轴 / fixed camera | 0 | ±4 mm | ±9 mm |
-| 腕相机安装位置各轴 / wrist camera | 0 | ±2 mm | ±3 mm |
+| 源盒、目标盒 XY 各轴 | ±10 mm | ±15 mm | ±20 mm |
+| 目标盒偏航角 | ±0.030 rad | ±0.050 rad | ±0.080 rad |
+| 饼干 XY、偏航角 | ±0.3 mm、±0.015 rad | 相同 | 相同 |
+| 固定相机位置各轴 | 0 | ±4 mm | ±9 mm |
+| 腕相机安装位置各轴 | 0 | ±2 mm | ±3 mm |
 | 固定／腕相机局部旋转各轴 | 0 | 0 | ±2° / ±1° |
-| FOV | 0 | ±1° | ±2° |
-| 灯光强度 / light intensity | 原值 | ±10% | ±20% |
-| 饼干颜色 / cookie palette | 原值 | 原值 | 金黄、可可棕、抹茶绿、莓果粉四选一 |
+| 相机视场角 | 0 | ±1° | ±2° |
+| 灯光强度 | 原值 | ±10% | ±20% |
+| 饼干颜色 | 原值 | 原值 | 金黄、可可棕、抹茶绿、莓果粉四选一 |
 
-每轮统一一种饼干颜色，整个 episode 保持不变。颜色不代表任务类别。相机扰动
+每轮统一一种饼干颜色，整个回合保持不变。颜色不代表任务类别。相机扰动
 以各自安装坐标系为准。重置先恢复标称参数，不会累积漂移。布局、外观、选列
 使用独立随机流。没有增加初始倾斜、间距、尺寸、摩擦、质量或延迟随机化；
 第一批搬走后自然发生的倾斜仍由同列专家处理。
 
-## 采集 / Collection
+## 采集
 
 配置统一放在 `configs/randomization.yaml`，默认选择 basic、第一列。
 修改顶部 `profile: advanced`、`source_column: 1` 后，在仓库根目录执行；
@@ -37,64 +37,49 @@ MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
 - YAML `source_column: 1|2|3|4|random`：按源布局 X 从小到大编号，不按相机画面左右。
 - `profiles` 中设置各项幅度，`colors` 中设置 RGBA 颜色；数值设为 0 可关闭该项，
   `palette: false` 关闭颜色变化。位置单位米、盒子角度弧度、相机角度度数。
-- 这两个采集 CLI 不接受 `--profile`、`--source-column`，只使用 YAML；统一 benchmark 支持这两个覆盖项。
+- 2×5 与 2×10 的装盒采集命令不接受 `--profile`、`--source-column`，只使用 YAML；统一评测支持这两个覆盖项。
 - 可复制此 YAML，再通过 `--randomization-config` 指定实验配置。启动时读取一次；
   运行中修改文件不影响当前任务，重启后生效。完整解析配置会随采集记录保存，
   续采时配置不一致会拒绝，避免不同实验混入同一数据集。
-- `random`：每个对齐的连续四 seed 组随机排列四列，保证尝试数均衡，不保证
+- `random`：每个对齐的连续四随机种子组随机排列四列，保证尝试数均衡，不保证
   成功保存数均衡。任务文本包含具体列号，固定列和随机列使用相同的指令模板。
-- `--resume`：仅允许配置、强度、列模式、seed 起点等一致时续采；旧版没有
+- `--resume`：仅允许配置、强度、列模式、随机种子起点等一致时续采；旧版没有
   随机化元数据的数据集请不要原地续采，使用新目录。
 - `--max-attempts`：限制总尝试次数。连续 25 次失败时停止供检查。
 
 三档共用同列专家主体；多列使用列相关倾角、速度和放置补偿。没有为每档复制
 独立专家。第四列仍是困难场景，先小规模评估，再决定采集量。
 
-## Provenance and evaluation
+## 采集溯源与评测
 
-`collection_summary.json` records the profile, numeric ranges, source-column
-selection, config and seed origin. `attempts.jsonl` includes every completed or
-failed attempt and its sampled scene parameters. Saved episode sidecars contain
-the same privileged provenance; it is **not** added to policy observation features.
-Images, state and absolute applied joint actions retain their original schema.
+`collection_summary.json` 保存档位、数值范围、来源列选择、完整配置和随机种子起点。
+`attempts.jsonl` 保存包括失败在内的尝试记录及实际采样的场景参数。
+成功回合的附加元数据也保留这些仿真真值，但不会加入模型的观测特征；
+图像、状态和实际应用的绝对关节动作沿用原有数据格式。
 
-Measure success by profile and selected column, not only the total. Failed
-attempts must remain in the denominator. Color balance among saved episodes is
-not guaranteed; inspect the saved sidecars before training. Small smoke matrices
-validate connectivity, not an 80–90% success claim. Train/test seeds must be disjoint.
+采集质量应按档位和来源列分别检查。计算采集成功比例时，失败尝试必须保留在分母中；
+该比例只用于采集质量诊断，策略评测仍以最终放入数量计分。
+成功数据中的颜色比例不保证均衡，训练前应检查回合元数据。
+训练与测试使用互不重叠的随机种子，小规模流程测试不能证明稳定的任务表现。
 
-Programmatic evaluation uses the same implementation:
+Python 调用与命令行共用评测实现：
 
 ```python
-from a3_dual_arm_sim.workflows.benchmark import CookieBatchBenchmark
-b = CookieBatchBenchmark(randomization_config="configs/randomization.yaml", max_steps=1600)
-result = b.evaluate("same_column", num_episodes=20, seed_start=10000, workers=2)
+from a3_dual_arm_sim.workflows.benchmark import make_cookie_benchmark
+
+benchmark = make_cookie_benchmark(
+    task="2x5",
+    randomization_config="configs/randomization.yaml",
+    profile="basic",
+    source_column=1,
+    max_steps=500,
+)
+result = benchmark.evaluate("same_column", num_episodes=20, seed_start=10000, workers=2)
 ```
 
-Omitting `profile` from the existing Python API preserves its explicit numeric
-arguments; specifying a profile selects that profile's box ranges. Physics and
-geometry are otherwise unchanged. Use `source_column=None` only for the legacy
-automatic-column instruction behavior.
+旧 Python 接口未指定 `profile` 时保留显式数值参数；指定档位后使用该档位的盒位置范围。
+`source_column=None` 仅用于兼容旧的自动选列指令行为。物理模型与几何不会因档位切换而改变。
 
-## 验证范围 / Validation scope
+## 统一评测
 
-相关回归测试共 39 项通过，可在安装开发依赖后运行：
-
-```bash
-python -m pytest -q tests/test_benchmark.py tests/test_cookie_same_column.py \
-  tests/test_runner_and_recording.py tests/test_randomization_profiles.py
-```
-
-初步专家测试覆盖三档强度 × 四列，每组合一次，共 12/12 成功；高级档四列
-分别使用 seed 9001–9004，均搬入十块。另以高级第一列 seed 9001 验证了一条
-实际 LeRobot v3 视频与动作采集，因此该采集不是额外独立测试样本。
-之后修复了正视目标跟踪相机覆盖角度扰动的问题，并通过回归测试及实际渲染检查；
-上述 12 次物理搬运试跑在这一相机修复之前完成。规则专家不读取相机图像。
-
-这只是功能连通性验证，不代表达到 80%–90% 的采集成功率，也不是 VLA 成绩。
-正式采集前建议用独立 seed 每列至少尝试 25 次，保留失败记录，并报告各列
-成功次数/总尝试次数。不要仅以保存下来的成功 episode 计算成功率。
-
-## 统一 benchmark
-
-两任务的模型/专家评测、500 步数量统计及六项网格使用统一入口，命令见 [完整流程指南](workflow_guide.md#4-统一仿真-benchmark)。以最终放入数量为主指标；采集仍按完整成功条件保存演示。
+两任务的模型/专家评测、500 步数量统计及六项网格使用统一入口，命令见 [完整流程指南](workflow_guide.md#4-统一仿真评测)。以最终放入数量为主指标；采集仍按完整成功条件保存演示。

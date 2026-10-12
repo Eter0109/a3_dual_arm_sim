@@ -36,14 +36,14 @@
 | `collect_smolvla_dagger.py` | `data.collect_smolvla_dagger_cli` | 专家接管与 DAgger 实验 |
 | `prepare_smolvla_retraining.py` | `learning.prepare_smolvla_retraining_cli` | 再训练数据与命令准备 |
 | `probe_smolvla_retrain.py` | `learning.probe_smolvla_retrain_cli` | 再训练候选短验证 |
-| `train_after_collection.py` | `learning.train_after_collection_cli` | Linux PID/锁编排，要求特定 100 episode 采集契约 |
+| `train_after_collection.py` | `learning.train_after_collection_cli` | Linux PID/锁编排，要求特定 100 回合采集契约 |
 | `run_smolvla_improvement.py` | `workflows.run_smolvla_improvement_cli` | 带门控的实验流水线 |
 | `improve_smolvla_50.py` | `workflows.improve_smolvla_50_cli` | 扩展实验编排 |
 
-这些入口保留已有研究功能，其整条流水线不属于本次发布冒烟验收。使用前检查 `--help`、数据与实际检查点；不存在的 EMA 权重不得视为已产生，单阶段准备成功也不等于整条流水线成功。部分编排默认依赖仓库内 `examples/`，适用于源码安装；wheel 主流程使用模块入口。
+这些入口保留已有研究功能，其整条流水线尚无完整验收记录。使用前检查 `--help`、数据与实际检查点；不存在的 EMA 权重不得视为已产生，单阶段准备成功也不等于整条流水线成功。部分编排默认依赖仓库内 `examples/`，适用于源码安装；wheel 主流程使用模块入口。
 
 ## 结果追踪
 
-每个实验使用独立 `outputs/<run>`，保留命令、配置、环境版本、Git revision/dirty diff、数据 revision、实际检查点及 SHA256、场景与推理 seed。普通/EMA 权重和部署后处理分开标记。开发 seed 与最终验收 seed 隔离。
+每个实验使用独立 `outputs/<run>`，保留命令、配置、环境版本、Git 版本/未提交差异、数据版本、实际检查点及 SHA256、场景与推理随机种子。普通/EMA 权重和部署后处理分开标记。开发随机种子与最终验收随机种子隔离。
 
-比较时保持场景、随机化、控制频率、最大步数、数据统计及 seed 一致。模型评估显式传 `--dataset-root`；默认目录仅是便利约定。原始数据、权重、缓存及日志不纳入 Git。新增功能按架构职责归属正式包，不在示例转发脚本中写业务。
+比较时保持场景、随机化、控制频率、最大步数、数据统计及随机种子一致。模型评估显式传 `--dataset-root`；默认目录仅是便利约定。原始数据、权重、缓存及日志不纳入 Git。新增功能按架构职责归属正式包，不在示例转发脚本中写业务。

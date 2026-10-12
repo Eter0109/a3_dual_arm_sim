@@ -20,7 +20,7 @@ from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 
-from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.paths import project_root, resource_root
 from a3_dual_arm_sim.sim.randomization import load_randomization_config
 from a3_dual_arm_sim.tasks.cookie_2x10_settings import load_cookie_2x10_settings
 from a3_dual_arm_sim.workflows.benchmark import make_cookie_benchmark
@@ -39,6 +39,17 @@ def atomic_json(path, value):
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def source_revision():
+    """Only report the source checkout revision, never a wheel user's unrelated repo."""
+    root = Path(__file__).resolve().parents[3]
+    if not (root / "pyproject.toml").is_file() or not (root / ".git").exists():
+        return None
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=False
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def summarize(rows, planned):
@@ -101,8 +112,10 @@ def main():
         args.dataset_root.resolve(),
         args.output.resolve(),
     )
-    settings5 = load_randomization_config(root / "configs/randomization.yaml")
-    settings10, first_grasp = load_cookie_2x10_settings(root / "configs/randomization_2x10.yaml")
+    settings5 = load_randomization_config(resource_root() / "configs/randomization.yaml")
+    settings10, first_grasp = load_cookie_2x10_settings(
+        resource_root() / "configs/randomization_2x10.yaml"
+    )
     for settings in (settings5, settings10):
         settings["source_column"] = "1"
     protocol = {
@@ -139,7 +152,7 @@ def main():
             "dataset_stats_sha256": digest(dataset / "meta/stats.json"),
             "script_sha256": digest(Path(__file__)),
             "shared_source_sha256": {
-                name: digest(root / "src/a3_dual_arm_sim" / name)
+                name: digest(Path(__file__).resolve().parents[1] / name)
                 for name in (
                     "workflows/benchmark.py",
                     "workflows/episode_execution.py",
@@ -147,9 +160,7 @@ def main():
                     "policies/smolvla.py",
                 )
             },
-            "git_commit": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=root, text=True
-            ).strip(),
+            "git_commit": source_revision(),
             "torch": torch.__version__,
             "gpu": torch.cuda.get_device_name() if args.device == "cuda" else None,
         }
