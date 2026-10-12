@@ -536,6 +536,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self._place_free_box(self._target_bin_body, target, target_yaw)
         if spare is not None:
             self._place_free_box(self._spare_bin_body, spare, spare_yaw)
+        # The drawn poses, kept so `_assert_box_poses` can replay them.  The settle that
+        # runs between this and the placement can explode, and MuJoCo's own safety net
+        # then resets the data from inside `mj_step` -- wiping these very writes back to
+        # the XML defaults.  The draws are Python state and survive; the mjData writes
+        # do not, so what survives is what the replay re-writes.
+        self._scene_draw = (
+            source_offset,
+            float(source_yaw),
+            target,
+            float(target_yaw),
+            spare,
+            float(spare_yaw),
+        )
 
         # 4. Arm start pose.  This is the variation that matters most for a policy:
         #    with it at zero every episode begins from a byte-identical pose, so a
@@ -622,6 +635,53 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.model.jnt_dofadr[joint] : self.model.jnt_dofadr[joint] + 6
         ] = 0.0
 
+    def _assert_box_poses(self) -> None:
+        """Re-write the drawn box poses, because the settle before them can wipe them.
+
+        **A reset has to end with the boxes where the draw put them, and the settle in
+        between can silently take them away.**  Measured on
+        `a3_libero_dense_batch_libero_mount` (seed 4, scene randomization on), one
+        `mj_step` at a time through the settle that runs before the Cookies are placed:
+
+            settle step 25   worst |qvel| 1.4e5 m/s, MuJoCo warns `QACC at DOF 165`
+            settle step 26   `mocap_pos` back at the XML default, `time` 0, `qvel` 0
+
+        The Cookies are still at their XML spawn poses while that settle runs -- they are
+        placed after it -- and on a draw large enough the moved bin overlaps them and the
+        settle explodes; MuJoCo's own safety net (`mj_checkPos` / `mj_checkVel`, *inside*
+        `mj_step`, from C -- a Python-level tap on `mujoco.mj_resetData` never fires)
+        then resets the data, which puts the source mocap and the free boxes back at the
+        XML defaults.  The placement that follows writes the Cookies at the *drawn* offset
+        into the *nominal* bin -- 4-6 mm inside a wall (contact table:
+        `source_bin_front_wall <-> cookie_60..67_geom`, dist -6.0..-3.7 mm, 33-37 N) --
+        and the first drop step fires them out at 10-23 m/s.  1 to 20 of 80 Cookies ended
+        outside the source bin, on exactly the seeds whose draws were large enough to
+        explode the settle: 3 of the first 10.
+
+        The arm is already re-asserted at the end of the reset (`_assert_arm_at_home`, for
+        the same class of wipe -- the arm's pose was the first thing this safety net took,
+        and the fix for it is the pattern this follows).  This is the same bargain for the
+        boxes: the draw is replayed rather than trusted to survive the settle.
+        """
+
+        draw = getattr(self, "_scene_draw", None)
+        if draw is None:
+            # No draw this episode: the boxes are at their XML poses, and the safety net
+            # would restore exactly those.  Nothing to replay.
+            return
+        source_offset, source_yaw, target, target_yaw, spare, spare_yaw = draw
+        mocap_id = int(self.model.body_mocapid[self._source_bin_body])
+        nominal = self.SOURCE_NOMINAL_CENTER
+        self.data.mocap_pos[mocap_id] = [
+            nominal[0] + source_offset[0],
+            nominal[1] + source_offset[1],
+            0.0,
+        ]
+        self.data.mocap_quat[mocap_id] = _yaw_quaternion(source_yaw)
+        self._place_free_box(self._target_bin_body, target, target_yaw)
+        if spare is not None:
+            self._place_free_box(self._spare_bin_body, spare, spare_yaw)
+
     def reset(
         self,
         *,
@@ -689,6 +749,15 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self._last_applied_action = home.copy()
         self._apply_controls(home)
         self.settle()
+        # **The drawn box poses have to survive that settle, and on an exploding draw
+        # they do not.**  The Cookies are still at their XML spawn poses while it runs
+        # -- they are placed after it -- and on a draw large enough the moved bin
+        # overlaps them and the settle explodes; MuJoCo's own safety net then resets
+        # the data from inside `mj_step`, which puts the boxes back at the XML
+        # defaults.  Replayed here, before the placement reads them, or the Cookies
+        # are placed at the drawn offset into the *nominal* bin.  See
+        # `_assert_box_poses` for the measured chain.
+        self._assert_box_poses()
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
             # The layout is expressed in the source bin's own frame, so the bin's
             # drawn pose carries the Cookies: rotate about the bin centre first,
