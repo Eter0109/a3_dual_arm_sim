@@ -1,0 +1,82 @@
+# The advanced-randomisation two-Cookie fine-tune, at step 15,000 of 15,000.
+#
+# The arm the whole second collection exists to produce, and the one to read against
+# `pi05_a3_two_cookie_15k.yaml` -- the control, same recipe, same episode count, trained on
+# the `basic` randomisation.  Both are driven through one `a3-sim compare` invocation so
+# the two see the same twenty layouts and the same task string; the only difference
+# between the columns is the data the model was fitted to.
+#
+# See `pi05_a3_two_cookie_15k.yaml` for why each field is what it is -- the 14-wide action
+# against a 16-wide state, the `clip` pair `cartesian_delta` requires, and `execute: 50`
+# from the checkpoint's own `n_action_steps`.  `execute` is held at 50 for both arms on
+# purpose: it is a measured lever, and a comparison in which two things move says nothing
+# about either.
+#
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_adv_15k.yaml
+
+name: pi05-a3-two-cookie-adv-15k
+notes: >
+  pi0.5 (lerobot/pi05_base) fine-tuned for 15,000 steps at batch 4 on 500 two-Cookie
+  episodes collected under the reference's `advanced` randomisation (±20 mm, ±0.080 rad)
+  with 3x the per-Cookie jitter and a real per-joint start jitter of ±0.040 rad, at a 93.6%
+  expert acceptance rate.  Vision tower and all 18 PaliGemma language layers trainable
+  (3.09 B of 3.617 B), no state projector.  Loss 0.379 -> 0.014, flat after about 10k.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_adv_unfreeze_15k/checkpoints/015000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

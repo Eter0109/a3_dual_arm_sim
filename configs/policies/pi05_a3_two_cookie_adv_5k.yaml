@@ -1,0 +1,85 @@
+# The advanced-randomisation two-Cookie fine-tune, read at its 5,000-step checkpoint.
+#
+# One of three, for the question the whole second collection exists to ask: **does a
+# dataset whose layouts actually vary produce a policy that generalises better?**  The
+# control arm is `pi05_a3_two_cookie_15k.yaml` -- the same recipe, the same 500 episodes
+# in number, trained on the `basic` randomisation (±10 mm, ±0.030 rad, and an
+# `arm_home_rad` that was 0.04 in the plan, 0.0 in the config and applied nowhere, so all
+# 500 episodes began from a byte-identical joint pose).  This run's data is ±20 mm,
+# ±0.080 rad and a real ±0.040 rad per-joint start jitter.
+#
+# Everything else is `pi05_a3_two_cookie_15k.yaml`'s, verbatim except for `name`, `notes`
+# and the checkpoint path.  That file explains why `dims: 14` sits beside a 16-wide state,
+# why `execute: 50` follows the checkpoint's own `n_action_steps`, and why the `clip` pair
+# is required for `cartesian_delta`; `execute` is deliberately left at 50 here so that the
+# only difference between the arms is the data.  (`execute: 10` is a measured lever in its
+# own right -- first placement 12/20 against 5/20 -- and mixing it in would mean two
+# variables move together.)
+#
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_adv_5k.yaml
+
+name: pi05-a3-two-cookie-adv-5k
+notes: >
+  The advanced-randomisation fine-tune at step 5,000 of 15,000.  500 episodes collected
+  with the reference's `advanced` profile and 3x the per-Cookie jitter (0.006 m, 0.10 rad)
+  at a 93.6% expert acceptance rate.  Training loss 0.379 at step 100 against the control's
+  0.238 -- harder to fit, which is the point -- converging to 0.017 by 10k.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_adv_unfreeze_15k/checkpoints/005000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

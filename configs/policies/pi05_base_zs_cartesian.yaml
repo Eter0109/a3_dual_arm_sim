@@ -1,0 +1,84 @@
+# `lerobot/pi05_base` with no fine-tuning, on the dense packing, through the Cartesian
+# interface the fine-tunes use.
+#
+# Why the Cartesian interface rather than the one `pi05_base.yaml` declares: that manifest
+# is written for A3's own arm, which is joint-servo and sixteen wide.  This scene's arm is
+# LIBERO's Panda under `OperationalSpaceAdapter`, so its commands are fourteen Cartesian
+# deltas, and the gateway refuses the mismatch by name rather than running the wrong space.
+# Using the same interface as the two-Cookie manifests also means a zero-shot number and a
+# fine-tuned number are answers to the same question.
+#
+# `execute: 16` rather than the fine-tunes' 50, matching `pi05_base.yaml` and therefore the
+# zero-shot recording this one is read against.  A base model asked to commit 2.5 s of
+# open-loop motion produces something that is hard to read as either competence or its
+# absence; at 16 the recording shows what the model wants to do rather than what it
+# committed to.  It is also A3's own quarter-second beat.
+#
+#   a3-sim policy check configs/policies/pi05_base_zs_cartesian.yaml
+
+name: pi05-base-zero-shot-cartesian
+notes: >
+  lerobot/pi05_base, zero-shot, on `a3_libero_panda_dense_batch`: eighty Cookies packed at
+  8.833 mm pitch, five at a time into the 2 by 5 box, on the arm, cameras and physics the
+  rest of this pipeline is built on.  A behaviour check, not a capability claim -- the
+  checkpoint has never seen an A3 scene, and the statistics it normalizes with are A3's
+  own, which makes every number here a statement about wiring.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=lerobot/pi05_base
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

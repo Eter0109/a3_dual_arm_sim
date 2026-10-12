@@ -1,0 +1,111 @@
+# `pi05_libero_a3_cartesian.yaml`, with the policy on the **CPU** and nothing else moved.
+#
+# Why this file exists
+# --------------------
+# The GPU in this container is shared, and during this experiment another job held **31.9 of
+# 32.6 GB** (`strata` 30156 MiB + `strata-vision` 1652 MiB).  Under that ceiling two separate
+# allocations fail, and both of them are fatal rather than slow:
+#
+#   * the checkpoint cannot be loaded at all -- pi05 is several GB in bfloat16, and MuJoCo
+#     reported the consequence as `FatalError: Offscreen framebuffer is not complete, error
+#     0x8cdd` from `env._render_camera`, because the policy's weights and the framebuffer are
+#     competing for the same last megabyte;
+#   * with the policy off the GPU, MuJoCo's own contexts allocate fine: measured, both scenes
+#     render 256 x 256 frames with real pixel variance (std 47.6 / 48.3) while the other job
+#     holds its 31.9 GB.
+#
+# **`device=cpu` on the adapter is not enough, and that is a measurement rather than a
+# precaution.**  The adapter loads with `PI05Policy.from_pretrained(checkpoint).to(device)`,
+# and lerobot's `PI05Policy.__init__` ends with `self.model.to(config.device)` -- where
+# `config.device` comes from `auto_select_torch_device()` -- so the weights are already in device
+# memory before the adapter's own `.to("cpu")` runs.  Measured: that produced
+# `torch.AcceleratorError: CUDA error: out of memory` inside `.to()`, with the stack through
+# `torch/nn/modules/module.py::_apply`.  Hiding the device is what makes the flag take effect:
+# `is_torch_device_available("cuda")` is then false, `lerobot`'s own `__post_init__` falls back
+# to `auto_select_torch_device()` -> `cpu`, and the adapter's `.to("cpu")` is a no-op.
+#
+# **The device is not part of the method.**  The checkpoint, the adapter, the state convention,
+# the two camera keys, `cartesian_delta`, `dim: 14`, `chunk: 50`, `execute: 50` and the normalised
+# postprocessor are all `pi05_libero_a3_cartesian.yaml`'s, so a behaviour seen here is a statement
+# about the same policy on the same interface.  What does *not* transfer across devices is
+# arithmetic: CPU and GPU differ in the last bits of a bfloat16 matrix product, and flow matching
+# samples fresh noise per re-plan, so a step count or a millimetre here is not comparable with a
+# GPU run.  The thing this file is for -- "does the model behave like a manipulation policy on
+# this arm, or does it flail" -- is categorical, and categorical survives that difference.
+#
+# Slower by a lot: one 50-step chunk per plan, ten plans for a 500-step episode.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_libero_a3_cartesian_cpu.yaml
+
+name: pi05-libero-a3-cartesian-cpu
+notes: >
+  `lerobot/pi05_libero_finetuned` zero-shot on the A3 arm, through its own end-effector delta
+  interface, with inference on the CPU so that the shared GPU is left to the renderer.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - /root/a3_dual_arm_sim/scripts/adapter_libero_iface.py
+    - --config
+    - ckpt=lerobot/pi05_libero_finetuned
+    - --config
+    - cameras=image,image2
+    # The only line that is not `pi05_libero_a3_cartesian.yaml`'s.  See the header.
+    - --config
+    - device=cpu
+    - --config
+    - state_rotation_reference=-0.486417,0.514086,0.513456,0.485259
+    - --config
+    - state_offset=-0.3114,-0.2610,0.2541
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+    # See the header: `device=cpu` alone still lets `from_pretrained` fill the device memory.
+    CUDA_VISIBLE_DEVICES: ""
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    # The left arm's end-effector pose.  `observation.eef_pose` is fourteen wide -- two
+    # arms of position plus quaternion -- and the left arm is the first seven.
+    eef_pose:
+      source: observation.eef_pose
+      slice: [0, 7]
+    # LIBERO's second gripper value is the first one negated, so only one is sent and the
+    # adapter mirrors it.
+    gripper:
+      source: observation.state
+      slice: [7, 8]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

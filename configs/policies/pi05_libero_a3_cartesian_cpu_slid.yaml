@@ -1,0 +1,105 @@
+# `pi05_libero_a3_cartesian_cpu.yaml`, with the state offset **moved by the slide**.
+#
+# Why this file exists
+# --------------------
+# `state_offset` is a *calibration constant*, not a coordinate: it maps this arm's home onto
+# LIBERO's reference position, and it was measured with the robot at A3's own base
+# (`-0.35, 0`).  The `_libero_mount` scenes slide the robot by `(0.020, -0.200)` -- that is
+# what `a3_robot_offset_m` does, and it is the point of those scenes: the arm travels to where
+# LIBERO's fixed camera frames the task.  A rigid slide moves the home by exactly the slide,
+# so the constant has to move by the slide too, or the model is handed a state that says the
+# arm is somewhere no LIBERO episode ever put it.
+#
+# Measured (`/tmp/diag_a3_state.py`, reset with the recording's own options):
+#
+#   scene                              reported error   per axis
+#   a3_libero_dense_batch              0.2 mm           (-0.2, +0.1, -0.1) mm
+#   a3_libero_dense_batch_libero_mount 200.9 mm         (+19.8, -199.9, -0.1) mm
+#   a3_libero_two_cookies_libero_mount 200.9 mm         (+19.8, -199.9, -0.1) mm
+#
+# -- the error is the slide, to the tenth of a millimetre, and the orientation error is 0.00
+# degrees on all three (a slide is a pure translation, so the rotation constant survives it).
+# A 200 mm state error is not a subtlety: it is the model being told, from step 1, that the
+# arm sits 20 cm behind where every training episode started, and the behaviour it produced
+# was exactly what that predicts -- the arm drove hard the whole episode (motion mean 0.054
+# rad/step), a quarter of the steps pinned a joint against a bound, and nothing was ever
+# grasped.  The same model on the same scene with the robot *not* slid -- where the state was
+# honest but the task was clipped out of the camera's frame -- held still instead
+# (motion mean 0.000).  Both failures are the same lesson from two sides: the state and the
+# picture have to agree, and only one of them was fixed at a time.
+#
+# The one changed line is the offset: `-0.3114,-0.2610,0.2541` minus the slide
+# `(0.020, -0.200)` = `-0.3314,-0.0610,0.2541`.  Everything else -- the checkpoint, the CPU
+# device and its `CUDA_VISIBLE_DEVICES`, the rotation constant, the two camera keys,
+# `cartesian_delta`, `dim: 14`, `chunk: 50`, `execute: 50`, the normalised postprocessor -- is
+# the CPU manifest's, and that file's header carries the reasoning for each of those.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_libero_a3_cartesian_cpu_slid.yaml
+
+name: pi05-libero-a3-cartesian-cpu-slid
+notes: >
+  `lerobot/pi05_libero_finetuned` zero-shot on the A3 arm, through its own end-effector delta
+  interface, on the scenes that slide the robot to LIBERO's framing -- with the state offset
+  moved by the same slide so the reported position stays on LIBERO's reference.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - /root/a3_dual_arm_sim/scripts/adapter_libero_iface.py
+    - --config
+    - ckpt=lerobot/pi05_libero_finetuned
+    - --config
+    - cameras=image,image2
+    - --config
+    - device=cpu
+    - --config
+    - state_rotation_reference=-0.486417,0.514086,0.513456,0.485259
+    # The only line that is not `pi05_libero_a3_cartesian_cpu.yaml`'s.  See the header.
+    - --config
+    - state_offset=-0.3314,-0.0610,0.2541
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+    CUDA_VISIBLE_DEVICES: ""
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    eef_pose:
+      source: observation.eef_pose
+      slice: [0, 7]
+    gripper:
+      source: observation.state
+      slice: [7, 8]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both

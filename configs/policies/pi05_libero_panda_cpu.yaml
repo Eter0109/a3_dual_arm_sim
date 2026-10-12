@@ -1,0 +1,90 @@
+# `pi05_libero_panda.yaml` with the policy on the **CPU**, for the controlled arm pair.
+#
+# `configs/policies/pi05_libero_a3_cartesian_cpu.yaml` carries the full reasoning and the
+# measurements; this file is its counterpart for the other arm, and it exists so that the pair
+#
+#   a3_libero_dense_batch                      (A3 arm)   <- this manifest's sibling
+#   a3_libero_panda_dense_batch_a3_placement   (Panda arm) <- this manifest
+#
+# differs in the arm and in nothing else, down to the device the policy runs on.
+#
+# Two things change against `pi05_libero_panda.yaml`, and neither is part of the method:
+#
+#   * `--config device=cpu` and `CUDA_VISIBLE_DEVICES=""`.  The second is what makes the first
+#     take effect: lerobot's `PI05Policy.__init__` ends with `self.model.to(config.device)`,
+#     where `config.device` comes from `auto_select_torch_device()`, so the weights are in device
+#     memory before the adapter's own `.to("cpu")` runs -- measured as
+#     `torch.AcceleratorError: CUDA error: out of memory` inside `.to()`.
+#   * nothing else.  The checkpoint, the 8-wide eef-pose state, the two camera keys, the
+#     180-degree flips, `cartesian_delta`, `dim: 14`, `chunk: 50`, `execute: 50`, the normalised
+#     postprocessor and this arm's own `state_rotation_reference` / `state_offset` are the GPU
+#     manifest's.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_libero_panda_cpu.yaml
+
+name: pi05-libero-panda-cpu
+notes: >
+  `lerobot/pi05_libero_finetuned` zero-shot on LIBERO's Panda, through its own end-effector
+  delta interface, with inference on the CPU so that the shared GPU is left to the renderer.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - /root/a3_dual_arm_sim/scripts/adapter_libero_iface.py
+    - --config
+    - ckpt=lerobot/pi05_libero_finetuned
+    - --config
+    - cameras=image,image2
+    - --config
+    - device=cpu
+    - --config
+    - state_rotation_reference=absolute
+    - --config
+    - state_offset=-0.2135,0.0720,0.1500
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+    CUDA_VISIBLE_DEVICES: ""
+
+observation:
+  images:
+    image:
+      source: observation.images.front
+      resize: [256, 256]
+    image2:
+      source: observation.images.left_wrist
+      resize: [256, 256]
+  vectors:
+    eef_pose:
+      source: observation.eef_pose
+      slice: [0, 7]
+    gripper:
+      source: observation.state
+      slice: [7, 8]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  execute: 50
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: zero_shot
+  primary_metric: both
+  prompt_kind: free_text

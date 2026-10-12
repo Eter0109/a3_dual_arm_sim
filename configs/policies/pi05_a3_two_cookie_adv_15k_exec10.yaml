@@ -1,0 +1,88 @@
+# The advanced-data model with a 0.5 s open-loop window instead of 2.5 s.
+#
+# `execute: 10` is the only configuration of twelve tried that has ever produced a
+# completed task: on the control's 10k checkpoint under the basic layouts it took first
+# placement from 5/20 to 12/20 and produced the single 2/2 either experiment has seen.
+# The reasoning is in `pi05_a3_two_cookie_10k_exec10.yaml` and is not repeated here; what
+# matters for this file is the design of the comparison it is half of.
+#
+# **One variable.**  This is `pi05_a3_two_cookie_adv_15k.yaml` with `execute` changed from
+# 50 to 10 and nothing else, so the two arms are driven in one `a3-sim compare` invocation
+# and see the same twenty layouts.  Running it against the `execute: 50` number from
+# experiment 2 would have compared across invocations, where the same configuration has
+# already been measured at both 5/20 and 8/20 of episodes placing a Cookie -- a swing that
+# is pure sampling noise and larger than the effect worth detecting.
+#
+# Why this is the arm worth spending on rather than a third dataset: every failure
+# taxonomy gathered so far points at the same mechanism -- "aligned but toppled while
+# grasping", "carried it and never released", "second placement never attempted" -- and all
+# three are the signature of committing to a trajectory for 50 control steps (2.5 s at
+# 20 Hz) and only then looking again.  Data diversity changed *which* layouts the policy
+# could handle; it did not change the fact that it cannot correct inside a placement.
+#
+#   a3-sim policy check configs/policies/pi05_a3_two_cookie_adv_15k_exec10.yaml
+
+name: pi05-a3-two-cookie-adv-15k-exec10
+notes: >
+  The advanced-randomisation 15k checkpoint with `execute: 10` instead of 50, so the arm
+  re-observes every 0.5 s rather than every 2.5 s.  Paired in one invocation against the
+  same checkpoint at `execute: 50`, which is the only change between the two arms.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_two_cookie_adv_unfreeze_15k/checkpoints/015000/pretrained_model
+    - --config
+    - dims=14
+    - --config
+    - state_dims=16
+    - --config
+    - space=cartesian_delta
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: cartesian_delta
+  dim: 14
+  chunk: 50
+  clip: [-1.0, 1.0]
+  execute: 10
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
