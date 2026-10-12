@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +10,7 @@ import mujoco
 import numpy as np
 
 from .config import SimConfig
-from .contracts import ARM_JOINTS, ActionMode
+from .contracts import ARM_JOINTS, LEFT_JOINTS, ActionMode
 from .env import A3DualArmEnv
 
 
@@ -741,6 +741,31 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.SOURCE_CENTER,
             self.SOURCE_INNER_HALF_SIZE,
         )
+        # **A reset has to end with the arm where the state convention says it is.**  Every
+        # LIBERO manifest's `state_offset` and `state_rotation_reference` are calibrated *at the
+        # arm's home* -- measured, A3's `(0.100, 0.250, 0.920)` plus `-0.3114,-0.2610,0.2541`
+        # gives LIBERO's own `(-0.2112, -0.0111, 1.1742)` exactly -- so a reset that ends
+        # anywhere else hands the policy a self-pose that is simply false, and the expert's IK,
+        # which is seeded from the pose, a start it cannot reason from.
+        #
+        # Measured on the dense props scenes (`a3_libero_dense_batch`,
+        # `a3_libero_panda_dense_batch_a3_placement`) the left arm ended `reset` at
+        # `qpos = ctrl = 0` -- its *zero* pose, arm extended along +y with the tool frame at the
+        # identity -- while the same code in `a3_cookie_batch` (`joint_position`) kept its home.
+        # The eight-wide state the policy was then handed was **841.7 mm and 200.2 degrees** away
+        # from LIBERO's own reset state, and the batch expert's reset IK -- seeded from the pose,
+        # as a local solver is -- failed with `the closest pose is 7.73 mm from the target`,
+        # which is what a bogus start pose looks like from outside.
+        #
+        # The *cause* is the `settle()` above, which runs before the Cookies are placed and so
+        # settles a scene whose eighty Cookies are still at their spawn poses.  MuJoCo reports
+        # `Nan, Inf or huge value in QACC at DOF 480. Time = 0.0780`, and 0.0780 s is exactly the
+        # step at which the arm's pose is lost (traced: `mj_step` #139 of 250, with `time`
+        # resetting to one step).  Settling the same scene *after* the placement, measured,
+        # explodes nothing and keeps the arm at its home for all 100 steps -- so the pose is
+        # re-asserted here rather than the settle being trusted.
+        self._assert_arm_at_home(home)
+
         observation = self._observation()
         info.update(
             success=False,
@@ -753,6 +778,30 @@ class A3CookieTransferEnv(A3DualArmEnv):
             source_initially_filled=self._source_initially_filled,
         )
         return observation, info
+
+    def _assert_arm_at_home(self, home: np.ndarray) -> None:
+        """Write the left arm's home pose and the command that holds it, and check it stuck.
+
+        Called at the end of every reset, for the measurement in the call site's comment.  Two
+        array writes and one `mj_forward`, so it costs nothing, and it makes a scene whose
+        settling destroys the arm's pose fail loudly instead of quietly handing a policy a
+        self-pose that is 841 mm from where it really is.
+        """
+
+        for name, value in zip(ARM_JOINTS, np.r_[home[:7], home[8:15]], strict=True):
+            self.data.qpos[self._qpos_ids[name]] = value
+            self.data.qvel[self._dof_ids[name]] = 0.0
+        self._apply_controls(home)
+        self._last_applied_action = np.asarray(home, dtype=np.float64).copy()
+        mujoco.mj_forward(self.model, self.data)
+        actual = np.asarray([self.data.qpos[self._qpos_ids[name]] for name in LEFT_JOINTS])
+        error = float(np.max(np.abs(actual - np.asarray(home[:7], dtype=np.float64))))
+        if error > 1e-6:
+            raise RuntimeError(
+                f"reset left the left arm {error:.6f} rad from its home pose; every LIBERO "
+                "manifest's state_offset is calibrated in that pose, so this cannot be reported "
+                "as an observation"
+            )
 
     def set_cookie_pose(
         self,
