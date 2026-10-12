@@ -307,6 +307,20 @@ def parse_args() -> argparse.Namespace:
                         help="the body a placement is against; empty to skip")
     parser.add_argument("--manifest", type=Path,
                         default=PROJECT / "configs/policies/pi05_libero_panda.yaml")
+    parser.add_argument(
+        "--no-randomize",
+        action="store_true",
+        help=(
+            "Pin the layout to the scene's canonical one instead of sampling it from the "
+            "seed.  Not a convenience: `a3_probe_box_in_bin` places the target box *inside* "
+            "the source bin, so the two boxes coincide by design and the clearance guard "
+            "-- which only runs while some range is movable -- can never satisfy its "
+            "20 mm of separation.  Every reset raises.  The box-carrying result this "
+            "probe produced was measured before box randomization was switched on "
+            "(configs/libero_props.yaml was all zero until cbe5a41), so pinning is also "
+            "the condition it was measured under."
+        ),
+    )
     parser.add_argument("--task", default="",
                         help="the instruction; empty uses the scene's own prompt")
     parser.add_argument("--seeds", default="0,1,2")
@@ -419,7 +433,13 @@ def main() -> int:
         env = scene.build_env(0.0, 0.0)
         if not args.shadows:
             env.use_fast_render()
-        observation, _ = env.reset(seed=seed, options=None)
+        observation, _ = env.reset(
+            seed=seed,
+            options={
+                "randomize_scene": not args.no_randomize,
+                "randomize_cookies": not args.no_randomize,
+            },
+        )
 
         model = env.model
         watched = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, args.object)

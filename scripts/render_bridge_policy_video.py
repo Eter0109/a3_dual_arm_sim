@@ -101,6 +101,18 @@ def parse_args() -> argparse.Namespace:
         help="Skip shadow and reflection passes; much faster without a GPU",
     )
     parser.add_argument(
+        "--without-cookies",
+        action="store_true",
+        help=(
+            "Probe: take every Cookie out of the scene after each reset and record what "
+            "the model does with the table it is left with. The bin, the 2 x 5 box, the "
+            "arm, the cameras, the physics and the instruction are untouched -- only the "
+            "objects the policy might reach for are gone. See `remove_cookies` for why "
+            "this is a probe rather than a scene: a scene cannot express it, because "
+            "`cookie_transfer` refuses an empty source layout."
+        ),
+    )
+    parser.add_argument(
         "--visual-style",
         choices=VISUAL_STYLES,
         default="plain",
@@ -113,6 +125,43 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+def remove_cookies(env: Any) -> int:
+    """Take every Cookie out of the scene.  Returns how many were removed.
+
+    Three removals rather than one, because any single one of them leaves a way for the
+    result to be about something other than the Cookies: contacts are dropped (a Cookie
+    that is merely invisible still stops the arm), rendering is dropped (a Cookie that is
+    merely far away still appears if the camera happens to look there) and the pose is
+    moved below the floor (so it is out of the way of both).
+
+    This is a *probe*, not a scene.  A scene cannot express it: `cookie_transfer` requires
+    at least one source position, and the no-Cookie scenes in the registry get there by
+    using LIBERO's props instead of A3's bin and box -- so they change the very things this
+    probe exists to hold fixed.  The question it answers is narrow and worth one flag: the
+    scene already knows what this model does when the object it has been choosing is not
+    available, and it is not to stand still -- the two probe scenes were built because ten
+    seeds in two runs picked the target box up and carried it into the bin instead.
+    """
+
+    import mujoco
+
+    removed = 0
+    for joint in getattr(env, "_cookie_joints", []):
+        joint = int(joint)
+        qpos = int(env.model.jnt_qposadr[joint])
+        dof = int(env.model.jnt_dofadr[joint])
+        env.data.qpos[qpos : qpos + 3] = (0.0, 0.0, -10.0)
+        env.data.qvel[dof : dof + 6] = 0.0
+        body = int(env.model.jnt_bodyid[joint])
+        first = int(env.model.body_geomadr[body])
+        for offset in range(int(env.model.body_geomnum[body])):
+            geom = first + offset
+            env.model.geom_contype[geom] = 0
+            env.model.geom_conaffinity[geom] = 0
+            env.model.geom_rgba[geom][3] = 0.0
+        removed += 1
+    mujoco.mj_forward(env.model, env.data)
+    return removed
 
 def build_environment(
     scene: str, config: Path | None, visual_style: str = "plain"
@@ -194,6 +243,12 @@ CONTAINMENT_CLAUSES = (
     "released",
 )
 
+#: Up to this many Cookies, one line each.  Above it, only the ones that are a fact rather
+#: than the default.  Two is the scene this was written for; the dense batch scene has
+#: eighty, and eighty lines filled the overlay until the per-step behaviour line -- the one
+#: that says whether the arm is moving at all -- was off the frame.
+PER_COOKIE_LINE_LIMIT = 2
+
 
 def containment_lines(env: Any) -> list[str]:
     """One line per Cookie: is it in the box, and if not, which clause says not.
@@ -202,21 +257,46 @@ def containment_lines(env: Any) -> list[str]:
     diagnostic that re-derives the predicate is how the two come apart -- and this one has to
     be trusted when it contradicts a viewer.
 
-    Empty for a scene that has no Cookies.
+    Empty for a scene that has no Cookies.  Above `PER_COOKIE_LINE_LIMIT` Cookies the lines
+    are filtered to the ones a viewer cannot infer from the packing: inside the box, in the
+    jaws, out of the source bin, or knocked past upright.  A Cookie sitting where it started,
+    standing, is the default state of most of the scene, and saying so once per Cookie is how
+    the useful line got pushed out of the frame.
     """
 
     inquiry = getattr(env, "privileged_target_containment", None)
+    in_source = getattr(env, "privileged_cookie_in_source", None)
     task_config = getattr(env, "task_config", None)
     if inquiry is None or task_config is None:
         return []
-    lines = []
-    for index in range(int(task_config.cookie_count)):
+
+    count = int(task_config.cookie_count)
+    filtered = count > PER_COOKIE_LINE_LIMIT
+    lines: list[str] = []
+    packed = 0
+    summary = {"in_target": 0, "in_source": 0, "held": 0, "tilted": 0}
+    for index in range(count):
         clause = inquiry(index)
         above_floor_mm = 1000.0 * float(clause["bottom_above_floor_m"])
         tilt = float(clause["tilt_deg"])
         if clause["in_target"]:
+            summary["in_target"] += 1
+        if not clause["released"]:
+            summary["held"] += 1
+        if not clause["upright"]:
+            summary["tilted"] += 1
+        still_packed = bool(in_source(index)) if in_source is not None else False
+        if still_packed:
+            summary["in_source"] += 1
+        if filtered:
+            # Everything about a Cookie that has not been touched is the packing, and the
+            # count of the packing belongs in one line rather than eighty.
+            if still_packed and clause["upright"] and clause["released"] and not clause["in_target"]:
+                packed += 1
+                continue
+        if clause["in_target"]:
             lines.append(
-                f"cookie {index}: IN    floor {above_floor_mm:+.1f} mm   tilt {tilt:.1f} deg"
+                f"cookie {index}: IN     floor {above_floor_mm:+.1f} mm   tilt {tilt:.1f} deg"
             )
             continue
         failed = ",".join(name for name in CONTAINMENT_CLAUSES if not clause[name])
@@ -227,6 +307,13 @@ def containment_lines(env: Any) -> list[str]:
         label = "HELD " if not clause["released"] else "OUT  "
         lines.append(
             f"cookie {index}: {label} {failed}   floor {above_floor_mm:+.1f} mm   tilt {tilt:.1f} deg"
+        )
+    if filtered:
+        lines.insert(
+            0,
+            f"cookies: {summary['in_source']} in source ({packed} untouched), "
+            f"{summary['in_target']} in target, {summary['held']} held, "
+            f"{summary['tilted']} not upright",
         )
     return lines
 
@@ -368,6 +455,10 @@ def main() -> int:
     step = 0
     try:
         observation, _ = env.reset(seed=args.seed, options=reset_options)
+        # After the reset, not before: `reset` is what places the Cookies, so a removal
+        # ahead of it would be undone by it.
+        if args.without_cookies:
+            print(f"probe      : {remove_cookies(env)} Cookies removed after reset")
         gateway.reset(EpisodeContext(seed=args.seed, task=task, action_mode=env.action_mode))
 
         while not terminated and not truncated and step < args.steps:
@@ -429,7 +520,12 @@ def main() -> int:
             # roll-out was once read as a correct placement rejected for resting on another
             # Cookie and there was nothing in the frame to check that against.
             first_cookie_line = 1 if progress is not None else 0
-            for offset, line in enumerate(containment_lines(env)):
+            # No per-Cookie lines in the probe: the Cookies are below the floor, so every
+            # clause would be about a Cookie that is not in the scene, and the summary line
+            # would say "0 in source" as though they had been removed by the task rather
+            # than by the probe.
+            cookie_lines = () if args.without_cookies else containment_lines(env)
+            for offset, line in enumerate(cookie_lines):
                 lines.insert(first_cookie_line + offset, line)
             frame = composer.compose(view, cameras, lines, title=title)
             for packet in stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")):
@@ -459,7 +555,7 @@ def main() -> int:
         # one -- the per-50-step line is a progress report, and reading it as the result is how
         # a successful roll-out was reported as a failure.
         final_outcome = progress_line(info)
-        final_containment = containment_lines(env)
+        final_containment = () if args.without_cookies else containment_lines(env)
     finally:
         container.close()
         gateway.close()
