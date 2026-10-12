@@ -119,20 +119,44 @@ libero_fidelity: true
 # arm_servo_bandwidth: 4.0
 randomization:
   # Stage 3: the boxes move, the Cookies do not (they are placed relative to the live
-  # source bin, so moving that bin carries them and moves nothing else).  The strength is the
-  # decided one -- 10 mm and 0.030 rad, which is the reference's `basic` profile.
+  # source bin, so moving that bin carries them and moves nothing else).
   #
-  # Written as symmetric ranges because the nominal poses are where the arm was measured to work;
-  # the ranges in this file are asymmetric by design where the workspace is (see AxisRange), and if
-  # these ten millimetres turn out to cost reach on one side the fix is to tilt the range, not to
+  # **Strength: the reference's `advanced` profile, 20 mm and 0.080 rad.**  The first
+  # two-Cookie collection (`a3_two_cookie_500`, 500 episodes) ran at `basic` -- 10 mm and
+  # 0.030 rad -- and its `collection_summary.json` records exactly that.  The step up is for
+  # a measured reason rather than a hopeful one: at `basic` the *relative* geometry, which is
+  # what the second placement depends on, barely moves.  The Cookies ride the source box
+  # rigidly, so across those 500 episodes the distance between the two of them changed by
+  # the per-Cookie jitter alone (2 mm and 0.05 rad, passed by `collect`, not by this file),
+  # and the box-to-box relationship by 10 mm.  A policy can satisfy that by memorising one
+  # trajectory, which is what the 15k fine-tune did: 0/20 successes at every checkpoint, with
+  # the first placement rate flat between 10k (8/20) and 15k (6/20) steps.
+  #
+  # **`arm_home_rad` was never applied.**  `docs/data-collection-plan.md` section 3.1 writes
+  # 0.04 here and this file said 0.0, and an all-zero axis is dropped from `axes()` as well as
+  # from the summary -- so it left no trace in the dataset either: all 500 episodes started
+  # from a byte-identical joint configuration.  `SceneRandomization.arm_home_rad` says what
+  # that costs -- "so a policy can memorise one joint trajectory" -- and 0.04 rad is ~2.3
+  # degrees per joint, which the expert's own planning is expected to absorb.
+  #
+  # Written as symmetric ranges because the nominal poses are where the arm was measured to
+  # work; the ranges in this file are asymmetric by design where the workspace is (see
+  # AxisRange), and if an axis costs reach on one side the fix is to tilt the range, not to
   # narrow it.  The gate reports failures per axis, which is what would say which side.
-  source_bin_x_m: [-0.010, 0.010]
-  source_bin_y_m: [-0.010, 0.010]
-  source_bin_yaw_rad: [-0.030, 0.030]
-  target_bin_x_m: [-0.010, 0.010]
-  target_bin_y_m: [-0.010, 0.010]
-  target_bin_yaw_rad: [-0.030, 0.030]
-  arm_home_rad: 0.0
+  #
+  # Clearance is what bounds this, and the guard is automatic rather than configured: a draw
+  # that closes `min_box_clearance_m` between two boxes is discarded and redrawn
+  # (`max_clearance_attempts`), and exhausting the attempts raises rather than quietly
+  # falling back to a narrower episode.  The two boxes' outer faces are about 67 mm apart, so
+  # 20 mm each -- 40 mm of worst-case closing -- stays inside it with about 7 mm to spare
+  # before the 4.6 degree yaw on both boxes can spend it.
+  source_bin_x_m: [-0.020, 0.020]
+  source_bin_y_m: [-0.020, 0.020]
+  source_bin_yaw_rad: [-0.080, 0.080]
+  target_bin_x_m: [-0.020, 0.020]
+  target_bin_y_m: [-0.020, 0.020]
+  target_bin_yaw_rad: [-0.080, 0.080]
+  arm_home_rad: 0.04
   min_box_clearance_m: 0.020
 cookie_transfer:
   left_gripper_kp: 1200.0
