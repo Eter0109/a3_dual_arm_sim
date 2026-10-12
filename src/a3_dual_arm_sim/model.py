@@ -1530,12 +1530,16 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         friction="1 0.01 0.001",
     )
     base_height = config.cookie_transfer.base_height_m if scene == "cookie_transfer" else 0.98
+    # The robot's world XY, from the configuration rather than from this file.  It used to be
+    # the literal `-0.35 0` written out three times below, which is the same value and one
+    # thing instead of three; the reason it became a knob is in `CookieSceneConfig.base_xy_m`.
+    base_x, base_y = (float(v) for v in config.cookie_transfer.base_xy_m[:2])
     ET.SubElement(
         world,
         "geom",
         name="stand_mast",
         type="box",
-        pos=f"-0.35 0 {base_height / 2}",
+        pos=f"{base_x:.10g} {base_y:.10g} {base_height / 2}",
         size=f"0.040 0.040 {base_height / 2}",
         rgba="0.08 0.09 0.10 1",
         contype="0",
@@ -1546,7 +1550,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         "geom",
         name="stand_bracket",
         type="box",
-        pos=f"-0.35 0 {base_height - 0.07}",
+        pos=f"{base_x:.10g} {base_y:.10g} {base_height - 0.07}",
         size="0.10 0.12 0.035",
         rgba="0.18 0.19 0.21 1",
         contype="0",
@@ -1579,7 +1583,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
         front["target"] = "workspace_target"
     ET.SubElement(world, "camera", **front)
 
-    base = ET.SubElement(world, "body", name="base_link", pos=f"-0.35 0 {base_height}")
+    base = ET.SubElement(world, "body", name="base_link", pos=f"{base_x:.10g} {base_y:.10g} {base_height}")
     _add_inertial(base, links["base_link"])
     ET.SubElement(
         base,

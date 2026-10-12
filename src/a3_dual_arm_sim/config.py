@@ -145,6 +145,25 @@ class CookieSceneConfig:
 
     calibration_status: str = "prototype_estimate"
     base_height_m: float = 1.10
+    #: Where the A3 robot stands, in world XY, in metres.  This is the root of the whole
+    #: arm tree (``base_link``) and the post it hangs from, so it moves the *robot* and not
+    #: the task: the bins, the box and the Cookies are placed by their own fields below and
+    #: stay where they are.  The value is the original literal, so every scene that does not
+    #: ask for a shift is unchanged; what it exists for is the one case where the task has to
+    #: be where LIBERO's fixed camera looks and the arm has to be able to reach it.
+    base_xy_m: tuple[float, ...] = (-0.35, 0.0)
+    #: How far this scene slid A3's whole arrangement, in world XY, in metres: zero for every
+    #: scene that uses A3's own placement.
+    #:
+    #: It is a fact the scene *knows* and the expert cannot infer, and the expert needs it.  The
+    #: expert's reference poses -- the staging point above the source bin, in particular -- are
+    #: world coordinates tuned at A3's own placement, so a scene that translates the arrangement
+    #: leaves them behind: measured, `a3_libero_dense_batch_libero_mount` fell back to a
+    #: bin-centred staging pose and the reset IK refused it at **4.21 mm** against its 4.00 mm
+    #: tolerance, which is the same failure the batch expert's own comment records at 4.33 mm.
+    #: The expert adds this to its tuned points so they travel with the task; a scene that does
+    #: not set it is unchanged.
+    layout_offset_m: tuple[float, ...] = (0.0, 0.0)
     box_lift_m: float = 0.030
     box_tilt_deg: float = 8.0
     left_gripper_kp: float = 400.0
@@ -673,6 +692,8 @@ def load_config(path: str | Path | None = None) -> SimConfig:
             cookie_raw.get("target_bin_wall_height_m", defaults.target_bin_wall_height_m)
         ),
         base_height_m=float(cookie_raw.get("base_height_m", defaults.base_height_m)),
+        base_xy_m=_float_tuple(cookie_raw, "base_xy_m", defaults.base_xy_m),
+        layout_offset_m=_float_tuple(cookie_raw, "layout_offset_m", defaults.layout_offset_m),
         box_lift_m=float(cookie_raw.get("box_lift_m", defaults.box_lift_m)),
         box_tilt_deg=float(cookie_raw.get("box_tilt_deg", defaults.box_tilt_deg)),
         left_gripper_kp=float(cookie_raw.get("left_gripper_kp", defaults.left_gripper_kp)),
