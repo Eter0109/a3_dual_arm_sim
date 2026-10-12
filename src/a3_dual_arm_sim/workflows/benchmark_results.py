@@ -78,8 +78,8 @@ class BenchmarkResult:
         lines = [
             f"=== Benchmark Summary: {self.policy_name} ===",
             f"Total Episodes      : {self.total_episodes}",
-            f"Total Score         : {self.total_score} / {self.max_possible_score} ({self.total_score / self.max_possible_score * 100:.1f}%)",
-            f"Mean Score / Ep     : {self.mean_score:.2f} / 10.00",
+            f"Total Score         : {self.total_score} / {self.max_possible_score} ({self.total_score / self.max_possible_score * 100 if self.max_possible_score else 0:.1f}%)",
+            f"Mean Score / Ep     : {self.mean_score:.2f} / {self.max_possible_score / self.total_episodes if self.total_episodes else 0:.2f}",
             f"Min / Max Score     : {self.min_score} / {self.max_score}",
             f"Complete Task Success: {self.success_rate * 100:.1f}%",
             f"Mean Steps / Ep     : {self.mean_steps:.1f}",

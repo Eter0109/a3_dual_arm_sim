@@ -19,6 +19,7 @@ import numpy as np
 
 from .benchmark_results import BenchmarkResult as BenchmarkResult
 from .benchmark_results import EpisodeScore as EpisodeScore
+from .cookie_2x10_execution import Cookie2x10EpisodeExecution
 from .episode_execution import DEFAULT_CONFIG_PATH as DEFAULT_CONFIG_PATH
 from .episode_execution import EpisodeExecution as EpisodeExecution
 from .policy_adapters import ACTPolicyAdapter as ACTPolicyAdapter
@@ -32,6 +33,30 @@ from .policy_adapters import resolve_smolvla_checkpoint as resolve_smolvla_check
 class CookieBatchBenchmark(EpisodeExecution):
     """Benchmark runner for single-box batch transfer tasks."""
 
+    task = "2x5"
+    prompt_style = "task"
+    diagnostic_dir = None
+
+    def _episode_task(self, column, seed):
+        if self.prompt_style == "training":
+            return "transfer 10 cookies into target box"
+        return super()._episode_task(column, seed)
+
+    def run_episode(self, policy, seed, episode_idx=1, **kwargs):
+        if policy == "expert":
+            policy = "variable_grasp" if self.task == "2x10" else "same_column"
+        if self.diagnostic_dir is None:
+            return super().run_episode(policy, seed, episode_idx, **kwargs)
+        from .diagnostics import EpisodeDiagnostic
+
+        trace = EpisodeDiagnostic(self.diagnostic_dir / f"seed_{seed}", self.config.control_hz)
+        try:
+            result = super().run_episode(policy, seed, episode_idx, diagnostic=trace, **kwargs)
+            (trace.root / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
+            return result
+        finally:
+            trace.close()
+
     def evaluate(
         self,
         policy: Any,
@@ -43,6 +68,12 @@ class CookieBatchBenchmark(EpisodeExecution):
         on_episode_end: Callable[[EpisodeScore], None] | None = None,
     ) -> BenchmarkResult:
         """Run standard benchmark for the specified number of episodes (default: 20)."""
+        if num_episodes < 1 or workers < 1:
+            raise ValueError("num_episodes and workers must be positive")
+        if policy == "expert":
+            policy = "variable_grasp" if self.task == "2x10" else "same_column"
+        if not isinstance(policy, str) and workers > 1:
+            raise ValueError("Policy instances require workers=1")
         if policy_name is None:
             if isinstance(policy, str):
                 policy_name = policy
@@ -71,6 +102,12 @@ class CookieBatchBenchmark(EpisodeExecution):
             worker_args = [
                 {
                     "config_path": str(self.config_path),
+                    "task": self.task,
+                    "prompt_style": self.prompt_style,
+                    "first_grasp": getattr(self, "first_grasp", None),
+                    "success_hold_steps": self.success_hold_steps,
+                    "slot_tolerance_m": self.config.cookie_transfer.target_slot_tolerance_m,
+                    "wall_contact_tolerance_m": self.wall_contact_tolerance_m,
                     "policy": policy_spec,
                     "seed": seed_start + ep_i,
                     "episode_idx": ep_i + 1,
@@ -103,7 +140,7 @@ class CookieBatchBenchmark(EpisodeExecution):
                         status_str = "SUCCESS" if ep_res.success else "FAIL"
                         print(
                             f"[{len(results_by_idx):02d}/{num_episodes:02d}] Finished Seed {ep_res.seed:4d} | "
-                            f"Score: {ep_res.score:2d}/10 | "
+                            f"Score: {ep_res.score:2d}/{ep_res.max_score} | "
                             f"Steps: {ep_res.steps:4d} | "
                             f"Time: {ep_res.wall_seconds:5.2f}s | "
                             f"Status: {status_str}",
@@ -111,15 +148,20 @@ class CookieBatchBenchmark(EpisodeExecution):
                         )
                 episode_results = [results_by_idx[i] for i in range(num_episodes)]
         else:
-            runner_policy = make_policy_adapter(policy)
-            needs_cameras = getattr(runner_policy, "action_mode", "") == "joint_position"
+            runner_policy = None if policy == "variable_grasp" else make_policy_adapter(policy)
+            needs_cameras = (
+                self.diagnostic_dir is not None
+                or getattr(runner_policy, "action_mode", "") == "joint_position"
+            )
             env = None
             try:
                 env = self.create_env(render_cameras=needs_cameras)
                 for ep_i in range(num_episodes):
                     seed = seed_start + ep_i
                     ep_result = self.run_episode(
-                        policy=policy if policy == "same_column" else runner_policy,
+                        policy=policy
+                        if isinstance(policy, str) and policy in ("same_column", "variable_grasp")
+                        else runner_policy,
                         seed=seed,
                         episode_idx=ep_i + 1,
                         env=env,
@@ -133,7 +175,7 @@ class CookieBatchBenchmark(EpisodeExecution):
                         status_str = "SUCCESS" if ep_result.success else "FAIL"
                         print(
                             f"[{ep_result.episode:02d}/{num_episodes:02d}] Seed {seed:4d} | "
-                            f"Score: {ep_result.score:2d}/10 | "
+                            f"Score: {ep_result.score:2d}/{ep_result.max_score} | "
                             f"Steps: {ep_result.steps:4d} | "
                             f"Time: {ep_result.wall_seconds:5.2f}s | "
                             f"Status: {status_str}",
@@ -148,7 +190,7 @@ class CookieBatchBenchmark(EpisodeExecution):
                         runner_policy.close()
 
         total_score = sum(r.score for r in episode_results)
-        max_possible = num_episodes * 10
+        max_possible = sum(r.max_score for r in episode_results)
         successes = sum(1 for r in episode_results if r.success)
         scores = [r.score for r in episode_results]
         steps = [r.steps for r in episode_results]
@@ -176,8 +218,36 @@ class CookieBatchBenchmark(EpisodeExecution):
         return result
 
 
+class Cookie2x10Benchmark(Cookie2x10EpisodeExecution, CookieBatchBenchmark):
+    """The 20-cookie task with the same evaluate/policy interface as 2x5."""
+
+    task = "2x10"
+
+
+def make_cookie_benchmark(task="2x5", *, prompt_style="task", first_grasp=None, **kwargs):
+    """Shared construction for the benchmark CLI and grid evaluations."""
+    if task not in ("2x5", "2x10"):
+        raise ValueError("task must be 2x5 or 2x10")
+    if prompt_style not in ("task", "training"):
+        raise ValueError("prompt_style must be task or training")
+    if task == "2x10":
+        benchmark = Cookie2x10Benchmark(first_grasp=first_grasp, **kwargs)
+    else:
+        if first_grasp is not None:
+            raise ValueError("first_grasp only applies to 2x10")
+        benchmark = CookieBatchBenchmark(**kwargs)
+    benchmark.prompt_style = prompt_style
+    return benchmark
+
+
 def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
-    benchmark = CookieBatchBenchmark(
+    benchmark = make_cookie_benchmark(
+        task=args.get("task", "2x5"),
+        prompt_style=args.get("prompt_style", "task"),
+        first_grasp=args.get("first_grasp"),
+        success_hold_steps=args.get("success_hold_steps", 5),
+        slot_tolerance_m=args.get("slot_tolerance_m", (0.015, 0.005)),
+        wall_contact_tolerance_m=args.get("wall_contact_tolerance_m", 0.030),
         config_path=args["config_path"],
         max_steps=args["max_steps"],
         randomize_boxes=args["randomize_boxes"],
@@ -200,8 +270,9 @@ def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
 
 
 def run_cookie_batch_benchmark(
-    policy: Any = "same_column",
+    policy: Any = "expert",
     *,
+    task: str = "2x5",
     num_episodes: int = 20,
     seed_start: int = 0,
     max_steps: int = 1000,
@@ -210,9 +281,12 @@ def run_cookie_batch_benchmark(
     workers: int = 1,
     output_path: Path | str | None = None,
     verbose: bool = True,
+    **benchmark_options: Any,
 ) -> BenchmarkResult:
     """Convenience function to run the benchmark and optionally save JSON."""
-    benchmark = CookieBatchBenchmark(
+    benchmark = make_cookie_benchmark(
+        task=task,
+        **benchmark_options,
         max_steps=max_steps,
         randomize_boxes=randomize_boxes,
         randomize_cookies=randomize_cookies,

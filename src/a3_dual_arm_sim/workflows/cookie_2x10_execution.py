@@ -41,6 +41,8 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
                 position_noise_m=self.cookie_noise_m,
                 yaw_noise_rad=self.cookie_yaw_noise_rad,
                 terminate_on_success=False,
+                success_hold_steps=self.success_hold_steps,
+                wall_contact_tolerance_m=self.wall_contact_tolerance_m,
             ),
             render_mode="human" if self.render else None,
             render_cameras=render_cameras,

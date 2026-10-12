@@ -28,8 +28,8 @@ MUJOCO_GL=egl a3-sim smoke --steps 20
 ```bash
 env -u MUJOCO_GL python examples/run_cookie_batch.py --expert same_column --render
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --policy same_column --episodes 1 --seed-start 1000 --workers 1 \
-  --max-steps 6000 --output outputs/expert/result.json
+  --task 2x5 --policy expert --profile basic --episodes 1 --seed-start 1000 --workers 1 \
+  --max-steps 500 --output outputs/expert/result.json
 ```
 
 训练和数据功能按需安装 `python -m pip install -e '.[train]'`。默认基座为
@@ -38,6 +38,8 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 仓库不附带数据、模型权重或训练结果；首次使用需要下载。完整命令见训练手册。
 
 ## 文档导航
+
+从采集到部署优先阅读 [完整流程指南](docs/workflow_guide.md)，覆盖已有策略采集、SmolVLA/ACT 训练、统一 benchmark、六项网格测试及自定义 policy。当前完整度与改进优先级见 [项目检查](docs/project_status.md)。
 
 - [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
 - [操作手册](docs/operations.md)：场景、专家、遥操作、相机、采集和回放。
@@ -64,7 +66,7 @@ MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
 先在 `configs/randomization.yaml` 中设置 `profile: advanced` 和
 `source_column: random`。`profile` 选择 basic/medium/advanced，`source_column`
 独立选择 1/2/3/4/random；所有幅度与颜色也在该文件中调整。
-旧的 `--profile` 和 `--source-column` 命令参数已移除。基础档保持原有小范围布局变化，
+上述采集脚本不接受 `--profile` 和 `--source-column`，这两个覆盖参数属于统一 benchmark。基础档保持原有小范围布局变化，
 中级增加轻微相机和光照变化，高级进一步增大变化并从四种饼干颜色中每轮选择一种。
 三档共用专家主体，并针对不同列调整控制策略，仍采集单盒、两批各五块的整任务
 LeRobot v3 数据，不使用 Planner/Verifier，也不切分 skill。
@@ -112,6 +114,27 @@ MUJOCO_GL=egl python examples/collect_cookie_2x10.py \
 [2×10 使用说明](docs/cookie_2x10.md)。
 正式采集前先用不同 seed 试跑，并抽查三路视频；采集允许失败尝试，训练集只保留
 通过数量、抬升和释放检查的完整回合。采集完成后再审计数据并训练 SmolVLA。
+
+## 统一评测与网格测试
+
+两个任务统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task 2x5|2x10` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。按 episode 结束时的目标盒饼干数量计分，2×5 满分 10、2×10 满分 20。
+
+```bash
+MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
+  --task 2x10 --policy expert --profile basic --source-column 1 \
+  --episodes 1 --seed-start 13000 --max-steps 500 --workers 1
+
+# 替换成已有权重及其训练数据；不要与已经运行的同目录进程重复启动。
+MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
+  --checkpoint outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
+  --dataset-root datasets/a3_front_close_left_100 --repo-id local/a3-front-close-left-100 \
+  --max-steps 500 --episodes 20 --seed-start 13000 \
+  --output outputs/smolvla_grid_500
+```
+
+网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列，2×5 使用训练短指令。
+结果保存到 `summary.md`、`summary.json` 和 `episodes.jsonl`；原命令加 `--resume` 可续跑。
+500 步为控制预算，不保证专家或模型完成四次抓取。完整参数、可视化、录制与自定义策略示例见 [完整流程指南](docs/workflow_guide.md)。
 
 ## 资源与许可
 

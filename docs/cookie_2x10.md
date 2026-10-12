@@ -1,5 +1,7 @@
 # 2×10 场景与可控抓取数量
 
+采集、训练、统一 benchmark/网格及自定义 policy 的可执行指南见 [完整流程指南](workflow_guide.md)。
+
 2×10 装盒任务从源盒的 80 个饼干中搬运 20 个，目标两列各装十个。
 场景配置为 `configs/cookie_2x10.yaml`，模型文件为 `models/a3_cookie_transfer_2x10.xml`，
 规则专家按四次计划抓取。

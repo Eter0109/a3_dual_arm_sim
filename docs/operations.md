@@ -1,5 +1,7 @@
 # 操作手册
 
+采集、训练、统一 benchmark/网格及自定义 policy 的可执行指南见 [完整流程指南](workflow_guide.md)。
+
 以下命令默认在仓库根目录和已激活的 Python 环境中执行。基础功能安装 `.[dev]`，采集与学习安装 `.[train]`。wheel 用户可在自己的工作目录运行 `a3-sim` 和 `python -m a3_dual_arm_sim.<模块>`；`examples/` 是源码仓库便利入口。
 
 ## 场景与配置

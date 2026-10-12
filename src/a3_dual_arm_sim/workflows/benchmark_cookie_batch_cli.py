@@ -14,42 +14,38 @@ from dataclasses import asdict
 from pathlib import Path
 
 from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.sim.randomization import load_randomization_config
+from a3_dual_arm_sim.tasks.cookie_2x10_plan import parse_first_grasp
+from a3_dual_arm_sim.tasks.cookie_2x10_settings import load_cookie_2x10_settings
 from a3_dual_arm_sim.workflows.benchmark import (
     ACTPolicyAdapter,
     CookieBatchBenchmark,
     SmolVLAPolicyAdapter,
+    make_cookie_benchmark,
 )
-from a3_dual_arm_sim.workflows.diagnostics import EpisodeDiagnostic
 
-
-class DiagnosticBenchmark(CookieBatchBenchmark):
-    """Same execution path with optional observer-only traces."""
-
-    diagnostic_dir = None
-
-    def run_episode(self, policy, seed, episode_idx=1, **kwargs):
-        if self.diagnostic_dir is None:
-            return super().run_episode(policy, seed, episode_idx, **kwargs)
-        trace = EpisodeDiagnostic(self.diagnostic_dir / f"seed_{seed}", self.config.control_hz)
-        try:
-            result = super().run_episode(policy, seed, episode_idx, diagnostic=trace, **kwargs)
-            (trace.root / "result.json").write_text(json.dumps(result.to_dict(), indent=2))
-            return result
-        finally:
-            trace.close()
+# Backward-compatible import for existing callers.
+DiagnosticBenchmark = CookieBatchBenchmark
 
 
 def run_metadata(args, benchmark):
     metadata = vars(args).copy()
     metadata["config"] = asdict(benchmark.config)
     metadata["success_conditions"] = {
-        "required_cookies_in_target": 10,
-        "required_cookies_in_source": 70,
-        "require_exact_slots": True,
+        "required_cookies_in_target": benchmark.required_cookies,
+        "required_cookies_in_source": len(
+            benchmark.config.cookie_transfer.cookie_source_positions_m
+        )
+        - benchmark.required_cookies,
+        "require_exact_slots": benchmark.task == "2x5",
         "success_hold_steps": benchmark.success_hold_steps,
         "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
         "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
     }
+    metadata["task"] = benchmark.task
+    metadata["first_grasp"] = getattr(benchmark, "first_grasp", None)
+    metadata["randomization_settings"] = benchmark.randomization_settings
+    metadata["source_column"] = benchmark.source_column
     metadata["randomization"] = {
         "boxes": benchmark.randomize_boxes,
         "cookies": benchmark.randomize_cookies,
@@ -97,8 +93,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--policy",
-        default="same_column",
-        help="Policy: same_column, cross_column, smolvla[:checkpoint_or_run], act:checkpoint_or_run, or module:factory",
+        default="expert",
+        help="Policy: expert (task-specific), same_column, cross_column, variable_grasp (2x10), smolvla[:checkpoint_or_run], act:checkpoint_or_run, or module:factory",
     )
     parser.add_argument(
         "--episodes",
@@ -187,11 +183,36 @@ def main() -> int:
     )
     parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
+    parser.add_argument("--task", choices=("2x5", "2x10"), default="2x5")
+    parser.add_argument("--profile", choices=("basic", "medium", "advanced"))
+    parser.add_argument("--source-column", choices=("1", "2", "3", "4", "random"))
+    parser.add_argument("--randomization-config", type=Path)
+    parser.add_argument("--first-grasp", type=parse_first_grasp)
+    parser.add_argument(
+        "--prompt-style",
+        choices=("training", "task"),
+        default="training",
+        help="2x5: training short prompt or column-specific task prompt; 2x10 always uses its native prompt",
+    )
+    parser.add_argument("--num-steps", type=int, default=None, help="SmolVLA flow inference steps")
     args = parser.parse_args()
+    if min(args.episodes, args.max_steps, args.workers) < 1:
+        parser.error("episodes, max-steps and workers must be positive")
+    if args.task == "2x10" and (args.compare or args.policy in ("same_column", "cross_column")):
+        parser.error(
+            "2x10 supports --policy expert or variable_grasp, not same_column/cross_column/compare"
+        )
+    if args.task == "2x5" and (args.first_grasp is not None or args.policy == "variable_grasp"):
+        parser.error("first-grasp and variable_grasp require --task 2x10")
+    if args.num_steps is not None and (
+        args.num_steps < 1 or not args.policy.startswith("smolvla:")
+    ):
+        parser.error("num-steps requires smolvla:<checkpoint> and a positive value")
     overrides = any(
         v is not None
         for v in (
             args.inference_seed,
+            args.num_steps,
             args.n_action_steps,
             args.dataset_root,
             args.device,
@@ -208,7 +229,28 @@ def main() -> int:
     if args.temporal_ensemble_coeff is not None and not args.policy.startswith("act:"):
         parser.error("Temporal ensembling requires act:<checkpoint>")
 
-    benchmark = DiagnosticBenchmark(
+    randomization = {}
+    first_grasp = args.first_grasp
+    if args.task == "2x10" or args.profile or args.source_column or args.randomization_config:
+        if args.task == "2x10":
+            settings, configured_grasp = load_cookie_2x10_settings(args.randomization_config)
+            if first_grasp is None:
+                first_grasp = configured_grasp
+        else:
+            settings = load_randomization_config(args.randomization_config)
+        settings["profile"] = args.profile or settings["profile"]
+        settings["source_column"] = args.source_column or settings["source_column"]
+        randomization = {
+            "profile": settings["profile"],
+            "source_column": settings["source_column"],
+            "randomization_settings": settings,
+        }
+
+    benchmark = make_cookie_benchmark(
+        task=args.task,
+        prompt_style=args.prompt_style,
+        first_grasp=first_grasp,
+        **randomization,
         max_steps=args.max_steps,
         randomize_boxes=not args.no_randomize_boxes,
         target_bin_noise_m=args.target_box_noise,
@@ -230,9 +272,11 @@ def main() -> int:
         )
         workers = 1
     policy = args.policy
-    if overrides or args.policy.startswith("act:"):
+    if overrides or args.policy.startswith(("smolvla:", "act:")):
         adapter = ACTPolicyAdapter if args.policy.startswith("act:") else SmolVLAPolicyAdapter
         extra = {}
+        if args.policy.startswith("smolvla:") and args.num_steps is not None:
+            extra["num_steps"] = args.num_steps
         if args.policy.startswith("act:"):
             extra["temporal_ensemble_coeff"] = args.temporal_ensemble_coeff
         policy = adapter(

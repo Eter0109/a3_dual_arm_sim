@@ -32,7 +32,7 @@ def test_cli_passes_overrides_and_closes(monkeypatch):
             captured["workers"] = kwargs["workers"]
 
     monkeypatch.setattr(module, "SmolVLAPolicyAdapter", Policy)
-    monkeypatch.setattr(module, "DiagnosticBenchmark", Benchmark)
+    monkeypatch.setattr(module, "make_cookie_benchmark", Benchmark)
     monkeypatch.setattr(
         "sys.argv",
         [

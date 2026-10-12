@@ -16,9 +16,10 @@ the test fails if the cleanup stops being wired into ``discard_episode``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-from pathlib import Path
 
 from a3_dual_arm_sim.contracts import (
     EEF_POSE,

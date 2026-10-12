@@ -37,7 +37,7 @@ MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
 - YAML `source_column: 1|2|3|4|random`：按源布局 X 从小到大编号，不按相机画面左右。
 - `profiles` 中设置各项幅度，`colors` 中设置 RGBA 颜色；数值设为 0 可关闭该项，
   `palette: false` 关闭颜色变化。位置单位米、盒子角度弧度、相机角度度数。
-- 旧 CLI 的 `--profile`、`--source-column` 已移除，只使用 YAML。
+- 这两个采集 CLI 不接受 `--profile`、`--source-column`，只使用 YAML；统一 benchmark 支持这两个覆盖项。
 - 可复制此 YAML，再通过 `--randomization-config` 指定实验配置。启动时读取一次；
   运行中修改文件不影响当前任务，重启后生效。完整解析配置会随采集记录保存，
   续采时配置不一致会拒绝，避免不同实验混入同一数据集。
@@ -94,3 +94,7 @@ python -m pytest -q tests/test_benchmark.py tests/test_cookie_same_column.py \
 这只是功能连通性验证，不代表达到 80%–90% 的采集成功率，也不是 VLA 成绩。
 正式采集前建议用独立 seed 每列至少尝试 25 次，保留失败记录，并报告各列
 成功次数/总尝试次数。不要仅以保存下来的成功 episode 计算成功率。
+
+## 统一 benchmark
+
+两任务的模型/专家评测、500 步数量统计及六项网格使用统一入口，命令见 [完整流程指南](workflow_guide.md#4-统一仿真-benchmark)。以最终放入数量为主指标；采集仍按完整成功条件保存演示。

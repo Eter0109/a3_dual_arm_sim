@@ -115,7 +115,7 @@ def test_act_benchmark_passes_overrides_and_closes(monkeypatch, tmp_path):
             seen["workers"] = kwargs["workers"]
 
     monkeypatch.setattr(cli, "ACTPolicyAdapter", Adapter)
-    monkeypatch.setattr(cli, "DiagnosticBenchmark", Benchmark)
+    monkeypatch.setattr(cli, "make_cookie_benchmark", Benchmark)
     monkeypatch.setattr(
         sys,
         "argv",
