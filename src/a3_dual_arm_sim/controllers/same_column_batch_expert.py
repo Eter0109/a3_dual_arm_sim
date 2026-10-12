@@ -88,6 +88,15 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             self._push_high, self._target_quat_canonical, self.env.current_joint_action[:7]
         )
 
+    def _grasp_pitch_for_column(self, column_rank, pitch_deg):
+        if (
+            column_rank == len(self._column_tool_pitch_deg) - 1
+            and self.data.xpos[self.env._source_bin_body, 0] >= 0.185
+        ):
+            # Preserve the legacy five-Cookie reach adjustment.
+            return -40
+        return pitch_deg
+
     def _select_batch(self):
         self._rim_contact_stop = False
         self.batch_indices = next(self._candidate_batches(), [])
@@ -150,14 +159,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             column_x = source[self.batch_indices[0], 0]
             column_rank = next(index for index, x in enumerate(columns) if np.isclose(x, column_x))
             pitch_deg = pitch_by_column[column_rank]
-            if (
-                column_rank == len(columns) - 1
-                and self.data.xpos[self.env._source_bin_body, 0] >= 0.185
-            ):
-                # At the far end of source-box randomization, -35 degrees
-                # leaves the five-Cookie pickup pose beyond the left arm's
-                # vertical reach, especially for the second batch.
-                pitch_deg = -40
+            pitch_deg = self._grasp_pitch_for_column(column_rank, pitch_deg)
             pitch = np.deg2rad(pitch_deg)
             c, s = np.cos(pitch), np.sin(pitch)
             # Rotate around the jaw axis. The pads still close along the
@@ -207,7 +209,9 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         self._opening = self._insert_opening
         pad_height_axis = up if self._aligned_grasp else np.array([0.0, 0.0, 1.0])
         self._pick_eef = (
-            self._pick_center + pad_height_axis * 0.010 - self._grasp_rotation @ self._pad_offset
+            self._pick_center
+            + pad_height_axis * getattr(self, "_batch_pinch_height_m", 0.010)
+            - self._grasp_rotation @ self._pad_offset
         )
         self._high_eef = self._pick_eef + [0, 0, 0.082]
         self._approach_eef = self._high_eef

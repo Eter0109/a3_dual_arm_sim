@@ -61,6 +61,7 @@ def prepare_a3_smolvla_source(
     decay_steps: int = 20000,
     num_steps: int = 25,
     action_dim: int = 16,
+    tokenizer_max_length: int | None = None,
 ) -> Path:
     """Create a lightweight adapted checkpoint view without copying the 1.2 GB weights."""
     base_model = base_model.expanduser().resolve()
@@ -75,6 +76,8 @@ def prepare_a3_smolvla_source(
         raise ValueError(f"Expected a SmolVLA checkpoint, got {config.get('type')!r}")
     if action_dim not in (8, 16):
         raise ValueError("action_dim must be 8 or 16")
+    if tokenizer_max_length is not None and tokenizer_max_length <= 0:
+        raise ValueError("tokenizer_max_length must be positive")
     if (
         int(config.get("max_state_dim", 0)) < action_dim
         or int(config.get("max_action_dim", 0)) < action_dim
@@ -101,6 +104,8 @@ def prepare_a3_smolvla_source(
     config["scheduler_warmup_steps"] = warmup_steps
     config["scheduler_decay_steps"] = decay_steps
     config["num_steps"] = num_steps
+    if tokenizer_max_length is not None:
+        config["tokenizer_max_length"] = tokenizer_max_length
 
     vlm_model_name = config.get("vlm_model_name")
     dependencies = base_model / "a3_dependencies.json"
@@ -122,11 +127,14 @@ def prepare_a3_smolvla_source(
         if source.is_file():
             shutil.copy2(source, runtime_dir / source.name)
     preprocessor_path = runtime_dir / "policy_preprocessor.json"
-    if cached_vlm is not None and preprocessor_path.is_file():
+    if preprocessor_path.is_file():
         preprocessor = json.loads(preprocessor_path.read_text(encoding="utf-8"))
         for step in preprocessor.get("steps", []):
             if step.get("registry_name") == "tokenizer_processor":
-                step["config"]["tokenizer_name"] = str(cached_vlm)
+                if cached_vlm is not None:
+                    step["config"]["tokenizer_name"] = str(cached_vlm)
+                if tokenizer_max_length is not None:
+                    step["config"]["max_length"] = tokenizer_max_length
         preprocessor_path.write_text(json.dumps(preprocessor, indent=2) + "\n", encoding="utf-8")
     runtime_weights = runtime_dir / "model.safetensors"
     if runtime_weights.exists():
@@ -221,6 +229,7 @@ def train_smolvla(
     if output_dir.exists():
         raise FileExistsError(f"Training output already exists: {output_dir}")
     base_model = resolve_base_model(base_model, revision=model_revision, offline=offline)
+    collection = json.loads((dataset_root / "collection_summary.json").read_text())
     policy_source = prepare_a3_smolvla_source(
         base_model,
         output_dir.parent / f".{output_dir.name}_a3_smolvla_source",
@@ -230,6 +239,8 @@ def train_smolvla(
         warmup_steps=min(warmup_steps, max(1, steps - 1)),
         decay_steps=steps,
         action_dim=audit["action_dim"],
+        # The four-grasp prompt exceeds the base checkpoint's 48-token limit.
+        tokenizer_max_length=128 if collection.get("target_layout") == "2x10" else None,
     )
     command = build_train_command(
         dataset_root=dataset_root,

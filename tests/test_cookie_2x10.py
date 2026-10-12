@@ -3,10 +3,12 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
+import mujoco
 import numpy as np
 import pytest
 
 from a3_dual_arm_sim.config import load_config
+from a3_dual_arm_sim.contracts import EpisodeContext
 from a3_dual_arm_sim.controllers.cookie_2x10_expert import A3Cookie2x10Expert
 from a3_dual_arm_sim.controllers.expert import CookiePhase
 from a3_dual_arm_sim.tasks.cookie_2x10 import A3Cookie2x10Env, Cookie2x10TaskConfig
@@ -15,6 +17,80 @@ from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
 from a3_dual_arm_sim.workflows.cookie_2x10_execution import Cookie2x10EpisodeExecution
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_initial_random_source_poses_are_clear_and_within_noise_bounds(seed):
+    env = A3Cookie2x10Env(
+        render_cameras=False,
+        task_config=Cookie2x10TaskConfig(position_noise_m=0.0003, yaw_noise_rad=0.015),
+    )
+    try:
+        env.reset(seed=seed, options={"randomize_cookies": True})
+        offsets = env.cookie_positions[:, :2] - np.asarray(env.SOURCE_POSITIONS)
+        assert np.max(np.abs(offsets)) <= env.task_config.position_noise_m + 1e-5
+        geom_cookie = {
+            geom: index for index, geoms in enumerate(env._cookie_collision_geoms) for geom in geoms
+        }
+        interpenetrations = [
+            contact
+            for contact in env.data.contact
+            if int(contact.geom1) in geom_cookie
+            and int(contact.geom2) in geom_cookie
+            and geom_cookie[int(contact.geom1)] != geom_cookie[int(contact.geom2)]
+            and contact.dist < -1e-6
+        ]
+        assert not interpenetrations
+        assert env.randomization_metadata["source_pose_resamples"] >= 0
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("seed,n", [(0, 0), (1, 9), (3, 5)])
+def test_far_column_final_group_has_reachable_pose_clear_of_box_wall(seed, n):
+    runner = Cookie2x10EpisodeExecution(first_grasp=n, source_column="4", profile="advanced")
+    env = runner.create_env(render_cameras=False)
+    try:
+        env.reset(
+            seed=seed,
+            options={
+                "randomize_cookies": runner.randomize_cookies,
+                "randomize_boxes": runner.randomize_boxes,
+                "randomize_source_bin": runner.randomize_boxes,
+                "randomize_target_bin": runner.randomize_boxes,
+                "source_bin_noise_m": runner.source_bin_noise_m,
+                "target_bin_noise_m": runner.target_bin_noise_m,
+                "target_bin_yaw_noise_rad": runner.target_bin_yaw_noise_rad,
+                "randomization_profile": runner.profile,
+                "appearance_seed": seed,
+                "randomization_settings": runner.randomization_settings,
+            },
+        )
+        expert = A3Cookie2x10Expert(env, first_grasp=n, requested_source_column_index=3)
+        expert.reset(EpisodeContext(seed=seed, task="", action_mode=env.action_mode))
+        # Probe the last group without running the preceding physical transfers.
+        expert.batch_index = 3
+        expert.completed_cookie_indices = list(range(60, 70 + n))
+        expert._select_batch()
+        work = mujoco.MjData(env.model)
+        work.qpos[:] = env.data.qpos
+        work.qpos[expert._l_qpos] = env.solve_ik(
+            expert._pick_eef, expert._grasp_quat, expert.q_transit
+        )
+        mujoco.mj_forward(env.model, work)
+        assert np.linalg.norm(work.site_xpos[expert._l_site] - expert._pick_eef) < 0.001
+        base = env.model.geom("L_2f85_base_collision").id
+        wall_contacts = [
+            contact
+            for contact in work.contact
+            if base in (contact.geom1, contact.geom2)
+            and "source"
+            in (env.model.geom(int(contact.geom1)).name or "")
+            + (env.model.geom(int(contact.geom2)).name or "")
+        ]
+        assert not wall_contacts
+    finally:
+        env.close()
 
 
 @pytest.mark.parametrize("n", range(10))
