@@ -119,6 +119,58 @@ TASKS: dict[str, TaskSpec] = {
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
     ),
+    # The same task on a different embodiment: the packing, the prompt and the contract are
+    # `a3_cookie_batch`'s, and only the arm and the cameras are `libero_props`'.  Registered
+    # as its own task rather than aliased because a dataset's provenance records the task
+    # name, and "which robot was this collected on" is the first thing a later reader needs.
+    "a3_libero_panda_dense_batch": TaskSpec(
+        name="a3_libero_panda_dense_batch",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
+    # **The same scene on the other arm**, and registered separately for the same reason: it is a
+    # one-variable comparison and the variable is the embodiment.  `a3_libero_panda_dense_batch`
+    # is unsolvable by its own scripted expert at *any* batch size -- LIBERO's jaws are ~25 mm
+    # thick against a 2.50 mm groove, and the packing leaves 3.3 / 15.1 mm at a column's ends --
+    # so asking a policy on that embodiment measures the policy against a scene no controller can
+    # finish.  The A3 arm's own gripper is 1.00 mm thick and solves the same packing five at a
+    # time (`a3_cookie_batch`, 539 steps, 10 in the target box), which is what makes the prompt
+    # and the contract above reachable here rather than decorative.
+    "a3_libero_dense_batch": TaskSpec(
+        name="a3_libero_dense_batch",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
+    # The controlled pair of the entry above: same task, packing, camera and box, with the arm as
+    # the only variable -- and both at a placement A3 can actually reach, which the original dense
+    # scene's placement is not (measured: its transit pose is 7.73 mm out of A3's reach).
+    "a3_libero_panda_dense_batch_a3_placement": TaskSpec(
+        name="a3_libero_panda_dense_batch_a3_placement",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
+    # The A3 arm back at LIBERO's placement, with the robot slid to meet the task instead of the
+    # task slid away from the robot.  Same prompt and same contract as the two entries above --
+    # this is the same job in the same frame, and only the mount moved.
+    "a3_libero_dense_batch_libero_mount": TaskSpec(
+        name="a3_libero_dense_batch_libero_mount",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
+    # The sparse counterpart: the two-Cookie scene on the A3 arm, with the robot slid into LIBERO's
+    # frame instead of the arrangement slid out of the arm's reach.  Its task is the one the
+    # reference arm completes, so a behaviour here is a statement about the arm.
+    #
+    # **The prompt and the contract are the two-Cookie scene's own, character for character.**  The
+    # instruction is a policy input, and the shared ten-piece wording ("grasp five ... all ten
+    # slots") applied to a scene holding two Cookies would make the sentence unanswerable from the
+    # picture -- so a pair that differed here would differ in the question as well as in the arm,
+    # and could not be read as an arm comparison at all.
+    "a3_libero_two_cookies_libero_mount": TaskSpec(
+        name="a3_libero_two_cookies_libero_mount",
+        prompt=_TWO_PIECE_PROMPT,
+        success_contract="released_2_upright_settled_contained_0_remain",
+    ),
     "a3_cookie_same_column": TaskSpec(
         name="a3_cookie_same_column",
         prompt=COOKIE_PROMPT,

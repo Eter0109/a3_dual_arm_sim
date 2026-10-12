@@ -949,6 +949,27 @@ LIBERO_BOWL_PROP_NAMES = ("bowl", "bowl_near")
 COOKIE_ON_TABLE_PROMPT = "pick up the yellow block and place it on the plate"
 
 
+def dense_cookie_layout(offset: tuple[float, float]) -> tuple[tuple[float, float], ...]:
+    """The batch scene's 4 x 20 packing, translated into another scene's frame.
+
+    Read from `configs/cookie_batch.yaml` rather than copied here: eighty positions copied
+    is eighty chances to disagree with the packing they came from.
+
+    The translation is the scene's own ``a3_layout_offset_m``, and that it is *only* a
+    translation is a measured fact rather than a convention: the two-Cookie scene's pair of
+    Cookies resolve to indices 2 and 10 of this grid once the offset is removed, which is
+    what that scene's registration comment already says it chose ("rows 2 and 10 rather
+    than 0 and 8").  The two scenes are the same arrangement in two places on the table,
+    so the arrangement is stated once.
+    """
+
+    batch = _styled_config("configs/cookie_batch.yaml", "plain").cookie_transfer
+    return tuple(
+        (float(x) + float(offset[0]), float(y) + float(offset[1]))
+        for x, y in batch.cookie_source_positions_m
+    )
+
+
 def libero_props_scene(
     *,
     task_name: str,
@@ -958,6 +979,27 @@ def libero_props_scene(
     cookie_on_table: bool = False,
     a3_single_cookie: bool = False,
     a3_layout_offset_m: tuple[float, float] = (0.0, 0.0),
+    #: Slide the **robot** instead of the task, by this much of world XY, in metres.
+    #:
+    #: The two offsets are not interchangeable and the difference is the whole reason this
+    #: parameter exists.  ``a3_layout_offset_m`` moves the bins, the box and the Cookies, which
+    #: is what puts them inside LIBERO's fixed frame -- and it moves them away from the arm that
+    #: has to reach them.  Measured with the batch expert's own reset IK on the dense packing:
+    #: the A3 arm solves the task with the layout where A3 puts it and misses the target by
+    #: 5.71 / 7.73 / 11.61 mm at ``dy`` = -0.15 / -0.20 / -0.25, against a 4.00 mm tolerance,
+    #: while the Panda solves every one of them.  So on the A3 arm the scene as registered
+    #: cannot be done at all: the placement LIBERO's camera demands is outside its reach, and
+    #: the placement it can reach is clipped into the frame's left edge (measured: the source
+    #: bin and the box sit in the bottom-left corner with the packing half out of frame, and
+    #: `pi05_libero_finetuned` answers that frame with 500 steps of ``motion mean 0.000`` --
+    #: the model holds, because there is nothing in the picture it recognises).
+    #:
+    #: Sliding the robot by the amount the layout was slid restores the *relative* geometry the
+    #: arm needs while leaving the task where LIBERO's camera already frames it, and it changes
+    #: no camera at all -- which is the axis the scene's own history decided not to spend
+    #: (`11f5ffb`, reversing `a99c876`'s re-aimed agentview).  Defaulted to the identity: a
+    #: scene that does not pass it is byte-for-byte the scene it was.
+    a3_robot_offset_m: tuple[float, float] = (0.0, 0.0),
     a3_cookie_position_m: tuple[float, float] | None = None,
     #: Several Cookies at once, for the stages that place more than one.  The singular
     #: ``a3_cookie_position_m`` is what the single-Cookie scenes use and stays as it is; this is
@@ -980,7 +1022,32 @@ def libero_props_scene(
     #: A caller may still force either value; this is a default, not a rule.
     cartesian: bool | None = None,
     hold_steps: int = 40,
-) -> CollectionScene:
+    #: Run the scene with the **five-at-a-time** expert instead of the one-at-a-time one.
+    #:
+    #: The single-piece expert is the honest choice for a scene that offers one Cookie, and it
+    #: is what every branch here used.  The dense packing is not that scene: its task asks for
+    #: **ten** released and its prompt says "five ... then five more ... all ten slots", and a
+    #: one-at-a-time state machine cannot express that.  Until this flag existed, the scene had
+    #: never been run by the workflow it describes, so every failure recorded against it was a
+    #: fact about the wrong controller.
+    #:
+    #: This changes the *expert* and nothing else -- the environment, the arm, the cameras and
+    #: the control parameters are the ones the scene had.
+    batch_expert: bool = False,
+    #: Keep LIBERO's own physics block.  **On by default**, because it is what makes a
+    #: zero-shot result mean something: `libero_fidelity` puts the Panda on LIBERO's contact
+    #: model -- an explicit `Euler` integrator, `impratio` 20 and `noslip_iterations` 0, all
+    #: set in `model.py` -- and every scene here keeps it.
+    #:
+    #: A scene that exists to *collect* the A3 task with a scripted expert is not that case,
+    #: and the dense packing does not survive the block.  Measured with the arm commanded to
+    #: hold and **no policy at all**, eighty Cookies in the 4 x 20 grid reach **5.60 m/s on the
+    #: first control step** under `Euler`/`noslip 0`, against **0.54 m/s** on the packing's own
+    #: block and **0.00 m/s** on `a3_cookie_batch`; they then jitter at ~1.3 m/s indefinitely
+    #: with the arm perfectly still.  That jitter -- not a grasp -- is what throws a Cookie out
+    #: of the bin at 100 m/s during `DESCEND`, and it is why the scripted expert could not
+    #: solve the scene.
+    libero_physics: bool = True,) -> CollectionScene:
     """The A3 table with LIBERO's own bowl and plate on it, and no Cookie task.
 
     Why this scene exists, and what its numbers mean
@@ -1011,6 +1078,11 @@ def libero_props_scene(
 
     def build_env(position_noise_m: float, yaw_noise_rad: float) -> A3DualArmEnv:
         loaded = _styled_config("configs/libero_props.yaml", visual_style)
+        # See the parameter's note: this is the one scene here that exists to collect the A3
+        # task rather than to reproduce LIBERO, and LIBERO's contact block is what makes its
+        # eighty-Cookie packing unstable.
+        if not libero_physics:
+            loaded = replace(loaded, libero_fidelity=False)
         # A3's own block, read once and up here because both the camera and the props need
         # it and they are set in different branches below.
         a3_transfer = (
@@ -1147,6 +1219,7 @@ def libero_props_scene(
             # only as `TypeError: unsupported format string passed to tuple.__format__`,
             # which names neither the field nor the shape.
             offset_x, offset_y = a3_layout_offset_m
+            robot_x, robot_y = a3_robot_offset_m
             a3_source = a3_transfer.cookie_source_positions_m[0]
             cookie_xy = (
                 (
@@ -1196,6 +1269,18 @@ def libero_props_scene(
                     target_bin_half_size_m=a3_transfer.target_bin_half_size_m,
                     target_bin_wall_height_m=a3_transfer.target_bin_wall_height_m,
                     target_slots_local_m=a3_transfer.target_slots_local_m,
+                    # The **robot**, not the task.  See `a3_robot_offset_m`: the arm has to
+                    # travel with the layout when the layout travels, or the reach the scene
+                    # needs is gone.  Read off the configuration rather than recomputed from a
+                    # literal, so a config that already moved the base keeps its own value.
+                    base_xy_m=(
+                        loaded.cookie_transfer.base_xy_m[0] + robot_x,
+                        loaded.cookie_transfer.base_xy_m[1] + robot_y,
+                    ),
+                    # ... and the expert's own reference poses have to travel too.  See the
+                    # field: a fixed staging point left behind by a translated arrangement is
+                    # what made this scene's reset IK refuse at 4.21 mm.
+                    layout_offset_m=(offset_x, offset_y),
                     # LIBERO's per-episode start poses are *its* task's archive and put the
                     # arm at the pose for picking up its bowl.  A3's task is a different
                     # reach with a different first move.
@@ -1243,12 +1328,18 @@ def libero_props_scene(
         # ran the expert; `a3_libero_panda_single_cookie` does, and reported 0/20 with every
         # episode one step long.  The value is A3's own: `cookie_single_piece_scene`'s default.
         mode: ActionMode = "cartesian_delta" if cartesian else "joint_position"
+        command_space = "cartesian" if cartesian else "joint"
+        expert: A3CookieTransferExpert = (
+            A3CookieBatchExpert(  # type: ignore[arg-type]
+                env, action_mode=mode, command_space=command_space
+            )
+            if batch_expert
+            else A3SinglePieceExpert(  # type: ignore[arg-type]
+                env, action_mode=mode, command_space=command_space
+            )
+        )
         return CookieCollectionPolicy(
-            expert=A3SinglePieceExpert(  # type: ignore[arg-type]
-                env,
-                action_mode=mode,
-                command_space="cartesian" if cartesian else "joint",
-            ),
+            expert=expert,
             hold_steps=hold_steps,
             action_mode=mode,
         )
@@ -1305,6 +1396,12 @@ def libero_props_scene(
             "layout_offset_m": (
                 f"{a3_layout_offset_m} -- A3's arrangement slid rigidly into LIBERO's frame"
                 if a3_single_cookie
+                else None
+            ),
+            "robot_offset_m": (
+                f"{a3_robot_offset_m} -- and the arm slid by the same amount, so the reach "
+                "the layout left behind comes back"
+                if a3_single_cookie and a3_robot_offset_m != (0.0, 0.0)
                 else None
             ),
             "props": (
@@ -1416,6 +1513,161 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
             matched_cameras=True, panda=True, a3_single_cookie=True,
             a3_layout_offset_m=(0.020, -0.200),
             a3_cookie_positions_m=((0.1194, 0.04875), (0.1194, 0.11941667)),
+            **kwargs
+        ),
+        # **The same sparse scene on the A3 arm, with the robot slid into the task.**  The
+        # two-Cookie scene is the one worth asking the arm question on: unlike the eighty-Cookie
+        # packing, its task is one the *reference* arm completes, and the two Cookies have ~71 mm
+        # of clear space between them, so a grasp that works here is a statement about the arm
+        # rather than about the packing.  Everything else is the entry above, character for
+        # character -- same placement, same absolute Cookie positions, same matched camera pair,
+        # same LIBERO physics block, same prompt, same single-piece expert -- except `panda=False`
+        # with its consequence `cartesian=True`, and `a3_robot_offset_m` equal to the layout
+        # offset, which is what puts the arm where the task now is (see that parameter).
+        "a3_libero_two_cookies_libero_mount": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_two_cookies_libero_mount",
+            matched_cameras=True, panda=False, cartesian=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_cookie_positions_m=((0.1194, 0.04875), (0.1194, 0.11941667)),
+            a3_robot_offset_m=(0.020, -0.200),
+            **kwargs
+        ),
+        # Stage 4: the dense packing, on the embodiment the rest of this pipeline is built
+        # on.  Only the *scene* comes from `a3_cookie_batch` -- eighty Cookies in a 4 x 20
+        # grid at 50.4 mm and 8.833 mm, five at a time into the 2 x 5 box, same bin, same
+        # bevels.  Everything about *how the arm works* is this file's: LIBERO's Panda under
+        # `OperationalSpaceAdapter`, the LIBERO-matched camera pair, and `physics_hz`,
+        # `max_joint_step_rad`, the servo bandwidth and the fingertip shim exactly as the
+        # two-Cookie scene takes them.
+        #
+        # That split is the point rather than a convenience.  A scene is also an embodiment,
+        # and swapping the arm or the camera leaves the videos looking like Cookies while
+        # every checkpoint trained on the old embodiment is being asked about a different
+        # robot -- a mismatch that reads as a capability failure.  The packing is the part
+        # that is genuinely new information.
+        #
+        # **The fingertip shim does not come along, and this scene is not solvable without it.**
+        # This comment used to say the opposite -- that `left_finger_pad_half_thickness_m` (0.0005
+        # m, already in `configs/cookie_same_column.yaml`) comes along with the packing.  It does
+        # not: `model._add_gripper` applies that field to the gripper *it* builds, i.e. A3's own
+        # Robotiq pads, and LIBERO's Panda brings its own fingers.  The scene was therefore
+        # designed around a shim that was never installed, which is why every attempt to run the
+        # workflow it describes ended in `DESCEND` at 20-130 N on a fingertip.
+        #
+        # What the Panda's fingers measure, on this scene, in the closing direction:
+        #
+        #   `gripper0_finger{1,2}_pad_collision`   an 8 mm box, contact face 12.45 mm from the
+        #                                          finger geom origin the expert measures
+        #                                          separation between -- so the hand is ~24.9 mm
+        #                                          thick at the point of contact;
+        #   `L_finger_{inner,outer}_geom`          the finger body's mesh, ~27 mm deep, and the
+        #                                          part that actually meets a neighbour.
+        #
+        # and what the packing leaves for them:
+        #
+        #   groove between two packed Cookies            2.50 mm   (8.833 pitch - 6.33 thick)
+        #   a column's high end, to the bin wall        15.1 mm
+        #   a column's low end, to the bin wall          3.3 mm
+        #
+        # Neither placement exists -- the hand can neither enter a groove nor stand outside the
+        # run -- and the failure is one-sided, which is the signature: measured on step 18 of
+        # `DESCEND`, `L_finger_outer_geom <-> cookie_5` and `cookie_6` (the next two pieces of the
+        # same twenty-long column) at `dist -0.36/-0.38 mm`, 64/83 N, with the other jaw at zero.
+        #
+        # Note that this is a fact about the *hand* and the *packing together*, not about batch
+        # size: a single Cookie from inside a column needs the same 27 mm of y beside it and has
+        # 2.50 mm.  `a3_libero_panda_single_cookie` and `a3_libero_panda_two_cookies` work because
+        # their one or two Cookies have ~70 mm of clear space beside them, and that clear space is
+        # exactly what this packing removes.  The same workflow on the **A3 arm** -- whose own pad
+        # is 1.00 mm thick, so the grooves are 0.75 mm a side -- reaches `DONE` in 539 steps with
+        # 10 in the target box and 70 in the source: `a3_cookie_batch`.
+        "a3_libero_panda_dense_batch": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_panda_dense_batch",
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_cookie_positions_m=dense_cookie_layout((0.020, -0.200)),
+            # The workflow this scene's prompt and contract describe: five at a time, twice.
+            batch_expert=True,
+            # ... and the packing's own physics block, not LIBERO's; see the parameter.
+            libero_physics=False,
+            **kwargs
+        ),
+        # **The same scene, the same packing, the same cameras, the same prompt -- on the A3 arm.**
+        # This is the one-variable counterpart of the entry above, and it exists because that one
+        # cannot be finished by any controller on its own embodiment (LIBERO's jaws are ~25 mm thick
+        # against a 2.50 mm groove, and a column's ends have 3.3 / 15.1 mm), so a policy's behaviour
+        # there is measured against a scene with no solution to find.  Here the packing is inside
+        # the reach of a hand that can actually take five at a time.
+        #
+        # `panda=False` is the only change to the arm, and with it the deployment home
+        # (`deployment_home` is LIBERO's Panda's angles in that branch, and A3's own pose is the
+        # one this arm was built for) and the gripper.  `cartesian=True` is *not* a second change --
+        # it is the arm's own consequence, kept explicit because `cartesian` defaults from `panda`
+        # and a silent flip to `joint_position` would pair a `cartesian_delta` policy with a
+        # joint-command environment, which is the exact failure the parameter's note describes.
+        #
+        # **The offset is zero, and that is a measurement rather than a preference.**  The entry
+        # above slides A3's arrangement by `(0.020, -0.200)` so that it lands where LIBERO's fixed
+        # camera is aimed -- which is in front of LIBERO's Panda.  A3's arm is not there: measured
+        # with the batch expert's own reset IK, the transit pose at `-0.200` is **7.73 mm** out of
+        # reach against a 4.00 mm tolerance, and at `-0.120` it is 5.44 mm, while `0.000` and
+        # `-0.050` both solve.  A swept grid of the two arms over `dx` in {-0.02, 0, +0.02} and `dy`
+        # in {-0.25 ... +0.05} puts the boundary in the same place: A3 fails for every `dy` at or
+        # below -0.10 and works at or above -0.05, and the Panda works everywhere tried.  So **no
+        # single placement lets LIBERO's camera frame the arrangement and A3 reach it**: at `dy`
+        # >= -0.05 the layout sits at the frame's lower-left edge, with the source bin's left
+        # margin clipped, which is the price of this scene existing at all.
+        #
+        # Cameras, prompt, contract, cookie positions and the physics block are otherwise read
+        # from the entry above unchanged.
+        "a3_libero_dense_batch": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_dense_batch",
+            matched_cameras=True, panda=False, cartesian=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.0, 0.0),
+            a3_cookie_positions_m=dense_cookie_layout((0.0, 0.0)),
+            batch_expert=True,
+            libero_physics=False,
+            **kwargs
+        ),
+        # **The Panda at the A3 placement, for the controlled pair.**  The two entries together are
+        # the same task, packing, camera, box and physics with one variable between them -- the arm
+        # -- which is what the A3 entry above cannot be against the original dense scene, because
+        # there the placement differs by 200 mm as well.  Each arm is driven through its own
+        # state calibration (`configs/policies/pi05_libero_a3_cartesian.yaml` against
+        # `pi05_libero_panda.yaml`), so the policy receives LIBERO's state convention on either.
+        "a3_libero_panda_dense_batch_a3_placement": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_panda_dense_batch_a3_placement",
+            matched_cameras=True, panda=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.0, 0.0),
+            a3_cookie_positions_m=dense_cookie_layout((0.0, 0.0)),
+            batch_expert=True,
+            libero_physics=False,
+            **kwargs
+        ),
+        # **The A3 arm at LIBERO's placement, with the robot slid to meet the task.**  The two
+        # entries above are a dilemma and this is the way out of it: the Panda works at
+        # `(0.020, -0.200)` because LIBERO's fixed camera frames that spot and the Panda reaches
+        # it, the A3 arm works at `(0.000, 0.000)` because that is where its own workspace is --
+        # and neither placement satisfies both.  Sliding the *arm* by the amount the layout was
+        # slid removes the dilemma without touching the camera: the relative geometry is
+        # `(0.000, 0.000)`'s, which the batch expert solves, and the frame is the one the Panda
+        # entry was measured on, which is where the packing is legible.
+        #
+        # Why this matters beyond the expert: with the layout at LIBERO's spot and the arm left
+        # at home, `pi05_libero_finetuned` does not move at all on the A3 arm -- 500 steps of
+        # `motion mean 0.000` against `0.008` on the Panda, and the front frame says why (the
+        # task is a clipped sliver at the frame's left edge and the model holds).  So the arm's
+        # position is a *policy input*, not bookkeeping, and this is the scene that tests it
+        # with everything else held: same camera, same prompt, same packing, same box, same
+        # physics, same layout -- the arm and its mount are the one variable.
+        "a3_libero_dense_batch_libero_mount": lambda **kwargs: libero_props_scene(
+            task_name="a3_libero_dense_batch_libero_mount",
+            matched_cameras=True, panda=False, cartesian=True, a3_single_cookie=True,
+            a3_layout_offset_m=(0.020, -0.200),
+            a3_cookie_positions_m=dense_cookie_layout((0.020, -0.200)),
+            a3_robot_offset_m=(0.020, -0.200),
+            batch_expert=True,
+            libero_physics=False,
             **kwargs
         ),
         # ------------------------------------------------------------------ behaviour probes
