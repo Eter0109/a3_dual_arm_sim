@@ -44,6 +44,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     SERVO_ARRIVAL_M = 0.0015
     SERVO_ARRIVAL_RAD = 0.045
 
+    #: Kept between the lowest **colliding** point on either jaw and the level the batch of
+    #: Cookies stands on, so that seating the pads cannot drive the hand into the bin floor.
+    #: See `_jaw_lowest_offset` for why this is measured per hand instead of assumed.
+    JAW_FLOOR_CLEARANCE_M = 0.001
+
     def reset(self, context=None):
         super().reset(context)
         self.profile: BatchProfile = PROFILES[self.env.config.batch_expert_profile]
@@ -151,6 +156,36 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
 
     def _contact_chain(self):
         fingers = tuple(self.env._left_finger_geoms)
+        # **A jaw is a chain of bodies, and the contact does not have to land on the geom the jaw
+        # is named after.**  `fingers` is one geom per jaw -- the one on the finger *body* -- and
+        # the graph used to be built from those geoms directly, so a contact anywhere else on the
+        # chain was invisible twice over: it added nothing to `total_forces`, and it could not
+        # join a Cookie to the hand.  On LIBERO's Panda the part that meets a Cookie is
+        # `gripper0_finger{1,2}_pad_collision`, a box on the *pad* body, and the measurement is
+        # this: with both pads in contact --
+        #
+        #     gripper0_finger1_pad_collision <-> cookie_0_geom  dist -0.02 mm  |fn| 1.42 N
+        #     gripper0_finger2_pad_collision <-> cookie_4_geom  dist -0.00 mm  |fn| 0.37 N
+        #
+        # -- the expert read `pad forces=[0.0, 0.0] N`, so `CLOSE` never saw the 2.0 N it waits
+        # for, drove its command to 0.000 and failed after 421 steps.  `env._left_jaw_geoms` is
+        # the tree walk that already exists for exactly this reason, and routing every jaw geom
+        # through it is what makes the two hands measure the same way.  A3 is unaffected in
+        # principle -- its pads *are* the named geoms, so the mapping is the identity on the
+        # contacts it makes -- and that is checked by re-running `a3_cookie_batch` rather than
+        # assumed.
+        jaw_of_geom = {
+            int(geom): index
+            for index, jaw in enumerate(getattr(self.env, "_left_jaw_geoms", ()))
+            for geom in jaw
+        }
+
+        def node_of(raw: int) -> int:
+            """The graph node a contact's geom belongs to: a jaw's named geom, or a Cookie."""
+            if raw in jaw_of_geom:
+                return int(fingers[jaw_of_geom[raw]])
+            return int(mapping.get(raw, raw))
+
         # Collapse all collision pieces of a Cookie into one graph node.
         groups = getattr(
             self.env, "_cookie_collision_geoms",
@@ -167,8 +202,8 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         total_forces = np.zeros(2)
         for cid in range(self.data.ncon):
             contact = self.data.contact[cid]
-            a = mapping.get(int(contact.geom1), int(contact.geom1))
-            b = mapping.get(int(contact.geom2), int(contact.geom2))
+            a = node_of(int(contact.geom1))
+            b = node_of(int(contact.geom2))
             chain_contact = a in nodes and b in nodes
             pad_contact = a in fingers or b in fingers
             if not chain_contact and not pad_contact:
@@ -283,9 +318,19 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
           so the plan cannot wind up on a blocked move and needs no clamp;
         * otherwise the plan is built from the measured pose and clamped within
           ``SERVO_ANTIWINDUP_M`` of it, which is what the baseline does.
+
+        **``commanded_reference`` needs a joint-target arm, and only half of that
+        condition used to be checked.**  It reads the commanded pose out of
+        ``env.last_applied_action``, which under `OperationalSpaceAdapter` holds the
+        controller's solved **torques** and not a pose -- so on the Panda this branch
+        built a setpoint out of Newtons.  `applied_action_is_joint_target` is the
+        environment's own answer to "is that vector a pose", and where it is not, the
+        measured-pose clamp below is the right mechanism rather than a fallback: an
+        operational-space goal is latched and *can* wind up against a blocked move,
+        which is the thing the clamp exists to prevent.
         """
         rot = np.asarray(rotation, dtype=np.float64).ravel()
-        if self.profile.commanded_reference:
+        if self.profile.commanded_reference and self.env.applied_action_is_joint_target:
             setpoint = self._servo_plan.setpoint(
                 self.env.last_applied_action,
                 position,
@@ -301,7 +346,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 speed / max(float(np.linalg.norm(delta)), 1e-9),
             )
             tracking = self._servo_pos - current
-            if np.linalg.norm(tracking) > self.SERVO_ANTIWINDUP_M:
+            if self._clamp_setpoint and np.linalg.norm(tracking) > self.SERVO_ANTIWINDUP_M:
                 self._servo_pos = current + tracking * (
                     self.SERVO_ANTIWINDUP_M / np.linalg.norm(tracking)
                 )
@@ -314,7 +359,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         mujoco.mju_mat2Quat(actual_q, self.data.site_xmat[self._l_site])
         mujoco.mju_subQuat(error_r, target_q, actual_q)
         error_r = self.data.site_xmat[self._l_site].reshape(3, 3) @ error_r
-        q = self._solve_l(setpoint, target_q, self.env.last_applied_action[:7])
+        q = self._solve_l(setpoint, target_q, self._left_joint_feedback())
         reached = (
             np.linalg.norm(position - self.data.site_xpos[self._l_site])
             < self.SERVO_ARRIVAL_M
@@ -323,6 +368,42 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             < self.SERVO_SETTLED_QVEL
         )
         return self._hold_command(q, opening), reached
+
+    @property
+    def _clamp_setpoint(self) -> bool:
+        """Whether the plan has to be pulled back to within ``SERVO_ANTIWINDUP_M`` of the arm.
+
+        Only for a **joint-target** arm, where the command *is* the pose: there a blocked move
+        leaves the commanded pose ahead of the arm and the servo goes on pushing, which is the
+        windup this clamp exists to remove.
+
+        A torque arm driven through `OperationalSpaceAdapter` is the opposite case.  Its goal is
+        re-derived from the **measured** state at the start of every control step, so a blocked
+        move leaves nothing latched to unwind -- and the clamp is then not merely unnecessary,
+        it throttles every transit.  Measured on the dense Panda scene: with the clamp the
+        `APPROACH` servo asks for 15 mm/step and the tool covers **1.14 mm/step**, because the
+        plan can never sit more than 8 mm ahead of an arm that is tracking at about a
+        millimetre; the 882 mm transit therefore needs some 780 steps and the phase's 420-step
+        limit expires with **405 mm** still to go.
+        """
+
+        return self.env.applied_action_is_joint_target
+
+    def _preclose_arrived(self, actual_opening: float) -> bool:
+        """Whether the jaws are at the pre-close opening, to within a **distance**.
+
+        `preclose_tolerance` is metres on the finger and is converted through this hand's own
+        travel here, because an "opening value" is a different distance on a different
+        gripper.  Measured on the dense Panda scene: commanded to a 43.6 mm aperture the jaws
+        settle at 45.7 mm and stay there, `qvel` 0, no joint at its limit -- a 1.0 mm droop
+        from a load this gripper's `kp` does not remove.  In opening units that is 0.025, so
+        the old 0.008 asked for 0.32 mm, four times tighter than the 1.5 mm
+        ``SERVO_ARRIVAL_M`` the same expert accepts for every other move, and `PRE_CLOSE`
+        could never pass on that hand.
+        """
+
+        travel = float(self.env._finger_travel["L"])
+        return abs(actual_opening - self._opening) * travel <= self.profile.preclose_tolerance
 
     def _candidate_batches(self):
         """Prefer exposed ends; do not force an insertion through fallen Cookies."""
@@ -344,6 +425,79 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 ):
                     yield batch
 
+    def _jaw_lowest_offset(self) -> float:
+        """Signed z, in the **tool** frame, of the lowest colliding point on either jaw.
+
+        `_select_batch` seats the pads by putting the two finger geoms' midpoint 10 mm above the
+        batch's centre, which is a statement about the *pads*, and on A3 the pads are also the
+        lowest thing on the hand: measured, a pad centre 10 mm above a Cookie's centre leaves the
+        pad's bottom (half-thickness 16.75 mm) **5.8 mm above the level the Cookies stand on**, so
+        no descent this expert makes can reach the floor.
+
+        On LIBERO's Panda that is not true, and the target is not a near miss: the finger
+        **body's** collision mesh (`L_finger_{inner,outer}_geom`) hangs well below the pad box
+        that gives the hand its thickness.  Measured on a five-Cookie column with free ends,
+        where nothing else could obstruct the descent: the same target drove both jaws into the
+        source bin's floor, `source_bin_floor <-> L_finger_{inner,outer}_geom` at **14.0 N and
+        14.0 N** with `dist -0.56/-0.58 mm`, which `_insertion_jammed` reads as an insertion that
+        cannot proceed -- a failure with nothing to do with the Cookies.
+
+        So the depth is clamped by a measurement of this hand, taken once per episode in the pose
+        the hand is actually in.  A3 is unaffected: the clamp only ever *raises* a target, and
+        its pad bottom is already clear of the floor.
+        """
+
+        canonical = np.asarray(self._canonical, dtype=np.float64)
+        site_rotation = np.asarray(
+            self.data.site_xmat[self._l_site], dtype=np.float64
+        ).reshape(3, 3)
+        site_position = np.asarray(self.data.site_xpos[self._l_site], dtype=np.float64)
+        lowest = 0.0
+        for jaw in self.env._left_jaw_geoms:
+            for geom in jaw:
+                # Only what can collide: the visual meshes hang around the finger and would
+                # otherwise set a depth that no contact ever justifies.
+                if not (self.model.geom_contype[geom] or self.model.geom_conaffinity[geom]):
+                    continue
+                points = self._geom_vertices(geom)
+                # `R^T (p - c)` is the offset in the tool frame as the hand is *now*; the descent
+                # drives the tool to `_canonical`, so that offset rotates by `_canonical` to give
+                # the world offset it will have when the pads are seated.
+                tool_offsets = (points - site_position) @ site_rotation
+                lowest = min(lowest, float(np.min((tool_offsets @ canonical.T)[:, 2])))
+        return lowest
+
+    def _geom_vertices(self, geom: int) -> np.ndarray:
+        """World coordinates of a geom's extreme points: its mesh's vertices, or its box corners.
+
+        The two shapes the two jaw pads come in.  Anything else falls back to the bounding sphere
+        `geom_rbound` gives, which is conservative in the direction this is used for -- it can
+        only make the clamp raise the target further.
+        """
+
+        if self.model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh = int(self.model.geom_dataid[geom])
+            start = int(self.model.mesh_vertadr[mesh])
+            count = int(self.model.mesh_vertnum[mesh])
+            local = np.asarray(self.model.mesh_vert[start : start + count], dtype=np.float64)
+            rotation = np.asarray(self.data.geom_xmat[geom], dtype=np.float64).reshape(3, 3)
+            return local @ rotation.T + np.asarray(self.data.geom_xpos[geom], dtype=np.float64)
+        if self.model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_BOX:
+            half = np.asarray(self.model.geom_size[geom][:3], dtype=np.float64)
+            local = np.array(
+                [
+                    [sx * half[0], sy * half[1], sz * half[2]]
+                    for sx in (-1, 1)
+                    for sy in (-1, 1)
+                    for sz in (-1, 1)
+                ]
+            )
+            rotation = np.asarray(self.data.geom_xmat[geom], dtype=np.float64).reshape(3, 3)
+            return local @ rotation.T + np.asarray(self.data.geom_xpos[geom], dtype=np.float64)
+        centre = np.asarray(self.data.geom_xpos[geom], dtype=np.float64)
+        radius = float(self.model.geom_rbound[geom])
+        return centre + np.array([[0.0, 0.0, -radius], [0.0, 0.0, radius]])
+
     def _select_batch(self):
         source = np.asarray(self.env.SOURCE_POSITIONS)
         self.batch_indices = next(self._candidate_batches(), [])
@@ -354,12 +508,36 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         positions = self._positions()
         self._pick_center = positions.mean(axis=0)
         pitch = float(np.median(np.diff(source[self.batch_indices, 1])))
-        # Pad centres land in the two boundary gaps. Their flat bottoms first
-        # meet the sloped bevel, then push neighbours apart during slow descent.
-        pad_thickness = 0.00635
-        self._insert_opening = float(np.clip((5 * pitch - pad_thickness) / 0.085, 0, 1))
+        self._insert_opening = self._insertion_opening(pitch)
         self._opening = self._insert_opening
-        self._pick_eef = self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
+        #: Whether these fingertips have to stand **outside** the row because they cannot fit a
+        #: groove.  Decided by geometry here, once, because two different behaviours hang on
+        #: it: a fingertip in a groove has to stay centred in it, and one outside the row has
+        #: to open when it touches something early.
+        self._finger_stands_outside = float(self.env.PAD_THICKNESS_M) >= (
+            pitch - 2.0 * float(np.asarray(self.env.COOKIE_HALF_SIZE).ravel()[1])
+        )
+        # The nominal grasp pose, kept separate from `_pick_eef` because `_align_insertion`
+        # rewrites `_pick_eef` every step of `DESCEND`.  Applying a correction to the
+        # *previous* output instead of to the nominal one integrates it: the arm lags the
+        # target by about the correction itself, so the same offset is measured again next
+        # step and added again.  Measured on `a3_cookie_batch`: the corrected target ran away
+        # at 0.8 mm per step and `DESCEND` jammed at 27.4 N after 48 steps.
+        self._pick_eef_nominal = (
+            self._pick_center + [0, 0, 0.010] - self._canonical @ self._pad_offset
+        )
+        # **And then no deeper than this hand's own lowest point allows.**  See
+        # `_jaw_lowest_offset`: the target above describes where the pads go, and on LIBERO's
+        # Panda the finger body reaches ~13 mm below them, so the same target put both jaws
+        # 0.6 mm into the source bin's floor at 14 N apiece and read as a blocked insertion.
+        # Raising the target costs nothing that matters -- the pads still cover 0.7617-0.7777 of
+        # a Cookie standing from 0.756 to 0.781 -- and it only ever raises.
+        standing = float(self._pick_center[2]) - float(
+            np.asarray(self.env.COOKIE_HALF_SIZE).ravel()[2]
+        )
+        deepest = standing + self.JAW_FLOOR_CLEARANCE_M - self._jaw_lowest_offset()
+        self._pick_eef_nominal[2] = max(self._pick_eef_nominal[2], deepest)
+        self._pick_eef = self._pick_eef_nominal.copy()
         self._high_eef = self._pick_eef + [0, 0, self.profile.grasp_clearance_m]
         if self.profile.joint_transit:
             # Seed from the measured deployment pose so the first motion stays on
@@ -371,6 +549,167 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self.env.current_joint_action[:7],
             )
         self._advance(CookiePhase.APPROACH)
+
+    def _pad_separation(self, opening: float) -> float:
+        """The two fingertip centres' separation the **model** would hold at ``opening``.
+
+        Kinematics on a scratch state, driven through the environment's own finger encoding.
+        **The polarity has to come from there rather than from an assumption**: on A3's
+        gripper a finger joint at 0 is fully *open* (42.5 mm of travel) and on LIBERO's Panda
+        it is fully *closed*, so "set the joints to zero and call that closed" measures
+        91.36 mm on one hand and 23.92 mm on the other -- and the second is right only by
+        coincidence.
+
+        What this reports is what the fingers *would* do, which is not what they do: on the
+        dense Panda scene the commanded aperture is 68.8 mm and the pads sit at 70.8 mm.  See
+        `_align_insertion` for the loop that closes that gap.
+        """
+
+        model = self.env.model
+        finger_geoms = list(self.env._left_finger_geoms)
+        scratch = mujoco.MjData(model)
+        scratch.qpos[:] = self.env.data.qpos
+        travel = (
+            self.env._finger_travel_fraction("L", opening) * self.env._finger_travel["L"]
+        )
+        for sign, joint in zip(
+            self.env._finger_sign["L"], self.env._finger_joints["L"], strict=True
+        ):
+            scratch.qpos[model.jnt_qposadr[joint]] = sign * travel
+        mujoco.mj_kinematics(model, scratch)
+        return float(
+            np.linalg.norm(scratch.geom_xpos[finger_geoms[0]] - scratch.geom_xpos[finger_geoms[1]])
+        )
+
+    def _align_insertion(self) -> None:
+        """Trim the jaws and the tool onto the row the pads are actually meeting.
+
+        Two measured errors, both of which put a fingertip through the end Cookie rather than
+        onto it, and both of which are invisible to the commanded pose:
+
+        * **the jaws do not reach the aperture they are given.**  Commanded 0.561 (68.8 mm of
+          separation) the pads sat at **70.8 mm**, because the fingers hold a ~1 mm droop
+          under a load this gripper's `kp` does not remove.  2.0 mm too wide is 1.0 mm per
+          side, and there is only 0.2 mm of room.
+        * **the pair is not centred on the row.**  The pads' midpoint came out **0.8 mm** off
+          the five Cookies' centre, so even a correct width would be 0.8 mm out on one side.
+
+        Together they produced 0.2 mm of clearance on one side and **1.8 mm of interference on
+        the other**, which is the 73-130 N `_insertion_jammed` reports.  Both are corrected
+        from measurements rather than from constants, so they hold on either hand: the opening
+        is trimmed until the pads that exist span what the model asks for, and the tool target
+        is shifted along the jaw axis until the midpoint is on the row.
+        """
+
+        finger_geoms = list(self.env._left_finger_geoms)
+        if len(finger_geoms) != 2:
+            return
+        first = np.asarray(self.data.geom_xpos[finger_geoms[0]], dtype=np.float64).copy()
+        second = np.asarray(self.data.geom_xpos[finger_geoms[1]], dtype=np.float64).copy()
+        # **Width, and only while the pads are free.**  Once they touch, the separation they
+        # hold is the Cookies' business rather than the hand's, so trimming on it would walk
+        # the command closed into them instead of correcting anything -- and the descent is
+        # supposed to *reach* them, not to be finished before it starts.
+        #
+        # The correction is towards the **wanted opening read off the measured separation**,
+        # not towards "the measurement agrees with the model".  Those are not the same target
+        # and only one of them is reachable: the jaws sit a fixed ~1 mm short of whatever they
+        # are told under load, so `achieved - model(command)` is a constant +2.0 mm that no
+        # command can remove.  Correcting that made the command walk 0.025 per step until the
+        # jaws were 26 mm apart inside a 41.7 mm row -- measured, the pads' separation fell
+        # 66 -> 26 mm over the descent and `DESCEND` jammed at 43.9 N.  Reading the wanted
+        # opening out of the measurement instead has a fixed point at the droop it actually
+        # has, which is what makes it converge.
+        if not np.any(np.asarray(self._total_pad_forces) > 0.01):
+            achieved = float(np.linalg.norm(second - first))
+            closed = self._pad_separation(0.0)
+            per_unit = self._pad_separation(1.0) - closed
+            if abs(per_unit) > 1e-9:
+                measured_opening = (achieved - closed) / per_unit
+                step = float(np.clip(self._insert_opening - measured_opening, -0.02, 0.02))
+                self._opening = float(np.clip(self._opening + step, 0.0, 1.0))
+        # **Opening when a fingertip touches something mid-descent was tried here, and it is
+        # the wrong way round.**  The contact is on `L_finger_outer_geom`, the *finger body's*
+        # mesh, and the thing it meets is not in the batch at all: measured on step 18 of
+        # `DESCEND`, `cookie_5` and `cookie_6` -- the next two pieces of the same twenty-long
+        # column -- at `dist -0.36 mm` and 64/83 N.  Widening moves the finger *further into
+        # them*: it took the sidestep from 65 N to 87 N and the run died at the same step.  The
+        # real number is that this jaw's contact face is 8.3 mm from its own centre (26.40 mm on
+        # the finger-body mesh, 7.50 mm on `gripper0_finger1_pad_collision`; the two agree to
+        # the same 0.8 mm the centring loop removes), so the hand is **~16.6 mm thick** and the
+        # groove between two packed Cookies is **2.50 mm**.  It cannot enter the row at all --
+        # which is a fact about the fingertips rather than about this loop, and is why
+        # `a3_libero_panda_dense_batch` cannot be solved five at a time on LIBERO's Panda.
+        #
+        # Centring, always, and rebuilt from the nominal pose -- never from the previous
+        # step's output, which is what made this accumulate.
+        axis = np.asarray(self._canonical, dtype=np.float64)[:, 1]
+        offset = float((self._pick_center - 0.5 * (first + second)) @ axis)
+        self._pick_eef = self._pick_eef_nominal + offset * axis
+
+    def _insertion_opening(self, pitch: float) -> float:
+        """The jaw command that lays the two fingertips on the row's **outer faces**.
+
+        The command is not a distance, and treating it as one is the bug this replaces.
+        Measured on the dense Panda scene by sweeping it and reading the two finger
+        geometries' separation:
+
+            opening 0.000 ->  24.92 mm      0.400 ->  55.38 mm      0.800 ->  87.38 mm
+            opening 0.200 ->  39.39 mm      0.508 ->  64.05 mm      1.000 -> 103.38 mm
+
+        which is exactly affine -- ``separation = 2 * |finger y| + 2 * jaw_travel * opening``
+        -- and **both** terms come from the model rather than from a constant.  On this
+        scene the fingertips sit 23.92 mm apart at zero travel and travel 2 x 40 mm, so the
+        map is ``23.92 + 80.0 * opening`` mm.  The old code commanded
+        ``(5 * pitch - pad) / 0.085``: no constant term at all, and 85 mm instead of
+        ``2 * GRIPPER_RANGE_M`` = 80.  Compounded, it missed the wanted separation by
+        **5.4 mm -- 2.7 mm of interference on each side**.
+
+        The hardcoded 6.35 mm it subtracted was also not a pad thickness: it is numerically
+        the **Cookie** thickness (6.33 mm), and the quantity the five-Cookie row needs taken
+        off is exactly that.
+
+        Note that the fingertips are 27.13 mm thick here (`PAD_THICKNESS_M`, read from the
+        model) against a 2.5 mm row gap: a fingertip cannot enter the groove at all, and
+        `left_finger_pad_half_thickness_m` does not change that, because it only reaches
+        A3's own Robotiq pads (see `model._add_gripper`).  That is what makes this a
+        contact-chain grasp over the row's ends rather than an insertion into the gaps.
+        Where a pad *is* thinner than the row gap -- A3's own gripper, at 1.00 mm against
+        2.50 mm -- the documented placement stands and the pad centres go **into** the two
+        grooves, which wants the wider separation `5 * pitch`.
+        """
+
+        cookie_thickness = 2.0 * float(np.asarray(self.env.COOKIE_HALF_SIZE).ravel()[1])
+        finger_thickness = float(self.env.PAD_THICKNESS_M)
+        closed = self._pad_separation(0.0)
+        per_unit = self._pad_separation(1.0) - closed
+        groove = pitch - cookie_thickness
+        # **The row's outer faces are `4 * pitch + cookie_thickness` apart, not
+        # `5 * pitch - cookie_thickness`.**  Five Cookies stand at `c, c+p, ... c+4p`, so the
+        # span from the first one's outer face to the last one's is `4p + t`; `5p - t` is a
+        # different quantity that happens to be close, and using it put the two fingertips
+        # **0.9 mm inside the end Cookies** -- measured, the pads settled at y 0.0110 and
+        # 0.0780 against a row whose outer faces are at 0.0245 and 0.0661, an outer pad force
+        # of **125.6 N in a single step** and `cookie_6` gone at **160.8 m/s**.
+        #
+        # Which of the two placements is meant is decided by whether a fingertip fits a groove
+        # at all, not by which span is larger:
+        #
+        # * it fits (A3's own gripper, 1.00 mm into 2.50 mm) -- the pads are **centred in the
+        #   two grooves**, `5 * pitch` apart, which already leaves `(groove - finger) / 2` of
+        #   room on each side and needs no allowance;
+        # * it does not (LIBERO's Panda, 27.13 mm against 2.50 mm) -- they stand **on the
+        #   row's outer faces**, and there the allowance matters: aiming at exactly the outer
+        #   face is contact by construction, and the measured lateral error there is 0.8 mm,
+        #   so `DESCEND` jammed at 20-130 N before it had finished descending.
+        if finger_thickness < groove:
+            span = 5.0 * pitch
+        else:
+            span = (
+                4.0 * pitch + cookie_thickness + finger_thickness
+                + 2.0 * self.profile.insert_clearance_m
+            )
+        return float(np.clip((span - closed) / per_unit, 0.0, 1.0))
 
     def _place_pose(self, clearance=0.0, column_index=None):
         rotation = self.data.xmat[self._tb_id].reshape(3, 3)
@@ -394,12 +733,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return self._act_step(observation, task)
         except RuntimeError as exc:
             self._fail(str(exc))
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
 
     def _act_step(self, observation=None, task=""):
         del observation, task
         if self.finished:
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         if self.phase is CookiePhase.SELECT_COOKIE:
             self._select_batch()
         self.phase_steps += 1
@@ -416,7 +755,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 f"pad forces={self._contact_chain()[1].tolist()} N, "
                 f"opening={self._opening:.3f}"
             )
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         if self.phase is CookiePhase.APPROACH:
             # Travel with the jaws fully open.  The target batch width is set
             # only once the tool is steady above the Cookies.
@@ -444,7 +783,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     speed=self.profile.hold_m_per_step,
                 )
             actual_opening = float(self.env.current_joint_action[7])
-            if abs(actual_opening - self._opening) <= self.profile.preclose_tolerance:
+            if self._preclose_arrived(actual_opening):
                 self._preclose_stable += 1
             else:
                 self._preclose_stable = 0
@@ -460,7 +799,8 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if self.phase is CookiePhase.DESCEND:
             if self._insertion_jammed(self._total_pad_forces):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
+            self._align_insertion()
             insertion_distance = float(
                 np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
             )
@@ -487,7 +827,18 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 else self.profile.close_contact_m_per_step
             )
             if not chain or min(forces) < 2.5:
-                self._opening = max(0.28, self._opening - close_rate)
+                # **No position floor here.**  The loop's entry condition is a *force* and its
+                # exit is a force, but it used to stop command from going below 0.28 -- and
+                # 0.28 is where the force is capped, because a blocked finger pushes with
+                # `kp * (command - achieved)`.  Measured on `a3_cookie_batch`: the row is
+                # squeezed from a 35.3 mm span to 25.3 mm, the pads stop at 0.308 of travel,
+                # the command sits on the 0.28 floor and the chain reads **1.44 N** -- which is
+                # exactly `1200 N/m * 1.2 mm`, the whole 0.028 of remaining error.  The 2.0 N
+                # the phase asks for needs 1.67 mm more, i.e. a command of 0.269, so the floor
+                # made its own success criterion unreachable.  The closed end of the jaw is
+                # 0.0, and the loop is already bounded where it should be: it stops closing at
+                # 2.5 N and `_insertion_jammed` fails the run at 8 N.
+                self._opening = max(0.0, self._opening - close_rate)
             self._stable = self._stable + 1 if chain and min(forces) >= 2.0 else 0
             action, _ = self._servo(
                 self._pick_eef, self._canonical, self._opening, speed=0.0008
@@ -500,7 +851,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if self.phase is CookiePhase.LIFT:
             _, forces = self._contact_chain()
             if min(forces) < 2.0:
-                self._opening = max(0.28, self._opening - 0.001)
+                # Same reasoning as `CLOSE`: a position floor on a force-driven squeeze caps
+                # the force at `kp * (floor - achieved)` and can never reach its own target.
+                self._opening = max(0.0, self._opening - 0.001)
             lifted_so_far = float(
                 np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
             )
@@ -518,7 +871,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             tool_rise = self.data.site_xpos[self._l_site, 2] - self._lift_start_eef[2]
             if tool_rise > 0.015 and np.any(tool_rise - lifted > 0.016):
                 self._fail("Cookie dropped during lift")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             if reached:
                 if not np.all(lifted > 0.070):
                     self._fail(f"not all five lifted: {lifted.tolist()}")
@@ -543,7 +896,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             offsets = (self._positions() - self.data.site_xpos[self._l_site]) @ r
             if np.max(np.linalg.norm(offsets - self._held_offsets, axis=1)) > 0.016:
                 self._fail("Cookie slipped out of batch during transport")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
             clearance = self.profile.transport_clearance_m if moving else 0.0
             pos, rotation = self._place_pose(clearance)
@@ -600,13 +953,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     if not self.env.privileged_cookie_in_target(i)
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             if self.phase_steps >= self.RELEASE_SETTLE_STEPS and self._stable == 0:
                 self._fail(
                     f"batch {self.batch_index + 1} never settled in the box: "
                     f"all contained={all_inside}, pad still on the batch={not released}"
                 )
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             # The first batch only has to be released; the second is the one the
             # scene's success test watches, so it is the one that has to hold for
             # the full success window.
@@ -622,6 +975,6 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self._advance(
                     CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
                 )
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         self._fail("unsupported batch phase")
-        return self.env.last_applied_action.copy()
+        return self._stay_command()

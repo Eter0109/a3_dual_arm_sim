@@ -76,6 +76,15 @@ class BatchProfile:
     #: How far above the grasp the tool travels, and above the slot it carries.
     grasp_clearance_m: float
     transport_clearance_m: float
+
+    #: Gap per side between a fingertip and the row's end face when the descent is aimed at
+    #: the row's **outside** rather than into its grooves -- the case a fingertip too thick for
+    #: a groove leaves.  Aiming it at exactly the outer face is contact by construction, and on
+    #: the dense Panda scene that is what happened: measured lateral error 0.8 mm against 0.0 mm
+    #: of room, so `DESCEND` jammed at 20-130 N before it had finished descending.  The grooves
+    #: need no such allowance -- a 1.00 mm pad centred in a 2.50 mm gap already has 0.75 mm --
+    #: which is why this is added to that term only.
+    insert_clearance_m: float
     #: Distance inside which a two-speed move drops to its slow rate.
     near_m: float
 
@@ -90,6 +99,14 @@ class BatchProfile:
     reach_angle_rad: float
 
     #: Steps the pre-close opening test must hold, and the tolerance it is held to.
+    #: **The tolerance is a distance in metres on the finger, not an opening value.**
+    #: The two are different by the hand's own travel, and the thing the phase tests is a
+    #: distance: measured on the dense Panda scene, commanded to a 43.6 mm aperture the jaws
+    #: settle at 45.7 mm and stay there with `qvel` 0 and no joint at its limit -- a **1.0 mm**
+    #: droop from a load this gripper's `kp` does not remove.  Expressed in opening units that
+    #: is 0.025, so the old 0.008 asked for 0.32 mm, four times tighter than the 1.5 mm
+    #: `SERVO_ARRIVAL_M` the same expert accepts everywhere else, and the phase could never
+    #: pass on that hand.
     preclose_stable_steps: int
     preclose_tolerance: float
     #: Steps the closed grasp must hold before lifting, and the descent-step
@@ -122,11 +139,12 @@ FAST = BatchProfile(
     hold_m_per_step=0.001,
     grasp_clearance_m=0.082,
     transport_clearance_m=0.085,
+    insert_clearance_m=0.0010,
     near_m=0.015,
     reach_position_m=0.002,
     reach_angle_rad=0.035,
     preclose_stable_steps=2,
-    preclose_tolerance=0.008,
+    preclose_tolerance=0.0015,
     close_stable_steps=3,
     descend_jam_window=100,
     release_stable_first=6,
@@ -153,11 +171,12 @@ BASELINE = BatchProfile(
     hold_m_per_step=0.0010,
     grasp_clearance_m=0.105,
     transport_clearance_m=0.085,
+    insert_clearance_m=0.0010,
     near_m=0.015,
     reach_position_m=0.002,
     reach_angle_rad=0.035,
     preclose_stable_steps=3,
-    preclose_tolerance=0.006,
+    preclose_tolerance=0.0003,
     close_stable_steps=8,
     descend_jam_window=185,
     release_stable_first=20,

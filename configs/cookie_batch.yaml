@@ -21,10 +21,25 @@ control_hz: 20
 horizon: 6000
 cookie_transfer:
   left_gripper_kp: 1200.0
+  # The shim, and it is not an optimisation.  0.0005 m half thickness is 1 mm across both
+  # fingertips, against the 2.433 mm net gap between two Cookies in the packed column
+  # (8.833 mm source pitch minus the 6.4 mm slab).  The default is the real robot's
+  # 3.175 mm pad -- 6.35 mm across -- which cannot enter that gap at all, and
+  # `same_column_batch_expert` refuses the placement outright rather than trying:
+  # `pad_thickness = 2 * this`, fail when `aligned_gap_width_m <= pad_thickness`.  So
+  # without this line the dense scene is not merely harder, it is unsolvable, and every
+  # attempt is discarded.  Same value as `cookie_same_column.yaml`,
+  # `cookie_two_box_batch.yaml` and `libero_props.yaml`; this file was the one that missed
+  # it, which is why nothing here had ever been collected on it.
+  left_finger_pad_half_thickness_m: 0.0005
   right_gripper_kp: 2000.0
   box_lift_m: 0.0
   box_tilt_deg: 0.0
   cookie_edge_bevel_m: 0.0025
+  # The lower chamfer, from the same-column config.  These Cookies are driven downwards
+  # into slots 6.33 mm apart, and a sharp bottom edge catches on the row behind on the way
+  # in rather than sliding past it.
+  cookie_bottom_edge_bevel_m: 0.0010
   cookie_collision_mode: compound
   cookie_friction: [0.8, 0.003, 0.0002]
   cookie_solref: [0.004, 1.0]

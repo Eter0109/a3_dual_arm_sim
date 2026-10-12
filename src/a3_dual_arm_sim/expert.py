@@ -667,9 +667,24 @@ class A3CookieTransferExpert:
         # also decides the arm's configuration when the descent starts, not just the direction of a
         # leg.
         source = np.asarray(self.env.SOURCE_CENTER, dtype=np.float64)
-        offset = np.abs(np.asarray(self.fixed_transit_xy, dtype=np.float64) - source)
+        # **The tuned point travels with the arrangement.**  `fixed_transit_xy` is a world
+        # coordinate read off A3's own placement, and a scene that translates the whole
+        # arrangement -- `libero_props_scene`'s `a3_layout_offset_m` does exactly that, to put the
+        # task inside LIBERO's fixed camera's frame -- leaves it behind by that translation.  The
+        # test below then fails ("not over this scene's bin") and the fallback is the bin centre,
+        # which is the pose the batch expert's own comment already records as unreachable: 4.33 mm
+        # past the IK's 4 mm acceptance.  Measured on `a3_libero_dense_batch_libero_mount`, whose
+        # arrangement is A3's own translated by (0.020, -0.200): the reset IK refused the staging
+        # pose at **4.21 mm** -- and the same scene with the *robot* translated by the same amount,
+        # so the relative geometry is A3's own, is a scene the arm can definitely solve.
+        layout_offset = np.asarray(
+            getattr(self.env.config.cookie_transfer, "layout_offset_m", (0.0, 0.0))[:2],
+            dtype=np.float64,
+        )
+        tuned_transit_xy = np.asarray(self.fixed_transit_xy, dtype=np.float64) + layout_offset
+        offset = np.abs(tuned_transit_xy - source)
         over_the_bin = bool(np.all(offset <= np.asarray(self.env.SOURCE_INNER_HALF_SIZE)))
-        staging = np.asarray(self.fixed_transit_xy, dtype=np.float64) if over_the_bin else source
+        staging = tuned_transit_xy if over_the_bin else source
         self.q_transit = self._solve_l(
             np.array([staging[0], staging[1], self._transit_height()]),
             self._target_quat_canonical,
@@ -1512,6 +1527,29 @@ class A3CookieTransferExpert:
             action[6] = float(np.clip(2.0 * opening - 1.0, -1.0, 1.0))
             return action
         return self.env.last_applied_action.copy()
+
+    def _left_joint_feedback(self) -> np.ndarray:
+        """The left arm's seven joints as the arm itself reports them.
+
+        **This is not `env.last_applied_action[:7]`, and the difference is not cosmetic.**
+        Under `OperationalSpaceAdapter` those seven entries are the **torques** the
+        controller solved for the latched goal -- the environment says so in
+        `canonical_action_mode` and `_limit_joint_action` deliberately neither clips them
+        to a joint range nor rate-limits them -- so an IK seeded from them is seeded with
+        Newton-metres.  Measured on the batch expert over the dense Panda scene: the
+        `APPROACH` servo asked for a pose 82 mm above a Cookie row, seeded the solve with a
+        torque vector, and the solver returned a pose **66.13 mm** from the target against a
+        4 mm tolerance, while the same pose solved from the measured joints returns a
+        solution in milliseconds.
+
+        On a joint-target arm the two answers agree, because there the applied action *is*
+        the commanded pose.  The environment exposes that question as
+        `applied_action_is_joint_target` rather than leaving it to an `isinstance` here.
+        """
+
+        if self.env.applied_action_is_joint_target:
+            return self.env.last_applied_action[:7].copy()
+        return np.asarray(self.env.current_joint_action[:7], dtype=np.float64).copy()
 
     def _reset_motion(self) -> None:
         self._motion_actions = []

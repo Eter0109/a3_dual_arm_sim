@@ -205,7 +205,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
     def _act_step(self, observation=None, task=""):
         del observation, task
         if self.finished:
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         if self.phase is CookiePhase.SELECT_COOKIE:
             self._select_batch()
         self.phase_steps += 1
@@ -223,7 +223,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 f"pad forces={self._contact_chain()[1].tolist()} N, "
                 f"opening={self._opening:.3f}"
             )
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         if self.phase is CookiePhase.ALIGN:
             if self._push_stage == "approach":
                 # A transit: nothing is in the jaws, and the pose it is going to
@@ -254,13 +254,13 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                         self._opening,
                         speed=self.profile.hold_m_per_step,
                     )
-                if abs(float(self.env.current_joint_action[7]) - self._opening) < 0.006:
+                if self._preclose_arrived(float(self.env.current_joint_action[7])):
                     self._push_stage = "descend"
                 return action
             if self._push_stage in ("descend", "sweep"):
                 if self._insertion_jammed(self._total_pad_forces, limit=12.0):
                     self._fail("base straightening blocked by excessive pad force")
-                    return self.env.last_applied_action.copy()
+                    return self._stay_command()
                 target = self._push_start if self._push_stage == "descend" else self._push_end
                 action, reached = self._servo(
                     target, self._canonical, self._opening,
@@ -316,7 +316,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     speed=self.profile.hold_m_per_step,
                 )
             actual_opening = float(self.env.current_joint_action[7])
-            if abs(actual_opening - self._opening) <= self.profile.preclose_tolerance:
+            if self._preclose_arrived(actual_opening):
                 self._preclose_stable += 1
             else:
                 self._preclose_stable = 0
@@ -363,7 +363,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 )[0]
             if self._insertion_jammed(self._total_pad_forces):
                 self._fail(f"insertion blocked; pad forces={self._total_pad_forces.tolist()}")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             insertion_distance = float(
                 np.linalg.norm(self._pick_eef - self.data.site_xpos[self._l_site])
             )
@@ -395,7 +395,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self.phase is CookiePhase.CLOSE:
             if self._insertion_jammed(self._total_pad_forces, limit=20.0):
                 self._fail("batch closure blocked by excessive pad force")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             chain, forces = self._contact_chain()
             # Close fast until the jaws touch anything, then at a rate the five
             # Cookies can absorb.  The first half of the travel is free.
@@ -407,7 +407,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             if (
                 self.batch_index == 1 and self._opening > 0.33
             ) or not chain or min(forces) < 1.3:
-                self._opening = max(0.28, self._opening - close_rate)
+                self._opening = max(0.0, self._opening - close_rate)
             secure_width = self.batch_index == 0 or self._opening <= 0.33
             enough_depth = (
                 not self._rim_contact_stop
@@ -453,7 +453,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
         if self.phase is CookiePhase.LIFT:
             _, forces = self._contact_chain()
             if min(forces) < 1.0:
-                self._opening = max(0.28, self._opening - 0.001)
+                self._opening = max(0.0, self._opening - 0.001)
             lifted_so_far = float(
                 np.linalg.norm(self.data.site_xpos[self._l_site] - self._lift_start_eef)
             )
@@ -471,7 +471,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             tool_rise = self.data.site_xpos[self._l_site, 2] - self._lift_start_eef[2]
             if tool_rise > 0.015 and np.any(tool_rise - lifted > 0.016):
                 self._fail("Cookie dropped during lift")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             if reached:
                 if not np.all(lifted > 0.070):
                     self._fail(f"not all five lifted: {lifted.tolist()}")
@@ -496,7 +496,7 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
             offsets = (self._positions() - self.data.site_xpos[self._l_site]) @ r
             if np.max(np.linalg.norm(offsets - self._held_offsets, axis=1)) > 0.016:
                 self._fail("Cookie slipped out of batch during transport")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             moving = self.phase is CookiePhase.MOVE_TO_SLOT
             clearance = self.profile.transport_clearance_m if moving else 0.0
             pos, rotation = self._place_pose(clearance)
@@ -555,13 +555,13 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                     if not self.env.privileged_cookie_in_target(i)
                 ]
                 self._fail(f"released Cookies not upright, settled and contained: {bad}")
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             if self.phase_steps >= self.RELEASE_SETTLE_STEPS and self._stable == 0:
                 self._fail(
                     f"batch {self.batch_index + 1} never settled in the box: "
                     f"all contained={all_inside}, pad still on the batch={not released}"
                 )
-                return self.env.last_applied_action.copy()
+                return self._stay_command()
             # The first batch only has to be released; the second is the one the
             # scene's success test watches, so it is the one that has to hold for
             # the full success window.
@@ -577,6 +577,6 @@ class A3SameColumnBatchExpert(A3CookieBatchExpert):
                 self._advance(
                     CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
                 )
-            return self.env.last_applied_action.copy()
+            return self._stay_command()
         self._fail("unsupported batch phase")
-        return self.env.last_applied_action.copy()
+        return self._stay_command()
