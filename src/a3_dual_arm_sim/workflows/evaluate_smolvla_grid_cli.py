@@ -4,8 +4,8 @@ Run from the repository root:
     MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
         --max-steps 500 --episodes 20 --output outputs/smolvla_grid_500
 
-Each round evaluates all six cells on the same seed. The 2x5 task uses the
-training instruction; 2x10 uses its native instruction and is transfer testing.
+Each round evaluates the selected cells on the same seed. Prompt styles are
+explicit per task; 2x10 evaluation with a 2x5 checkpoint is transfer testing.
 """
 
 from __future__ import annotations
@@ -52,10 +52,10 @@ def source_revision():
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def summarize(rows, planned):
+def summarize(rows, planned, profiles=PROFILES):
     result = []
     for task in TASKS:
-        for profile in PROFILES:
+        for profile in profiles:
             counts = [
                 row["cookies_in_target"]
                 for row in rows
@@ -89,10 +89,8 @@ def main():
         default=root
         / "outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model",
     )
-    parser.add_argument(
-        "--dataset-root", type=Path, default=root / "datasets/a3_front_close_left_100"
-    )
-    parser.add_argument("--repo-id", default="local/a3-front-close-left-100")
+    parser.add_argument("--dataset-root", type=Path, default=None)
+    parser.add_argument("--repo-id", default=None)
     parser.add_argument("--output", type=Path, default=root / "outputs/smolvla_grid_500")
     parser.add_argument("--episodes", type=int, default=20, help="Episodes per cell")
     parser.add_argument("--seed-start", type=int, default=13000)
@@ -100,6 +98,13 @@ def main():
     parser.add_argument("--n-action-steps", type=int, default=8)
     parser.add_argument("--num-steps", type=int, default=25, help="Flow inference steps")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--profiles", nargs="+", choices=PROFILES, default=list(PROFILES))
+    parser.add_argument(
+        "--prompt-style-2x5", choices=("training", "task", "short"), default="training"
+    )
+    parser.add_argument(
+        "--prompt-style-2x10", choices=("training", "task", "short"), default="task"
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--dry-run", action="store_true", help="Print experiment settings without loading a policy"
@@ -107,9 +112,12 @@ def main():
     args = parser.parse_args()
     if min(args.episodes, args.max_steps, args.n_action_steps, args.num_steps) < 1:
         parser.error("episode and step counts must be positive")
+    if len(set(args.profiles)) != len(args.profiles):
+        parser.error("profiles must not contain duplicates")
+    prompt_styles = {"2x5": args.prompt_style_2x5, "2x10": args.prompt_style_2x10}
     checkpoint, dataset, output = (
         args.checkpoint.resolve(),
-        args.dataset_root.resolve(),
+        args.dataset_root.resolve() if args.dataset_root else None,
         args.output.resolve(),
     )
     settings5 = load_randomization_config(resource_root() / "configs/randomization.yaml")
@@ -120,7 +128,7 @@ def main():
         settings["source_column"] = "1"
     protocol = {
         "checkpoint": str(checkpoint),
-        "dataset_root": str(dataset),
+        "dataset_root": str(dataset) if dataset else None,
         "repo_id": args.repo_id,
         "episodes_per_cell": args.episodes,
         "seed_start": args.seed_start,
@@ -130,26 +138,43 @@ def main():
         "n_action_steps": args.n_action_steps,
         "num_steps": args.num_steps,
         "device": args.device,
+        "profiles": args.profiles,
+        "prompt_styles": prompt_styles,
         "metric": "final cookies_in_target, mean and total; not peak count or success rate",
-        "prompt_2x5": "transfer 10 cookies into target box",
-        "prompt_2x10": "native Cookie2x10Plan prompt; transfer evaluation",
+        "prompt_2x5": (
+            "transfer 10 cookies into target box"
+            if prompt_styles["2x5"] in ("training", "short")
+            else "column-specific task prompt; actual text saved per episode"
+        ),
+        "prompt_2x10": (
+            "transfer 20 cookies into target box"
+            if prompt_styles["2x10"] == "short"
+            else "native Cookie2x10Plan prompt; actual text saved per episode"
+        ),
         "postprocessing": "no extra rules; checkpoint tokenizer unchanged",
         "randomization_2x5": settings5,
         "randomization_2x10": settings10,
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
-        "preprocessor": json.loads((checkpoint / "policy_preprocessor.json").read_text()),
+        "preprocessor": (
+            json.loads((checkpoint / "policy_preprocessor.json").read_text())
+            if (checkpoint / "policy_preprocessor.json").is_file()
+            else None
+        ),
     }
     if args.dry_run:
         print(json.dumps(protocol, indent=2, ensure_ascii=False))
         return 0
     import torch
 
+    from a3_dual_arm_sim.learning.checkpoint_bundle import inference_fingerprints
+
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA unavailable; use a GPU-enabled execution environment")
     protocol.update(
         {
             "weights_sha256": digest(checkpoint / "model.safetensors"),
-            "dataset_stats_sha256": digest(dataset / "meta/stats.json"),
+            "dataset_stats_sha256": digest(dataset / "meta/stats.json") if dataset else None,
+            "processor_sha256": inference_fingerprints(checkpoint, dataset),
             "script_sha256": digest(Path(__file__)),
             "shared_source_sha256": {
                 name: digest(Path(__file__).resolve().parents[1] / name)
@@ -162,6 +187,7 @@ def main():
             },
             "git_commit": source_revision(),
             "torch": torch.__version__,
+            "torch_num_threads": torch.get_num_threads(),
             "gpu": torch.cuda.get_device_name() if args.device == "cuda" else None,
         }
     )
@@ -183,7 +209,7 @@ def main():
     (output / "pid").write_text(str(os.getpid()))
 
     def save_summary(status):
-        results = summarize(rows, args.episodes)
+        results = summarize(rows, args.episodes, args.profiles)
         atomic_json(
             output / "summary.json",
             {"status": status, "max_steps": args.max_steps, "results": results},
@@ -219,12 +245,12 @@ def main():
         )
         runners = {}
         for task in TASKS:
-            for profile in PROFILES:
+            for profile in args.profiles:
                 settings = dict(settings5 if task == "2x5" else settings10, profile=profile)
                 extra = {"first_grasp": first_grasp} if task == "2x10" else {}
                 runners[task, profile] = make_cookie_benchmark(
                     task=task,
-                    prompt_style="training",
+                    prompt_style=prompt_styles[task],
                     profile=profile,
                     source_column="1",
                     randomization_settings=settings,
@@ -245,7 +271,13 @@ def main():
                 )
                 score = evaluated.episodes[0]
                 score.episode = episode
-                row = {**asdict(score), "benchmark": task, "profile": profile}
+                row = {
+                    **asdict(score),
+                    "benchmark": task,
+                    "profile": profile,
+                    "prompt_style": prompt_styles[task],
+                    "task_instruction": benchmark._episode_task(1, seed),
+                }
                 with rows_path.open("a") as stream:
                     stream.write(json.dumps(row) + "\n")
                     stream.flush()
@@ -258,7 +290,7 @@ def main():
                     flush=True,
                 )
         save_summary("completed")
-        print("ALL SIX TESTS COMPLETE", flush=True)
+        print("ALL SELECTED TESTS COMPLETE", flush=True)
     except KeyboardInterrupt:
         save_summary("stopped")
         print("Stopped; incomplete episode excluded. Use --resume to continue.", flush=True)

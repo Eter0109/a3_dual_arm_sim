@@ -200,7 +200,7 @@ def build_train_command(
 def train_smolvla(
     *,
     dataset_root: Path,
-    repo_id: str,
+    repo_id: str | None = None,
     base_model: str | Path,
     output_dir: Path,
     steps: int = 10000,
@@ -222,6 +222,10 @@ def train_smolvla(
         raise ValueError(
             "steps, batch_size, save_freq must be positive and num_workers non-negative"
         )
+    from a3_dual_arm_sim.learning.checkpoint_bundle import complete_checkpoint, local_repo_id
+
+    dataset_root = dataset_root.expanduser().resolve()
+    repo_id = local_repo_id(dataset_root, repo_id)
     audit = audit_training_dataset(dataset_root, repo_id=repo_id)
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'")
@@ -255,7 +259,14 @@ def train_smolvla(
         ema_decay=ema_decay,
         save_freq=save_freq,
     )
-    result = {**audit, "device": device, "output_dir": str(output_dir), "command": command}
+    result = {
+        **audit,
+        "repo_id": repo_id,
+        "device": device,
+        "output_dir": str(output_dir),
+        "command": command,
+        "policy_config": json.loads((policy_source / "config.json").read_text()),
+    }
     if dry_run:
         return result
 
@@ -274,5 +285,9 @@ def train_smolvla(
         raise RuntimeError("LeRobot exited without writing a final SmolVLA checkpoint")
     numbered = [p for p in checkpoints if p.parent.parent.name.isdigit()]
     latest = max(numbered, key=lambda p: int(p.parent.parent.name)) if numbered else checkpoints[-1]
+    effective = {**result, "policy_config": json.loads((policy_source / "config.json").read_text())}
+    (output_dir / "a3_training_config.json").write_text(json.dumps(effective, indent=2) + "\n")
+    for checkpoint in {p.parent.resolve() for p in checkpoints}:
+        complete_checkpoint(checkpoint, dataset_root, repo_id, effective)
     result["checkpoint"] = str(latest.parent)
     return result

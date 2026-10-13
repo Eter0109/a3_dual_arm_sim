@@ -119,7 +119,7 @@ def parser() -> argparse.ArgumentParser:
         "train-smolvla", help="Fine-tune SmolVLA on a validated A3 grasp dataset"
     )
     train.add_argument("--root", type=Path, required=True, help="LeRobot v3 dataset root")
-    train.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
+    train.add_argument("--repo-id", default=None)
     train.add_argument(
         "--model", default=default_base_model(), help="Hub repo ID or local checkpoint"
     )
@@ -127,7 +127,10 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--offline", action="store_true")
     train.add_argument("--save-freq", type=int, default=2000)
     train.add_argument("--num-workers", type=int, default=2)
-    train.add_argument("--output", type=Path, required=True)
+    train.add_argument("--output", type=Path, default=None)
+    train.add_argument(
+        "--train-config", type=Path, help="JSON training defaults; CLI flags override"
+    )
     train.add_argument("--steps", type=int, default=10_000)
     train.add_argument("--batch-size", type=int, default=16)
     train.add_argument("--lr", type=float, default=5e-5)
@@ -159,7 +162,35 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     argument_parser = parser()
-    args = argument_parser.parse_args()
+    argv = sys.argv[1:]
+    if argv and argv[0] == "train-smolvla":
+        import json
+
+        probe = argparse.ArgumentParser(add_help=False)
+        probe.add_argument("--train-config", type=Path)
+        selected, _ = probe.parse_known_args(argv)
+        config_path = (
+            selected.train_config or Path(__file__).parent / "learning/smolvla_defaults.json"
+        )
+        defaults = json.loads(config_path.read_text())
+        sub = next(
+            a for a in argument_parser._actions if isinstance(a, argparse._SubParsersAction)
+        ).choices["train-smolvla"]
+        allowed = {a.dest for a in sub._actions} - {"help", "function", "train_config", "root"}
+        if not isinstance(defaults, dict) or set(defaults) - allowed:
+            argument_parser.error("Invalid training configuration keys")
+        for action in sub._actions:
+            if action.dest in defaults and action.type is not None:
+                defaults[action.dest] = action.type(defaults[action.dest])
+        for action in sub._actions:
+            if (
+                action.dest in defaults
+                and action.choices
+                and defaults[action.dest] not in action.choices
+            ):
+                argument_parser.error(f"Invalid {action.dest} in training configuration")
+        sub.set_defaults(**defaults)
+    args = argument_parser.parse_args(argv)
     try:
         _validate_camera_recording(args)
     except ValueError as exc:

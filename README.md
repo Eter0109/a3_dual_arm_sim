@@ -54,6 +54,19 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 - [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
 - [使用范围与已知限制](docs/limitations.md)：环境兼容性、任务边界及数据注意事项。
 
+## 常用训练与测试
+
+```bash
+# 自动生成本地数据标识，默认输出 outputs/cookie_2x5_trial_smolvla
+python -m a3_dual_arm_sim.cli train-smolvla --root datasets/cookie_2x5_trial
+
+# 测试上面训练的输出；自动选择最新检查点
+MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
+  --policy smolvla:outputs/cookie_2x5_trial_smolvla --task 2x10 --prompt-style short
+```
+
+训练默认值与自定义 JSON 配置、旧检查点补齐方法见 [简化入口说明](docs/smolvla.md#简化入口与旧检查点)。
+
 ## 统一评测与网格测试
 
 两个任务统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task 2x5|2x10` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。按回合结束时的目标盒饼干数量计分，2×5 满分 10、2×10 满分 20。
@@ -63,15 +76,15 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --task 2x10 --policy expert --profile basic --source-column 1 \
   --episodes 1 --seed-start 13000 --max-steps 500 --workers 1
 
-# 替换成已有权重及其训练数据；不要与已经运行的同目录进程重复启动。
+# 替换成已有完整检查点；输出目录需保持唯一。
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --checkpoint outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-  --dataset-root datasets/a3_front_close_left_100 --repo-id local/a3-front-close-left-100 \
   --max-steps 500 --episodes 20 --seed-start 13000 \
-  --output outputs/smolvla_grid_500
+  --prompt-style-2x5 training --prompt-style-2x10 short \
+  --output outputs/smolvla_grid_short_500
 ```
 
-网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列，2×5 使用训练短指令。
+网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列。上例显式指定 2×5 使用训练原指令、2×10 使用 `transfer 20 cookies into target box`；短指令数量 baseline 不验证随机四次抓取计划。省略指令参数时，2×10 仍使用原生长指令。单任务入口可用 `--prompt-style short`，网格可加 `--profiles basic` 只测 basic。
 结果保存到 `summary.md`、`summary.json` 和 `episodes.jsonl`；原命令加 `--resume` 可续跑。
 500 步为控制预算，不保证专家或模型完成四次抓取。完整参数、可视化、录制与自定义策略示例见 [完整流程指南](docs/workflow_guide.md)。
 

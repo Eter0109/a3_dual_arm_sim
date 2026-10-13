@@ -29,9 +29,9 @@ class SmolVLAPolicyPlugin:
     def __init__(
         self,
         checkpoint: Path,
-        dataset_root: Path,
-        repo_id: str,
-        device: str,
+        dataset_root: Path | None = None,
+        repo_id: str | None = None,
+        device: str = "cuda",
         *,
         num_steps: int | None = 25,
         ema_alpha: float = 0.0,
@@ -46,14 +46,15 @@ class SmolVLAPolicyPlugin:
             import mujoco
             import torch
             from lerobot.configs.policies import PreTrainedConfig
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-            from lerobot.policies.factory import make_policy, make_pre_post_processors
+            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
             from lerobot.policies.utils import prepare_observation_for_inference
+
+            from a3_dual_arm_sim.learning.checkpoint_bundle import load_processors
         except ImportError as exc:
             raise RuntimeError("Install SmolVLA support with: pip install -e '.[train]'") from exc
 
         checkpoint = checkpoint.expanduser().resolve()
-        dataset_root = dataset_root.expanduser().resolve()
+        dataset_root = dataset_root.expanduser().resolve() if dataset_root else None
         if not (checkpoint / "config.json").is_file():
             raise FileNotFoundError(f"Missing SmolVLA config.json: {checkpoint}")
         self._mujoco = mujoco
@@ -78,19 +79,6 @@ class SmolVLAPolicyPlugin:
         self.inference_seed = inference_seed
         self.last_raw_action: np.ndarray | None = None
 
-        try:
-            dataset = LeRobotDataset(
-                repo_id,
-                root=dataset_root,
-                download_videos=False,
-                return_uint8=True,
-            )
-        except TypeError:
-            dataset = LeRobotDataset(
-                repo_id,
-                root=dataset_root,
-                download_videos=False,
-            )
         config = PreTrainedConfig.from_pretrained(checkpoint)
         config.pretrained_path = checkpoint
         config.device = device
@@ -107,15 +95,11 @@ class SmolVLAPolicyPlugin:
         if num_steps is not None and hasattr(config, "num_steps"):
             config.num_steps = num_steps
         self._input_keys = tuple(config.input_features)
-        self._policy = make_policy(config, ds_meta=dataset.meta)
+        self._policy = SmolVLAPolicy.from_pretrained(checkpoint, config=config)
         if num_steps is not None and hasattr(self._policy.config, "num_steps"):
             self._policy.config.num_steps = num_steps
-        self._preprocessor, self._postprocessor = make_pre_post_processors(
-            policy_cfg=config,
-            pretrained_path=str(checkpoint),
-            dataset_stats=dataset.meta.stats,
-            preprocessor_overrides={"device_processor": {"device": device}},
-            postprocessor_overrides={"device_processor": {"device": "cpu"}},
+        self._preprocessor, self._postprocessor = load_processors(
+            config, checkpoint, dataset_root, device
         )
         self._policy.eval()
 
@@ -225,13 +209,11 @@ def make_policy() -> SmolVLAPolicyPlugin:
     """Factory configured through environment variables for ``a3-sim run``."""
     checkpoint = os.environ.get("A3_SMOLVLA_CHECKPOINT")
     dataset_root = os.environ.get("A3_SMOLVLA_DATASET_ROOT")
-    if not checkpoint or not dataset_root:
-        raise RuntimeError(
-            "Set A3_SMOLVLA_CHECKPOINT and A3_SMOLVLA_DATASET_ROOT before loading this policy"
-        )
+    if not checkpoint:
+        raise RuntimeError("Set A3_SMOLVLA_CHECKPOINT before loading this policy")
     return SmolVLAPolicyPlugin(
         Path(checkpoint),
-        Path(dataset_root),
+        Path(dataset_root) if dataset_root else None,
         os.environ.get("A3_SMOLVLA_REPO_ID", "Eter0109/a3-front-close-left-100"),
         os.environ.get("A3_SMOLVLA_DEVICE", "cuda"),
     )

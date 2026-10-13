@@ -296,7 +296,7 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         dataset_root=args.root,
         repo_id=args.repo_id,
         base_model=args.model,
-        output_dir=args.output,
+        output_dir=args.output or Path("outputs") / f"{args.root.name}_smolvla",
         steps=args.steps,
         batch_size=args.batch_size,
         seed=args.seed,
