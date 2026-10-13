@@ -603,6 +603,47 @@ def cookie_batch_scene(*, hold_steps: int = 40, visual_style: str = "plain") -> 
     )
 
 
+def cookie_batch_second_batch_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
+    """`a3_cookie_batch`, with the second batch trained out of its one state.
+
+    The baseline's episodes are all "start empty, do batch 0, do batch 1", so a
+    policy trained on them meets the second batch only ever from the state the
+    *expert's* first batch leaves behind -- five perfectly upright Cookies at the
+    slot centres, which is a state a policy never produces.  Its own first batch
+    leaves five imperfectly-placed ones, and from there it is off the
+    distribution it was trained on: the shape of every "first five land, second
+    five don't" fine-tune so far.
+
+    This scene draws the second-batch condition per episode, by seed, uniformly
+    over four modes (see `configs/cookie_batch_second_batch.yaml`, which is
+    `cookie_batch.yaml` plus that one list): the full baseline, an episode that
+    *starts* at the second batch with five imperfect Cookies already in the box,
+    the full episode with the just-placed five nudged at the moment of release,
+    and the prefill with wider maxima.  The prompt and the success contract are
+    the baseline's own, character for character -- the instruction is the same
+    job, and the contract still asks for ten released and seventy remaining,
+    which the prefill satisfies by construction (five prefilled plus five
+    placed).
+
+    Everything physical is `cookie_batch.yaml`'s, copied rather than restated, so
+    the two scenes cannot drift apart on any parameter a grasp depends on.
+    """
+
+    return _batch_scene(
+        "a3_cookie_batch_second_batch",
+        "configs/cookie_batch_second_batch.yaml",
+        A3CookieBatchExpert,
+        hold_steps=hold_steps,
+        details={
+            "source_columns": "one exposed end of each of two columns",
+            "second_batch_modes": "full / prefill / perturb / prefill_perturb, drawn by seed",
+        },
+        visual_style=visual_style,
+    )
+
+
 def cookie_same_column_scene(
     *, hold_steps: int = 40, visual_style: str = "plain"
 ) -> CollectionScene:
@@ -1438,6 +1479,7 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_grasp": grasp_scene,
         "a3_cookie_transfer": cookie_transfer_scene,
         "a3_cookie_batch": cookie_batch_scene,
+        "a3_cookie_batch_second_batch": cookie_batch_second_batch_scene,
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
         "a3_cookie_single_piece": cookie_single_piece_scene,

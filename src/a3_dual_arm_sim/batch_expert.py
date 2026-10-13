@@ -87,6 +87,105 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.transition_history = [self.phase]
         self._group_offset = self._pad_offset - self._canonical.T @ np.array([0, 0, 0.010])
         self._validate_target_workspace()
+        # **The second-batch condition this episode runs under.**  Drawn by the
+        # environment's reset from `second_batch_modes`, by seed; the expert applies
+        # it because the batch selection -- which five, which column, which end --
+        # is the expert's own state, not the environment's.  `full` is the no-op and
+        # the default, so a scene that has never heard of the field is byte-identical
+        # to what it was.
+        mode = getattr(self.env, "second_batch_mode", "full")
+        if mode in ("prefill", "prefill_perturb"):
+            self._prefill_first_batch(hard=(mode == "prefill_perturb"))
+
+    def _prefill_first_batch(self, *, hard: bool) -> None:
+        """Start the episode *at* the second batch: five Cookies already in the box.
+
+        Why this exists: a batch collection's episodes are otherwise all "start empty,
+        do batch 0, do batch 1", so a policy trained on them meets the second batch
+        only ever from the one state the *expert's* first batch leaves behind -- five
+        perfectly upright Cookies at the slot centres, which is a state a policy never
+        produces.  Its own first batch leaves five imperfectly-placed ones, and from
+        there it is off the distribution it was trained on, which is the classic
+        covariate-shift hole and the shape of every "first five land, second five
+        don't" result so far.
+
+        So this takes the five the first batch *would have* taken (the same
+        `_candidate_batches` first yield, so the remaining second batch is the same
+        move it always is), teleports them into the first column's slots with drawn
+        imperfections -- leaning, jittered, yawed, each by a different amount -- and
+        seeds the bookkeeping so the state machine opens on the second batch:
+
+        ``completed_cookie_indices`` carries the five (so `_candidate_batches` skips
+        them), ``batch_index`` is 1 (so `_select_batch` aims the *other* column, and
+        `_place_pose` reads it), and ``batch_reports`` carries a released report for
+        the batch that "already happened" (the report the LIFT phase would have
+        written; VERIFY_RELEASE only ever reads the last one, which batch 1's own
+        LIFT will have become by then).
+
+        The arm stays at its home: a real second batch starts from wherever RETRACT
+        left the tool, near the box at transit height, and this starts from home --
+        which is *also* a state a redeployed policy starts from, and the one a
+        mid-episode handoff has to survive.  Both are progress states; neither is the
+        one the baseline trains.
+
+        ``hard`` is the ``prefill_perturb`` draw: the same placement with wider
+        maxima, so the worst-case second batch -- progress that is both partial *and*
+        messy -- is in the data too.  The maxima are bounded by the packing (see
+        `place_cookie_in_slot`): the column's five slots are 6.33 mm apart in y
+        against a 6.33 mm-thick Cookie, so the lean and the yaw both cost lateral
+        room the group absorbs by shifting within the box's ~14 mm of margin.
+        """
+
+        batch = next(self._candidate_batches(), [])
+        if len(batch) != 5:
+            raise RuntimeError(
+                "no exposed, upright five-Cookie batch available to prefill from"
+            )
+        slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
+        column_x = np.unique(slots[:, 0])[0]
+        column = [
+            index
+            for index in range(len(slots))
+            if np.isclose(slots[index, 0], column_x)
+        ]
+        column.sort(key=lambda index: slots[index, 1])
+        # **One draw, shared by the whole group.**  The lean and the yaw are drawn once
+        # here and passed to every Cookie of the five, because the group has zero
+        # clearance cookie-to-cookie (6.33 mm slots, 6.33 mm Cookies) and an
+        # independently drawn lean towards a neighbour interpenetrates it -- measured,
+        # the first version's independently drawn leans ended with the group's two end
+        # Cookies outside the box.  A coherent lean is a parallelogram: no pair
+        # interpenetrates, and it is also the realistic shape, a group that settled
+        # together leans together.  The per-Cookie jitter stays individual -- it is
+        # sub-millimetre, and it is where the variety of an imperfect placement lives.
+        rng = self.env.np_random
+        if hard:
+            max_lean, max_yaw, max_jitter = np.deg2rad(6.0), np.deg2rad(1.5), 0.0003
+        else:
+            max_lean, max_yaw, max_jitter = np.deg2rad(4.0), np.deg2rad(1.0), 0.0002
+        lean = float(rng.uniform(0.0, max_lean))
+        azimuth = float(rng.uniform(0.0, 2.0 * np.pi))
+        yaw = float(rng.uniform(-max_yaw, max_yaw))
+        for cookie, slot in zip(batch, column, strict=True):
+            self.env.place_cookie_in_slot(
+                cookie,
+                slot,
+                lean_azimuth_rad=azimuth,
+                lean_rad=lean,
+                yaw_rad=yaw,
+                max_jitter_m=float(max_jitter),
+            )
+        self.completed_cookie_indices = list(batch)
+        self.batch_index = 1
+        self.batch_reports.append(
+            {
+                "cookies": list(batch),
+                "lifted": 5,
+                "lift_heights_m": [0.0] * 5,
+                "released": True,
+                "prefilled": True,
+            }
+        )
 
     def _validate_target_workspace(self):
         """Reject unreachable table layouts before starting a physical grasp."""
@@ -972,6 +1071,35 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1
+                # **The inter-batch perturbation, at the one moment it belongs.**  The
+                # five are released and settled; the second batch is about to be
+                # selected.  Between those two lines the first batch is as good as it
+                # will ever be -- five upright at the slot centres -- and nudging them
+                # *here* is what makes the second batch an insertion next to imperfect
+                # neighbours rather than the same insertion the baseline trains.  The
+                # maxima are the modest ones (see `_prefill_first_batch` for the hard
+                # draw): a lean up to 3 degrees, a yaw to 0.8, a shift to 0.15 mm --
+                # enough to read, small enough that the group absorbs it by shifting
+                # within the box's margin rather than by knocking a neighbour over
+                # (the upright tolerance is 15 degrees, and the perturbation has to
+                # stay a long way under it or the episode fails its own contract).
+                if (
+                    getattr(self.env, "second_batch_mode", "full") == "perturb"
+                    and self.batch_index == 1
+                ):
+                    # One draw for the whole group, for the same reason the prefill
+                    # draws once: the settled group has zero clearance
+                    # cookie-to-cookie, and independently drawn leans
+                    # interpenetrate the neighbours.  See
+                    # `perturb_settled_cookies` and `_prefill_first_batch`.
+                    rng = self.env.np_random
+                    self.env.perturb_settled_cookies(
+                        tuple(self.completed_cookie_indices[-5:]),
+                        lean_azimuth_rad=float(rng.uniform(0.0, 2.0 * np.pi)),
+                        lean_rad=float(rng.uniform(0.0, np.deg2rad(3.0))),
+                        yaw_rad=float(rng.uniform(-np.deg2rad(0.8), np.deg2rad(0.8))),
+                        max_jitter_m=0.00015,
+                    )
                 self._advance(
                     CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
                 )

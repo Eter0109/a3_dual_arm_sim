@@ -119,6 +119,17 @@ TASKS: dict[str, TaskSpec] = {
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
     ),
+    # The same job, the same words, the same contract -- with the second batch met from
+    # more than the one state the expert's first batch leaves behind.  The prompt and the
+    # contract are the baseline's own, character for character: the instruction is the same
+    # job (a policy has to learn to read the box's progress from the picture, not from a
+    # different sentence), and the contract still asks for ten released and seventy
+    # remaining, which the prefilled episodes satisfy by construction.
+    "a3_cookie_batch_second_batch": TaskSpec(
+        name="a3_cookie_batch_second_batch",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
     # The same task on a different embodiment: the packing, the prompt and the contract are
     # `a3_cookie_batch`'s, and only the arm and the cameras are `libero_props`'.  Registered
     # as its own task rather than aliased because a dataset's provenance records the task

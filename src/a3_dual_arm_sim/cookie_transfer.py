@@ -287,6 +287,12 @@ class A3CookieTransferEnv(A3DualArmEnv):
         )
         self._success_hold_count = 0
         self._source_initially_filled = False
+        # The second-batch condition this *episode* runs under; drawn per reset from
+        # `second_batch_modes` by the seed.  "full" until a reset says otherwise, so an
+        # expert that reads it before any reset (a policy built ahead of the first
+        # episode, a probe) sees the baseline rather than an unset attribute.
+        self.second_batch_mode = "full"
+        self._episode_seed: int | None = None
 
     @property
     def cookie_positions(self) -> np.ndarray:
@@ -692,6 +698,15 @@ class A3CookieTransferEnv(A3DualArmEnv):
             seed=seed,
             options={"randomize_objects": False},
         )
+        # The second-batch condition for *this* episode, drawn before anything else so
+        # the expert's `reset` -- which the runner calls right after this one -- reads
+        # the condition the episode actually runs under.  Uniform over the configured
+        # list by `seed % len(modes)`; the seed travels in the episode metadata, so the
+        # condition is derivable from the dataset after the fact.  No seed (a probe
+        # resetting without one) keeps the baseline.
+        self._episode_seed = seed
+        modes = self.config.cookie_transfer.second_batch_modes
+        self.second_batch_mode = modes[int(seed) % len(modes)] if seed is not None else modes[0]
         randomize = (options or {}).get("randomize_cookies", True)
         # Two independent switches, because they cost different things:
         #
@@ -906,6 +921,117 @@ class A3CookieTransferEnv(A3DualArmEnv):
         # had just travelled the whole distance in a single control step.
         self._cookie_pose_history.pop(index, None)
         mujoco.mj_forward(self.model, self.data)
+
+    def place_cookie_in_slot(
+        self,
+        index: int,
+        slot_index: int,
+        *,
+        lean_azimuth_rad: float,
+        lean_rad: float,
+        yaw_rad: float,
+        max_jitter_m: float,
+    ) -> None:
+        """Teleport Cookie ``index`` standing into target slot ``slot_index``, imperfectly.
+
+        The imperfections are the point.  A prefilled second-batch episode has to start
+        from progress that looks like what a *policy's* first batch leaves behind, not
+        like what the expert's does -- and the expert's is perfect, five upright at the
+        slot centres, which is exactly the state a policy never produces.
+
+        **The lean and the yaw are exact values, not maxima, and the caller draws them
+        once per episode and passes the same ones to every Cookie of the group.**  That
+        coherence is a correctness requirement, not a style: the five slots of a column
+        are 6.33 mm apart in ``y`` and the Cookie is 6.33 mm thick, so the standing group
+        has **zero** clearance cookie-to-cookie -- and a Cookie leaned *towards* its
+        neighbour by an independently drawn angle puts its top edge 25*sin(lean) ~ 1.7 mm
+        *inside* the neighbour's body, which `set_cookie_pose` writes without a collision
+        check and the contact solver then resolves as an explosion.  Measured on the
+        first version, which drew each Cookie's lean independently: the prefilled
+        group's two *end* Cookies (indices 0 and 4, the ones with a single neighbour to
+        be shoved into) ended the episode outside the box entirely.  A coherent lean --
+        every Cookie of the group tipped about the same axis by the same angle -- is a
+        parallelogram: no pair interpenetrates, the group leans the way a group that
+        settled together actually leans, and the end Cookie's top overhangs the box
+        floor, which has ~19 mm of margin to absorb it.
+
+        The jitter is drawn here, per Cookie, because it is the one imperfection that is
+        safe to draw independently: sub-millimetre overlaps resolve gently, and a
+        per-Cookie jitter is the variety a uniform placement would otherwise lack.
+
+        ``z`` is not an argument: the slot's world point is computed at the box's own
+        cookie-centre height, and `set_cookie_pose`'s box branch re-snaps it there in
+        the live box frame anyway -- which is also why this stays correct when the box
+        has been randomised, because the slot is read through `privileged_target_slot_world`
+        and the snap through the live body pose, not through the configured nominal.
+        """
+
+        world = self.privileged_target_slot_world(slot_index, self._target_cookie_center_z)
+        jitter = self.np_random.uniform(-max_jitter_m, max_jitter_m, size=2)
+        position = (world[0] + jitter[0], world[1] + jitter[1], world[2])
+        axis = (np.cos(lean_azimuth_rad), np.sin(lean_azimuth_rad), 0.0)
+        lean_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_axisAngle2Quat(lean_q, np.asarray(axis), lean_rad)
+        yaw_q = np.array(
+            [np.cos(yaw_rad / 2.0), 0.0, 0.0, np.sin(yaw_rad / 2.0)], dtype=np.float64
+        )
+        quaternion = np.empty(4, dtype=np.float64)
+        mujoco.mju_mulQuat(quaternion, yaw_q, lean_q)
+        self.set_cookie_pose(index, position, tuple(float(v) for v in quaternion))
+
+    def perturb_settled_cookies(
+        self,
+        indices: tuple[int, ...],
+        *,
+        lean_azimuth_rad: float,
+        lean_rad: float,
+        yaw_rad: float,
+        max_jitter_m: float,
+    ) -> None:
+        """Nudge already-placed Cookies: a coherent lean and yaw, a per-Cookie shift.
+
+        For the inter-batch perturbation, applied to the five a batch just released so
+        the next batch is inserted next to imperfect neighbours.  The lean and the yaw
+        are exact values the caller drew once, and the coherence is the same correctness
+        requirement as `place_cookie_in_slot`'s: the settled group has zero clearance
+        cookie-to-cookie, so independently drawn leans interpenetrate the neighbours and
+        the solver explodes the group apart (measured: the perturbed group's end Cookie
+        was still re-settling when the expert's final check ran, and the episode was
+        discarded for a state it had left two hundred steps later).  A coherent lean
+        tips the group as a parallelogram -- no interpenetration, and the re-settle is
+        the gentle relaxation of a group that leans together.
+
+        Reads each Cookie's *live* pose and composes the perturbation onto it, so it is
+        a nudge rather than a re-placement; `set_cookie_pose` zeroes the velocity and
+        re-forwards, so the result is a Cookie at rest, leaning, that the contact
+        solver then re-settles -- which is the realistic shape of "the previous batch
+        did not land perfectly".
+        """
+
+        lean_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_axisAngle2Quat(
+            lean_q,
+            np.array([np.cos(lean_azimuth_rad), np.sin(lean_azimuth_rad), 0.0]),
+            lean_rad,
+        )
+        yaw_q = np.array(
+            [np.cos(yaw_rad / 2.0), 0.0, 0.0, np.sin(yaw_rad / 2.0)], dtype=np.float64
+        )
+        perturb_q = np.empty(4, dtype=np.float64)
+        mujoco.mju_mulQuat(perturb_q, yaw_q, lean_q)
+        for index in indices:
+            joint = int(self._cookie_joints[index])
+            address = int(self.model.jnt_qposadr[joint])
+            position = self.data.qpos[address : address + 3].copy()
+            quaternion = self.data.qpos[address + 3 : address + 7].copy()
+            jitter = self.np_random.uniform(-max_jitter_m, max_jitter_m, size=2)
+            position[0] += jitter[0]
+            position[1] += jitter[1]
+            composed = np.empty(4, dtype=np.float64)
+            mujoco.mju_mulQuat(composed, perturb_q, quaternion)
+            self.set_cookie_pose(
+                index, tuple(float(v) for v in position), tuple(float(v) for v in composed)
+            )
 
     #: How many control steps of history the "is it still moving?" question is asked over.
     #:

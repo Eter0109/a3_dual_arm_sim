@@ -164,6 +164,30 @@ class CookieSceneConfig:
     #: The expert adds this to its tuned points so they travel with the task; a scene that does
     #: not set it is unchanged.
     layout_offset_m: tuple[float, ...] = (0.0, 0.0)
+    #: Which second-batch conditions this scene's episodes draw from, one per episode, by seed.
+    #:
+    #: A batch collection's episodes are otherwise all "start empty, do batch 0, do batch 1" --
+    #: and a policy trained on that meets the second batch only ever from the one state the
+    #: first batch's success leaves behind, which is the classic covariate-shift hole: the
+    #: fine-tunes built on it place the first five and lose the second.  The modes close the
+    #: hole from both sides, and the expert applies whichever one the seed drew:
+    #:
+    #:   ``full``            the whole two-batch episode, exactly as before -- the baseline
+    #:                       the others are read against, and still the majority of the data;
+    #:   ``prefill``        the episode *starts* at the second batch: five Cookies already
+    #:                       stand in the target box, imperfectly (leaning, jittered), and the
+    #:                       expert does the second batch from that progress;
+    #:   ``perturb``        the full episode, and at the moment batch 0 is released the five
+    #:                       just-placed Cookies are perturbed -- leaned, nudged -- so batch 1
+    #:                       is inserted next to imperfect neighbours;
+    #:   ``prefill_perturb````prefill``, with the five prefilled Cookies perturbed harder: the
+    #:                       worst-case second batch, progress that is both partial *and* messy.
+    #:
+    #: The draw is ``modes[seed % len(modes)]`` -- uniform over the list, recorded nowhere but
+    #: derivable from the seed the episode metadata already carries.  The default is the
+    #: one-element ``("full",)``, which draws ``full`` for every seed and is byte-identical to
+    #: every scene that has never heard of this field.
+    second_batch_modes: tuple[str, ...] = ("full",)
     box_lift_m: float = 0.030
     box_tilt_deg: float = 8.0
     left_gripper_kp: float = 400.0
@@ -694,6 +718,7 @@ def load_config(path: str | Path | None = None) -> SimConfig:
         base_height_m=float(cookie_raw.get("base_height_m", defaults.base_height_m)),
         base_xy_m=_float_tuple(cookie_raw, "base_xy_m", defaults.base_xy_m),
         layout_offset_m=_float_tuple(cookie_raw, "layout_offset_m", defaults.layout_offset_m),
+        second_batch_modes=_second_batch_modes(cookie_raw, defaults.second_batch_modes),
         box_lift_m=float(cookie_raw.get("box_lift_m", defaults.box_lift_m)),
         box_tilt_deg=float(cookie_raw.get("box_tilt_deg", defaults.box_tilt_deg)),
         left_gripper_kp=float(cookie_raw.get("left_gripper_kp", defaults.left_gripper_kp)),
@@ -745,6 +770,39 @@ def load_config(path: str | Path | None = None) -> SimConfig:
 
 def _float_tuple(values: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(float(value) for value in values.get(key, default))
+
+
+#: The second-batch conditions a scene may draw from; see ``CookieSceneConfig.second_batch_modes``.
+_SECOND_BATCH_MODES = ("full", "prefill", "perturb", "prefill_perturb")
+
+
+def _second_batch_modes(
+    values: dict[str, Any], default: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Parse ``second_batch_modes``, rejecting a mode name that would silently never apply.
+
+    A typo here would not fail anything: the draw is ``modes[seed % len(modes)]``, an
+    unknown name would reach the expert, and the expert's ``getattr``-style default
+    would quietly run ``full`` for every episode that drew it -- a dataset that claims
+    variety it never had.  So the names are checked, and the list is checked non-empty
+    for the same reason (an empty list would index-error at the first reset instead of
+    at load time).
+    """
+
+    raw = values.get("second_batch_modes", default)
+    modes = tuple(str(mode).strip() for mode in raw if str(mode).strip())
+    if not modes:
+        raise ValueError(
+            "cookie_transfer.second_batch_modes must list at least one of "
+            f"{_SECOND_BATCH_MODES}; an empty list has no episode to draw"
+        )
+    unknown = [mode for mode in modes if mode not in _SECOND_BATCH_MODES]
+    if unknown:
+        raise ValueError(
+            f"cookie_transfer.second_batch_modes has unknown mode(s) {unknown}; "
+            f"the modes are {_SECOND_BATCH_MODES}"
+        )
+    return modes
 
 
 def _libero_props(values: dict[str, Any]) -> tuple[LiberoPropConfig, ...]:

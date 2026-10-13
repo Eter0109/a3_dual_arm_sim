@@ -1,0 +1,168 @@
+# Five-at-a-time bevel insertion. Uniform 2.5 mm gaps, no pre-cut finger lanes.
+#
+# Scene randomization: the two boxes and the arm start pose move between episodes.
+# Ranges are [low, high] offsets in metres (yaw in radians), asymmetric because the
+# arm's workspace is not centred on the nominal pose; see cookie_same_column.yaml
+# for the measured reach per direction that these stay inside.
+physics_hz: 1000
+control_hz: 20
+horizon: 6000
+randomization:
+  source_bin_x_m: [-0.060, 0.030]
+  source_bin_y_m: [-0.050, 0.050]
+  source_bin_yaw_rad: 0.05
+  target_bin_x_m: [-0.100, 0.020]
+  target_bin_y_m: [-0.040, 0.060]
+  target_bin_yaw_rad: 0.10
+  arm_home_rad: 0.04
+  min_box_clearance_m: 0.020
+physics_hz: 1000
+control_hz: 20
+horizon: 6000
+cookie_transfer:
+  # The one line this file adds to `cookie_batch.yaml`; everything else is that
+  # file's, copied rather than restated, so the two scenes cannot drift apart on
+  # any physical parameter.  The modes are the second-batch conditions the episodes
+  # draw from, one per episode by seed (`modes[seed % len(modes)]`, uniform over the
+  # list -- the seed travels in the episode metadata, so the condition is derivable
+  # from the dataset after the fact):
+  #
+  #   full             the whole two-batch episode -- the baseline, and still a
+  #                    quarter of the data, because a policy that never sees the
+  #                    whole task cannot do the whole task either;
+  #   prefill          the episode starts at the second batch: five Cookies already
+  #                    stand in the box, imperfectly, and the expert does the
+  #                    second batch from that progress;
+  #   perturb          the full episode, and the five just placed are nudged the
+  #                    moment they are released, so the second batch is inserted
+  #                    next to imperfect neighbours;
+  #   prefill_perturb prefill with wider maxima: progress that is both partial and
+  #                    messy -- the worst-case second batch.
+  #
+  # Why these four and not just prefill: the failure modes of a second batch are two
+  # different holes and they need different data.  "Never saw a partially-filled box"
+  # is closed by prefill; "never inserted next to anything but perfect neighbours" is
+  # closed by perturb; and a policy that meets both at once only from full episodes
+  # has met neither.  The uniform draw puts a quarter of the episodes in each.
+  second_batch_modes: [full, prefill, perturb, prefill_perturb]
+  left_gripper_kp: 1200.0
+  # The shim, and it is not an optimisation.  0.0005 m half thickness is 1 mm across both
+  # fingertips, against the 2.433 mm net gap between two Cookies in the packed column
+  # (8.833 mm source pitch minus the 6.4 mm slab).  The default is the real robot's
+  # 3.175 mm pad -- 6.35 mm across -- which cannot enter that gap at all, and
+  # `same_column_batch_expert` refuses the placement outright rather than trying:
+  # `pad_thickness = 2 * this`, fail when `aligned_gap_width_m <= pad_thickness`.  So
+  # without this line the dense scene is not merely harder, it is unsolvable, and every
+  # attempt is discarded.  Same value as `cookie_same_column.yaml`,
+  # `cookie_two_box_batch.yaml` and `libero_props.yaml`; this file was the one that missed
+  # it, which is why nothing here had ever been collected on it.
+  left_finger_pad_half_thickness_m: 0.0005
+  right_gripper_kp: 2000.0
+  box_lift_m: 0.0
+  box_tilt_deg: 0.0
+  cookie_edge_bevel_m: 0.0025
+  # The lower chamfer, from the same-column config.  These Cookies are driven downwards
+  # into slots 6.33 mm apart, and a sharp bottom edge catches on the row behind on the way
+  # in rather than sliding past it.
+  cookie_bottom_edge_bevel_m: 0.0010
+  cookie_collision_mode: compound
+  cookie_friction: [0.8, 0.003, 0.0002]
+  cookie_solref: [0.004, 1.0]
+  cookie_solimp: [0.99, 0.999, 0.0005, 0.5, 2.0]
+  source_bin_half_size_m: [0.1186, 0.1010833333]
+  source_bin_wall_height_m: 0.026
+  target_bin_half_size_m: [0.063, 0.035]
+  target_bin_world_position_m: [0.095, 0.100, 0.753]
+  target_bin_wall_height_m: 0.026
+  target_slots_local_m:
+    - [-.028, -0.01266667]
+    - [.028, -0.01266667]
+    - [-.028, -0.00633333]
+    - [.028, -0.00633333]
+    - [-.028, 0.00000000]
+    - [.028, 0.00000000]
+    - [-.028, 0.00633333]
+    - [.028, 0.00633333]
+    - [-.028, 0.01266667]
+    - [.028, 0.01266667]
+  cookie_source_positions_m:
+    - [0.09940000, 0.23108333]
+    - [0.09940000, 0.23991667]
+    - [0.09940000, 0.24875000]
+    - [0.09940000, 0.25758333]
+    - [0.09940000, 0.26641667]
+    - [0.09940000, 0.27525000]
+    - [0.09940000, 0.28408333]
+    - [0.09940000, 0.29291667]
+    - [0.09940000, 0.30175000]
+    - [0.09940000, 0.31058333]
+    - [0.09940000, 0.31941667]
+    - [0.09940000, 0.32825000]
+    - [0.09940000, 0.33708333]
+    - [0.09940000, 0.34591667]
+    - [0.09940000, 0.35475000]
+    - [0.09940000, 0.36358333]
+    - [0.09940000, 0.37241667]
+    - [0.09940000, 0.38125000]
+    - [0.09940000, 0.39008333]
+    - [0.09940000, 0.39891667]
+    - [0.14980000, 0.23108333]
+    - [0.14980000, 0.23991667]
+    - [0.14980000, 0.24875000]
+    - [0.14980000, 0.25758333]
+    - [0.14980000, 0.26641667]
+    - [0.14980000, 0.27525000]
+    - [0.14980000, 0.28408333]
+    - [0.14980000, 0.29291667]
+    - [0.14980000, 0.30175000]
+    - [0.14980000, 0.31058333]
+    - [0.14980000, 0.31941667]
+    - [0.14980000, 0.32825000]
+    - [0.14980000, 0.33708333]
+    - [0.14980000, 0.34591667]
+    - [0.14980000, 0.35475000]
+    - [0.14980000, 0.36358333]
+    - [0.14980000, 0.37241667]
+    - [0.14980000, 0.38125000]
+    - [0.14980000, 0.39008333]
+    - [0.14980000, 0.39891667]
+    - [0.20020000, 0.23108333]
+    - [0.20020000, 0.23991667]
+    - [0.20020000, 0.24875000]
+    - [0.20020000, 0.25758333]
+    - [0.20020000, 0.26641667]
+    - [0.20020000, 0.27525000]
+    - [0.20020000, 0.28408333]
+    - [0.20020000, 0.29291667]
+    - [0.20020000, 0.30175000]
+    - [0.20020000, 0.31058333]
+    - [0.20020000, 0.31941667]
+    - [0.20020000, 0.32825000]
+    - [0.20020000, 0.33708333]
+    - [0.20020000, 0.34591667]
+    - [0.20020000, 0.35475000]
+    - [0.20020000, 0.36358333]
+    - [0.20020000, 0.37241667]
+    - [0.20020000, 0.38125000]
+    - [0.20020000, 0.39008333]
+    - [0.20020000, 0.39891667]
+    - [0.25060000, 0.23108333]
+    - [0.25060000, 0.23991667]
+    - [0.25060000, 0.24875000]
+    - [0.25060000, 0.25758333]
+    - [0.25060000, 0.26641667]
+    - [0.25060000, 0.27525000]
+    - [0.25060000, 0.28408333]
+    - [0.25060000, 0.29291667]
+    - [0.25060000, 0.30175000]
+    - [0.25060000, 0.31058333]
+    - [0.25060000, 0.31941667]
+    - [0.25060000, 0.32825000]
+    - [0.25060000, 0.33708333]
+    - [0.25060000, 0.34591667]
+    - [0.25060000, 0.35475000]
+    - [0.25060000, 0.36358333]
+    - [0.25060000, 0.37241667]
+    - [0.25060000, 0.38125000]
+    - [0.25060000, 0.39008333]
+    - [0.25060000, 0.39891667]
