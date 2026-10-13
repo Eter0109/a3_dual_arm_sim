@@ -201,3 +201,16 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 | 输出目录已存在 | 新训练用新目录；恢复用训练器 resume，不覆盖旧结果 |
 
 环境兼容性与功能边界见 [已知限制](limitations.md)。
+## 评测中的闲置右臂选项
+
+网格测试和 `examples/benchmark_cookie_batch.py` 支持 `--inactive-right-arm auto|off`，默认 `auto`。
+`auto` 仅在训练统计显示右臂七个关节及夹爪的 state/action 八维都恒定，且两者姿态一致时生效。
+任一右臂维度在示范中变化，则不启用自动保持；`off` 始终保留模型的右臂输入和预测。
+此选项只处理 SmolVLA 适配器，不修改仿真环境，也不影响其他策略。8D 左臂模型继续按原接口保持回合初始右臂。
+
+生效时，模型输入中的右臂状态使用示范固定值，执行时右臂关节目标使用相同值，避免零方差归一化放大浮点漂移。
+左臂、图像、语言、权重和数据统计保持原配置，诊断仍保留原始模型动作。
+Python 接口对应 `SmolVLAPolicyAdapter(..., inactive_right_arm_mode="off")`。
+
+多核网格测试使用 `python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli --workers 8 --inactive-right-arm auto ...`。
+CPU 仿真独立运行，共享一份 GPU 模型；每路动作队列和推理随机数独立。结果仍使用最终入盒数量，过程峰值单独记录。

@@ -4,8 +4,8 @@ Run from the repository root:
     MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
         --max-steps 500 --episodes 20 --output outputs/smolvla_grid_500
 
-Each round evaluates all six cells on the same seed. The 2x5 task uses the
-training instruction; 2x10 uses its native instruction and is transfer testing.
+Each round evaluates all six cells on the same seed. The 2x5 task uses the short
+instruction; 2x10 uses its native instruction. Transfer depends on the training task.
 """
 
 from __future__ import annotations
@@ -100,12 +100,19 @@ def main():
     parser.add_argument("--n-action-steps", type=int, default=8)
     parser.add_argument("--num-steps", type=int, default=25, help="Flow inference steps")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--workers", type=int, default=1, help="CPU environments sharing one model")
+    parser.add_argument(
+        "--inactive-right-arm",
+        choices=("auto", "off"),
+        default="auto",
+        help="auto: hold only a demonstrated constant right arm; off: use raw right state/actions",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--dry-run", action="store_true", help="Print experiment settings without loading a policy"
     )
     args = parser.parse_args()
-    if min(args.episodes, args.max_steps, args.n_action_steps, args.num_steps) < 1:
+    if min(args.episodes, args.max_steps, args.n_action_steps, args.num_steps, args.workers) < 1:
         parser.error("episode and step counts must be positive")
     checkpoint, dataset, output = (
         args.checkpoint.resolve(),
@@ -130,10 +137,13 @@ def main():
         "n_action_steps": args.n_action_steps,
         "num_steps": args.num_steps,
         "device": args.device,
+        "workers": args.workers,
+        "gpu_model_instances": 1 if args.device == "cuda" else 0,
+        "inactive_right_arm_mode": args.inactive_right_arm,
         "metric": "final cookies_in_target, mean and total; not peak count or success rate",
         "prompt_2x5": "transfer 10 cookies into target box",
-        "prompt_2x10": "native Cookie2x10Plan prompt; transfer evaluation",
-        "postprocessing": "no extra rules; checkpoint tokenizer unchanged",
+        "prompt_2x10": "native Cookie2x10Plan prompt",
+        "postprocessing": "optional inactive right arm auto-hold; no geometric or gripper rules; tokenizer unchanged",
         "randomization_2x5": settings5,
         "randomization_2x10": settings10,
         "checkpoint_config": json.loads((checkpoint / "config.json").read_text()),
@@ -158,6 +168,7 @@ def main():
                     "workflows/episode_execution.py",
                     "workflows/cookie_2x10_execution.py",
                     "policies/smolvla.py",
+                    "workflows/shared_smolvla_grid.py",
                 )
             },
             "git_commit": source_revision(),
@@ -186,7 +197,14 @@ def main():
         results = summarize(rows, args.episodes)
         atomic_json(
             output / "summary.json",
-            {"status": status, "max_steps": args.max_steps, "results": results},
+            {
+                "status": status,
+                "max_steps": args.max_steps,
+                "results": results,
+                "completed": len(rows),
+                "planned": 6 * args.episodes,
+                "workers": args.workers,
+            },
         )
         lines = [
             f"Status: {status}; max_steps={args.max_steps}",
@@ -208,7 +226,72 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     save_summary("running")
+    policy = None
+
+    def record_row(row):
+        key = (row["benchmark"], row["profile"], row["seed"])
+        if key in done:
+            raise RuntimeError("Duplicate episode completion")
+        with rows_path.open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        rows.append(row)
+        done.add(key)
+        save_summary("running")
+        print(
+            f"DONE {key} final={row['cookies_in_target']}/{row['max_score']} steps={row['steps']}",
+            flush=True,
+        )
+
     try:
+        if args.workers > 1:
+            from a3_dual_arm_sim.workflows.shared_smolvla_grid import run_parallel_grid
+
+            jobs = []
+            for episode, seed in enumerate(
+                range(args.seed_start, args.seed_start + args.episodes), 1
+            ):
+                for task in TASKS:
+                    for profile in PROFILES:
+                        if (task, profile, seed) in done:
+                            continue
+                        settings = dict(settings5 if task == "2x5" else settings10, profile=profile)
+                        options = {
+                            "prompt_style": "training",
+                            "profile": profile,
+                            "source_column": "1",
+                            "randomization_settings": settings,
+                            "max_steps": args.max_steps,
+                        }
+                        if task == "2x10":
+                            options["first_grasp"] = first_grasp
+                        jobs.append(
+                            {
+                                "benchmark": task,
+                                "profile": profile,
+                                "seed": seed,
+                                "episode": episode,
+                                "options": options,
+                            }
+                        )
+            run_parallel_grid(
+                {
+                    "checkpoint": str(checkpoint),
+                    "dataset_root": str(dataset),
+                    "repo_id": args.repo_id,
+                    "device": args.device,
+                    "n_action_steps": args.n_action_steps,
+                    "num_steps": args.num_steps,
+                    "inactive_right_arm_mode": args.inactive_right_arm,
+                },
+                jobs,
+                args.workers,
+                output,
+                record_row,
+            )
+            save_summary("completed")
+            return 0
         policy = SmolVLAPolicyAdapter(
             checkpoint,
             dataset_root=dataset,
@@ -216,6 +299,7 @@ def main():
             device=args.device,
             n_action_steps=args.n_action_steps,
             num_steps=args.num_steps,
+            inactive_right_arm_mode=args.inactive_right_arm,
         )
         runners = {}
         for task in TASKS:
@@ -246,17 +330,7 @@ def main():
                 score = evaluated.episodes[0]
                 score.episode = episode
                 row = {**asdict(score), "benchmark": task, "profile": profile}
-                with rows_path.open("a") as stream:
-                    stream.write(json.dumps(row) + "\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                rows.append(row)
-                done.add((task, profile, seed))
-                save_summary("running")
-                print(
-                    f"DONE {task} {profile} seed={seed} final={score.cookies_in_target}/{score.max_score} steps={score.steps} wall={score.wall_seconds}s",
-                    flush=True,
-                )
+                record_row(row)
         save_summary("completed")
         print("ALL SIX TESTS COMPLETE", flush=True)
     except KeyboardInterrupt:
@@ -267,6 +341,9 @@ def main():
         atomic_json(output / "error.json", {"error": repr(exc)})
         save_summary("error")
         raise
+    finally:
+        if policy is not None:
+            policy.close()
     return 0
 
 

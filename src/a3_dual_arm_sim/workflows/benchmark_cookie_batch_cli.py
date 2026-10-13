@@ -176,6 +176,12 @@ def main() -> int:
     parser.add_argument("--inference-seed", type=int, default=None)
     parser.add_argument("--n-action-steps", type=int, default=None)
     parser.add_argument(
+        "--inactive-right-arm",
+        choices=("auto", "off"),
+        default="auto",
+        help="SmolVLA only: auto-hold a demonstrated inactive right arm, or disable with off",
+    )
+    parser.add_argument(
         "--temporal-ensemble-coeff",
         type=float,
         default=None,
@@ -208,6 +214,8 @@ def main() -> int:
         args.num_steps < 1 or not args.policy.startswith("smolvla:")
     ):
         parser.error("num-steps requires smolvla:<checkpoint> and a positive value")
+    if args.inactive_right_arm == "off" and not args.policy.startswith("smolvla:"):
+        parser.error("inactive-right-arm off requires smolvla:<checkpoint>")
     overrides = any(
         v is not None
         for v in (
@@ -275,6 +283,8 @@ def main() -> int:
     if overrides or args.policy.startswith(("smolvla:", "act:")):
         adapter = ACTPolicyAdapter if args.policy.startswith("act:") else SmolVLAPolicyAdapter
         extra = {}
+        if args.policy.startswith("smolvla:"):
+            extra["inactive_right_arm_mode"] = args.inactive_right_arm
         if args.policy.startswith("smolvla:") and args.num_steps is not None:
             extra["num_steps"] = args.num_steps
         if args.policy.startswith("act:"):

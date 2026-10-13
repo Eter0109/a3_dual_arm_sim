@@ -27,6 +27,9 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
         )
         kwargs.setdefault("profile", settings["profile"])
         kwargs.setdefault("max_steps", 3200)
+        # Neural policies have no expert phase machine to signal completion.
+        # Stop only after the environment confirms released, settled task success.
+        kwargs.setdefault("stop_on_success", True)
         if kwargs.get("source_column") is None:
             kwargs["source_column"] = settings["source_column"]
         super().__init__(config_path or resource_root() / "configs/cookie_2x10.yaml", **kwargs)

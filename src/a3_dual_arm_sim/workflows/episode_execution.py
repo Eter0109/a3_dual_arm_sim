@@ -59,6 +59,7 @@ class EpisodeExecution:
         success_hold_steps: int = 5,
         slot_tolerance_m: tuple[float, float] = (0.015, 0.005),
         wall_contact_tolerance_m: float = 0.030,
+        stop_on_success: bool = False,
     ):
         self.randomization_settings = load_randomization_config(
             randomization_config, config=randomization_settings
@@ -94,6 +95,7 @@ class EpisodeExecution:
             raise ValueError("wall_contact_tolerance_m must be finite and non-negative")
         self.success_hold_steps = success_hold_steps
         self.wall_contact_tolerance_m = wall_contact_tolerance_m
+        self.stop_on_success = stop_on_success
         self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
         self.max_steps = max_steps
         self.randomize_boxes = randomize_boxes
@@ -252,7 +254,22 @@ class EpisodeExecution:
                 if recorder is not None:
                     recorder.add_frame(previous_observation, info["applied_action"])
 
-                if getattr(runner_policy, "finished", False) or terminated or truncated:
+                stable_learned_success = (
+                    self.stop_on_success
+                    and getattr(runner_policy, "expert", None) is None
+                    and bool(info.get("success", False))
+                    and info.get("cookies_in_target") == self.required_cookies
+                    and info.get("cookies_in_source")
+                    == len(self.config.cookie_transfer.cookie_source_positions_m)
+                    - self.required_cookies
+                    and not info.get("safety_reason")
+                )
+                if (
+                    stable_learned_success
+                    or getattr(runner_policy, "finished", False)
+                    or terminated
+                    or truncated
+                ):
                     break
         except BaseException:
             if recorder is not None:

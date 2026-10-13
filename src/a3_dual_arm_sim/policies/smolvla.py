@@ -21,6 +21,30 @@ def validate_execution_horizon(n_action_steps: int, chunk_size: int) -> None:
         raise ValueError("n_action_steps must be between 1 and chunk_size")
 
 
+def constant_feature_values(stats: dict, dimension: int) -> tuple[np.ndarray, np.ndarray]:
+    """Identify exactly constant training dimensions from their observed range.
+
+    A nonzero aggregated std can be a rounding artefact even when min == max.
+    Preserve the actual recorded value instead of changing checkpoint statistics.
+    """
+    low = np.asarray(stats["min"], dtype=np.float32).reshape(-1)
+    high = np.asarray(stats["max"], dtype=np.float32).reshape(-1)
+    if low.shape != (dimension,) or high.shape != (dimension,):
+        raise ValueError("Training statistics do not match the policy feature dimension")
+    return np.isfinite(low) & np.isfinite(high) & (low == high), low.copy()
+
+
+def inactive_right_arm_target(stats: dict, dimension: int) -> np.ndarray | None:
+    """Auto-hold only when all right state/action dimensions share one constant pose."""
+    if dimension != 16:
+        return None
+    state_mask, state = constant_feature_values(stats["observation.state"], dimension)
+    action_mask, action = constant_feature_values(stats["action"], dimension)
+    if state_mask[8:].all() and action_mask[8:].all() and np.array_equal(state[8:], action[8:]):
+        return action[8:].copy()
+    return None
+
+
 class SmolVLAPolicyPlugin:
     """LeRobot SmolVLA checkpoint adapter for the common A3 policy protocol."""
 
@@ -41,6 +65,7 @@ class SmolVLAPolicyPlugin:
         clamp_z: bool = False,
         n_action_steps: int | None = None,
         inference_seed: int | None = None,
+        inactive_right_arm_mode: str = "auto",
     ) -> None:
         try:
             import mujoco
@@ -101,6 +126,14 @@ class SmolVLAPolicyPlugin:
         ) != [self._action_dim]:
             raise ValueError("Expected matching 8-D left-only or 16-D dual-arm state/actions")
         self._right_hold = None
+        if inactive_right_arm_mode not in {"auto", "off"}:
+            raise ValueError("inactive_right_arm_mode must be auto or off")
+        self.inactive_right_arm_mode = inactive_right_arm_mode
+        self._inactive_right_hold = (
+            inactive_right_arm_target(dataset.meta.stats, self._action_dim)
+            if inactive_right_arm_mode == "auto"
+            else None
+        )
         if n_action_steps is not None:
             validate_execution_horizon(n_action_steps, config.chunk_size)
             config.n_action_steps = n_action_steps
@@ -139,12 +172,17 @@ class SmolVLAPolicyPlugin:
             if state.shape not in ((8,), (16,)):
                 raise ValueError("Left-only inference requires 8-D or 16-D state")
             policy_observation["observation.state"] = state[:8].copy()
+            state = policy_observation["observation.state"]
+        if getattr(self, "_inactive_right_hold", None) is not None:
+            state = state.copy()
+            state[8:16] = self._inactive_right_hold
+            policy_observation["observation.state"] = state
         batch = self._prepare_observation(policy_observation, self._device, task, "A3_dual_arm")
         batch = self._preprocessor(batch)
         with self._torch.inference_mode():
             action = self._policy.select_action(batch)
             action = self._postprocessor(action)
-        return action.detach().float().cpu().numpy().reshape(dimension)
+        return action.detach().float().cpu().numpy().reshape(dimension).copy()
 
     def act(self, observation: dict[str, Any], task: str) -> np.ndarray:
         if getattr(self, "_action_dim", 16) == 8:
@@ -157,6 +195,9 @@ class SmolVLAPolicyPlugin:
         if getattr(self, "_action_dim", 16) == 8:
             action_np = np.concatenate((action_np, self._right_hold))
         self.last_raw_action = action_np.copy()
+
+        if getattr(self, "_inactive_right_hold", None) is not None:
+            action_np[8:16] = self._inactive_right_hold
 
         # 1. Stationary Right Arm Joint Anchoring
         if self.anchor_right_arm and getattr(self, "_action_dim", 16) == 16:
