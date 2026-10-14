@@ -120,8 +120,9 @@ dependencies cannot disturb the one that trains and evaluates the policies.
 
 ## 5. The bundle, as built
 
-`/root/autodl-tmp/release/a3-dual-arm-cookie-second-batch` — 40 files, 3.7 GB, with the bulk
-hard-linked to the collected dataset so the staging cost no extra disk:
+`/root/autodl-tmp/release/a3-dual-arm-cookie-second-batch` — 40 files, 3.7 GB (39 of them
+hashed in `MANIFEST.sha256`), with the bulk hard-linked to the collected dataset so the staging
+cost no extra disk:
 
 ```
 README.md                     the card: task, prompt, four conditions, feature table,
@@ -160,6 +161,21 @@ export MODELSCOPE_API_TOKEN=...          # modelscope.cn -> 个人中心 -> 访�
 cd /root/autodl-tmp/release/a3-dual-arm-cookie-second-batch
 bash upload_modelscope.sh <owner>/a3-dual-arm-cookie-second-batch
 ```
+
+**The token has to carry write permission, and that is easy to get wrong.**  A fine-grained
+token created at the read-only level is accepted by the client and then refused by the write
+endpoint:
+
+```
+POST /api/v1/datasets -> 403  10020000608  "只读Token无写权限"
+```
+
+The same token is also refused by the account-level endpoints (`whoami`, `users/me`) with
+`OperationNotAllowed`, because a fine-grained token is scoped to particular repositories.  That
+second refusal is *not* a diagnosis of the upload: the script therefore treats a failed
+`whoami` as a warning and lets the upload report what actually matters.  It also means such a
+token usually cannot create a repository — create the dataset on modelscope.cn first and pass
+`--skip-create`.
 
 The script creates the dataset repository if it does not exist (`--exist-ok`, so a retry is
 safe), uploads with 8 workers, and resumes an interrupted transfer rather than restarting the
