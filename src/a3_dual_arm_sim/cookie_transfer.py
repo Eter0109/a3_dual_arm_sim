@@ -203,6 +203,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.TARGET_SLOTS_LOCAL = scene_config.target_slots_local_m
         # One sample per control step, for `_cookie_average_speed`.
         self._cookie_pose_history: dict[int, list[tuple[float, np.ndarray, np.ndarray]]] = {}
+        #: The per-Cookie clause dictionaries the last `step` computed, and the state they
+        #: were computed from.  A step spends a whole pass over the contact table on these
+        #: (every `released` clause walks it), and every reader after the step -- the metric,
+        #: the renderer's per-Cookie overlay -- wants the same numbers about the same state.
+        #: `step_containment` hands them out only while that state is provably unchanged.
+        self._step_containment: tuple[dict[str, Any], ...] | None = None
+        self._step_containment_time = float("-inf")
+        self._step_containment_pose: bytes | None = None
         self.TARGET_SLOT_TOLERANCE = np.asarray(
             scene_config.target_slot_tolerance_m, dtype=np.float64
         )
@@ -244,6 +252,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_JOINT, f"cookie_{index}_free")
             for index in range(self.task_config.cookie_count)
         )
+        # An *array* of body ids, not the tuple above.  `xpos[tuple_of_ints]` is a
+        # multi-axis index to NumPy -- it reads position row i, coordinate j -- so the
+        # tuple that every per-Cookie lookup indexes by hand cannot gather all of them at
+        # once.  This is only for the whole-set reads (`_cookie_pose_fingerprint`).
+        self._cookie_body_index = np.asarray(self._cookie_bodies, dtype=np.int64)
         # A Cookie's collision geom is several geoms rather than one -- the beveled
         # shape is built as a compound, and a mesh geom has to be face-split -- so
         # each Cookie maps to a set.  `_cookie_geoms` names the primary (collision)
@@ -698,6 +711,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
             seed=seed,
             options={"randomize_objects": False},
         )
+        # A new episode is a new state, and the Cookies have just been placed: the verdicts
+        # the previous episode's last step kept are about a scene that no longer exists.
+        self._invalidate_step_containment()
         # The second-batch condition for *this* episode, drawn before anything else so
         # the expert's `reset` -- which the runner calls right after this one -- reads
         # the condition the episode actually runs under.  Uniform over the configured
@@ -893,6 +909,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
         position: tuple[float, float, float],
         quaternion: tuple[float, float, float, float] | None = None,
     ) -> None:
+        # A pose written directly is a state change with no step behind it, so the verdicts
+        # `step` kept describe a state that no longer exists.  (The fingerprint in
+        # `step_containment` would catch it anyway; this is the cheap early-out.)
+        self._invalidate_step_containment()
         joint_id = self._cookie_joints[index]
         qpos_address = int(self.model.jnt_qposadr[joint_id])
         dof_address = int(self.model.jnt_dofadr[joint_id])
@@ -1144,6 +1164,52 @@ class A3CookieTransferEnv(A3DualArmEnv):
     def _cookie_inside_target(self, index: int) -> bool:
         return self._containment_clauses(index)["in_target"]
 
+    def _cookie_pose_fingerprint(self) -> bytes:
+        """Every Cookie's pose as bytes: the identity of the state a verdict is about.
+
+        A verdict is about one state, and the Cookies' poses are what identify it.  Cheaper
+        than any scheme that has to trust every writer: a `qpos` write done by hand -- a test
+        placing a Cookie, the probe emptying the bin -- never passes through
+        `set_cookie_pose`, and a guard that only watches the polite path reports a state that
+        has already been replaced.
+
+        The arm and the two bins are deliberately not in here: they move only through
+        stepping, which replaces the snapshot anyway, or through `reset`, which drops it.
+        """
+
+        return (
+            np.ascontiguousarray(self.data.xpos[self._cookie_body_index]).tobytes()
+            + np.ascontiguousarray(self.data.xquat[self._cookie_body_index]).tobytes()
+        )
+
+    def _invalidate_step_containment(self) -> None:
+        """Drop the kept verdicts: a Cookie moved without a step, so they are about the past."""
+
+        self._step_containment = None
+        self._step_containment_time = float("-inf")
+        self._step_containment_pose = None
+
+    def step_containment(self) -> tuple[dict[str, Any], ...] | None:
+        """The clause dictionaries ``step`` computed, or ``None`` when they are stale.
+
+        The renderer's per-Cookie overlay asks for exactly the numbers ``step`` just
+        computed for its own metric, and computing them twice doubled the cost of the
+        scene's most expensive call.  This hands out the ones that already exist.
+
+        Deliberately narrow, because a verdict is only true of the state it was computed
+        from: this answers ``None`` unless the simulation time is unchanged *and* every
+        Cookie is still in the pose the verdict was reached about.  A caller that gets
+        ``None`` computes its own, which is what every caller did before this existed.
+        """
+
+        if self._step_containment is None:
+            return None
+        if self._step_containment_time != float(self.data.time):
+            return None
+        if self._step_containment_pose != self._cookie_pose_fingerprint():
+            return None
+        return self._step_containment
+
     def privileged_target_containment(self, index: int) -> dict[str, Any]:
         """Every clause of the verdict, so a caller can report *why* rather than just *no*.
 
@@ -1303,9 +1369,17 @@ class A3CookieTransferEnv(A3DualArmEnv):
 
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         observation, _, safety_terminated, truncated, info = super().step(action)
-        in_target = tuple(
-            self._cookie_inside_target(index) for index in range(self.task_config.cookie_count)
+        # One pass over the Cookies, and this time it is kept.  Each verdict walks the whole
+        # contact table for its `released` clause, which makes this the most expensive thing in
+        # a step after the physics itself -- and every reader after the step asks the same
+        # question about the same state.  `step_containment` is how they get it.
+        clause_rows = tuple(
+            self._containment_clauses(index) for index in range(self.task_config.cookie_count)
         )
+        self._step_containment = clause_rows
+        self._step_containment_time = float(self.data.time)
+        self._step_containment_pose = self._cookie_pose_fingerprint()
+        in_target = tuple(bool(row["in_target"]) for row in clause_rows)
         in_source = tuple(
             self._cookie_inside_source(index) for index in range(self.task_config.cookie_count)
         )

@@ -34,8 +34,10 @@ import argparse
 import importlib.util
 import json
 import os
+import socket
 import struct
 import sys
+import threading
 import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -270,43 +272,45 @@ def _coerce_chunk(result: Any) -> tuple[np.ndarray, str, str, dict[str, Any]]:
     return np.ascontiguousarray(array), space, units, info
 
 
-def serve(
-    adapter_path: Path,
-    config: dict[str, Any],
+def load_inference(adapter_path: Path, config: dict[str, Any]) -> tuple[Any, Any]:
+    """Load an adapter module and its model once, returning ``(model, infer)``.
+
+    Split out of `serve` so the listening server can load one model and hand it to many
+    connections, which is the whole point of that mode.
+    """
+
+    module = _load_adapter(adapter_path)
+    load, infer = _adapter(module)
+    return load(config), infer
+
+
+def serve_stream(
+    model: Any,
+    infer: Any,
     stream_in: Any,
     stream_out: Any,
-    dedicated: bool = True,
+    *,
+    lock: "threading.Lock | None" = None,
+    ready_detail: str = "",
+    allow_reset: bool = True,
 ) -> int:
-    """Run the request loop until the A3 side closes the stream."""
+    """Answer requests on one pair of streams until the far end closes them.
 
-    try:
-        module = _load_adapter(adapter_path)
-        load, infer = _adapter(module)
-        model = load(config)
-    except BaseException as exc:  # noqa: BLE001 - reported over the wire, then exit
-        write_frame(
-            stream_out,
-            encode_message(
-                "error",
-                {"message": f"adapter failed to load: {exc}", "traceback": traceback.format_exc()},
-                {},
-            ),
-        )
-        return 1
+    ``lock`` serialises the calls into a model that several connections share: the adapter
+    interface is a plain function over a loaded object and nothing about it promises to be
+    re-entrant, so the server holds a lock rather than assuming.
+
+    ``allow_reset`` is off for a shared server.  A reset is a per-episode instruction from
+    one client, and a shared model has no way to apply it to that client alone -- forwarding
+    it would silently discard another rollout's state mid-episode, which is the kind of
+    quiet wrong answer this bridge exists to prevent.  An adapter whose model carries
+    state that must be reset per episode therefore needs one process per rollout, and its
+    manifest should use `subprocess` rather than a shared socket.
+    """
 
     write_frame(
         stream_out,
-        encode_message(
-            "ready",
-            {
-                "side": "model",
-                "detail": (
-                    f"{adapter_path.name} protocol={PROTOCOL} "
-                    f"python={sys.version.split()[0]} fds={'dedicated' if dedicated else 'stdio'}"
-                ),
-            },
-            {},
-        ),
+        encode_message("ready", {"side": "model", "detail": ready_detail}, {}),
     )
 
     while True:
@@ -314,14 +318,17 @@ def serve(
             payload = read_frame(stream_in)
         except EOFError:
             return 0
+        except OSError:
+            return 0
         if not payload:
             return 0
         try:
             kind, fields, arrays = decode_message(payload)
             if kind == "reset":
-                reset = getattr(model, "reset", None)
-                if callable(reset):
-                    reset()
+                if allow_reset:
+                    reset = getattr(model, "reset", None)
+                    if callable(reset):
+                        reset()
                 write_frame(
                     stream_out,
                     encode_message("ready", {"side": "model", "detail": "reset"}, {}),
@@ -337,7 +344,11 @@ def serve(
                 timestamp=fields.get("timestamp"),
                 arrays=arrays,
             )
-            actions, space, units, info = _coerce_chunk(infer(model, request))
+            if lock is None:
+                actions, space, units, info = _coerce_chunk(infer(model, request))
+            else:
+                with lock:
+                    actions, space, units, info = _coerce_chunk(infer(model, request))
             write_frame(
                 stream_out,
                 encode_message(
@@ -347,15 +358,164 @@ def serve(
                 ),
             )
         except BaseException as exc:  # noqa: BLE001 - one bad request must not kill the server
-            write_frame(
-                stream_out,
-                encode_message(
-                    "error",
-                    {"message": str(exc), "traceback": traceback.format_exc()},
-                    {},
-                ),
-            )
+            try:
+                write_frame(
+                    stream_out,
+                    encode_message(
+                        "error",
+                        {"message": str(exc), "traceback": traceback.format_exc()},
+                        {},
+                    ),
+                )
+            except OSError:
+                # The client went away while its own error was being reported.  Nothing left
+                # to report it to, and this is not the server's failure.
+                return 0
     return 0
+
+
+def serve(
+    adapter_path: Path,
+    config: dict[str, Any],
+    stream_in: Any,
+    stream_out: Any,
+    dedicated: bool = True,
+) -> int:
+    """Run the request loop until the A3 side closes the stream."""
+
+    try:
+        model, infer = load_inference(adapter_path, config)
+    except BaseException as exc:  # noqa: BLE001 - reported over the wire, then exit
+        write_frame(
+            stream_out,
+            encode_message(
+                "error",
+                {"message": f"adapter failed to load: {exc}", "traceback": traceback.format_exc()},
+                {},
+            ),
+        )
+        return 1
+
+    return serve_stream(
+        model,
+        infer,
+        stream_in,
+        stream_out,
+        ready_detail=(
+            f"{adapter_path.name} protocol={PROTOCOL} "
+            f"python={sys.version.split()[0]} fds={'dedicated' if dedicated else 'stdio'}"
+        ),
+    )
+
+
+def _parse_listen_url(url: str) -> tuple[int, Any]:
+    """``unix:///path`` or ``tcp://host:port`` to a socket family and address."""
+
+    if url.startswith("unix://"):
+        return socket.AF_UNIX, url[len("unix://") :]
+    if url.startswith("tcp://"):
+        host, _, port = url[len("tcp://") :].partition(":")
+        if not port:
+            raise ProtocolError(f"--listen needs a port: {url!r}")
+        return socket.AF_INET, (host or "127.0.0.1", int(port))
+    raise ProtocolError(f"--listen must start with tcp:// or unix://, got {url!r}")
+
+
+def _serve_connection(
+    connection: Any,
+    model: Any,
+    infer: Any,
+    lock: "threading.Lock",
+    adapter_name: str,
+) -> None:
+    """One client, on its own thread, over the same loaded model."""
+
+    with connection:
+        reader = connection.makefile("rb")
+        writer = connection.makefile("wb")
+        try:
+            serve_stream(
+                model,
+                infer,
+                reader,
+                writer,
+                lock=lock,
+                ready_detail=f"{adapter_name} protocol={PROTOCOL} shared",
+                allow_reset=False,
+            )
+        except (OSError, EOFError):
+            # A client that vanished is a client that is done; the server keeps serving.
+            pass
+        finally:
+            for handle in (writer, reader):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+
+
+def serve_listening(
+    url: str,
+    adapter_path: Path,
+    config: dict[str, Any],
+    *,
+    backlog: int = 32,
+) -> int:
+    """Serve one loaded model to many rollout processes at once.
+
+    Why this exists: a rollout is a CPU-bound simulation that asks the model for a chunk
+    once every few control steps, so a model process spends most of its life waiting.  Measured
+    on this machine: the physics is ~80% of a step and the inference round trip ~5%, with the
+    GPU busy under a tenth of the time.  Running eight rollouts against one loaded model is
+    therefore eight times the throughput for one card's worth of weights -- which is the
+    difference between two parallel seeds and eight, because the alternative (one model process
+    per rollout) is capped by GPU memory at about three per card however idle the GPU is.
+
+    Each connection gets its own thread; the calls into the model are serialised by one lock,
+    because ``infer(model, request)`` is a plain function over a shared object and nothing
+    about the adapter contract promises otherwise.
+    """
+
+    family, address = _parse_listen_url(url)
+    try:
+        model, infer = load_inference(adapter_path, config)
+    except BaseException as exc:  # noqa: BLE001 - nothing to report over the wire yet
+        print(f"adapter failed to load: {exc}\n{traceback.format_exc()}", file=sys.stderr)
+        return 1
+
+    server_socket = socket.socket(family, socket.SOCK_STREAM)
+    if family == socket.AF_UNIX:
+        # A crashed server leaves its socket file behind and bind() then fails with
+        # "address already in use", which reads like a live server on the other end.
+        try:
+            os.unlink(address)
+        except FileNotFoundError:
+            pass
+    try:
+        server_socket.bind(address)
+        server_socket.listen(backlog)
+    except OSError as exc:
+        print(f"could not listen on {url}: {exc}", file=sys.stderr)
+        return 1
+
+    lock = threading.Lock()
+    print(f"listening on {url} (model loaded once)", file=sys.stderr, flush=True)
+    try:
+        while True:
+            try:
+                connection, _ = server_socket.accept()
+            except OSError as exc:
+                print(f"accept failed: {exc}", file=sys.stderr, flush=True)
+                return 1
+            threading.Thread(
+                target=_serve_connection,
+                args=(connection, model, infer, lock, adapter_path.name),
+                daemon=True,
+            ).start()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server_socket.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -363,6 +523,20 @@ def main(argv: list[str] | None = None) -> int:
         prog="a3_bridge_server", description="Serve an external model over the A3 wire protocol"
     )
     parser.add_argument("--adapter", type=Path, required=True, help="Path to an adapter module")
+    parser.add_argument(
+        "--listen",
+        default=None,
+        metavar="URL",
+        help=(
+            "Serve on unix:///path or tcp://host:port, loading the model once for every "
+            "client that connects, instead of the single-stream mode the A3 side drives "
+            "through a pair of file descriptors.  One loaded model then backs many rollouts "
+            "at once, which is the only way past the GPU-memory ceiling on how many model "
+            "processes fit on a card.  Resets are not forwarded in this mode: a shared model "
+            "cannot apply one client's per-episode reset to that client alone.  Manifests "
+            "reach it with transport.kind: socket."
+        ),
+    )
     parser.add_argument(
         "--config",
         action="append",
@@ -376,6 +550,8 @@ def main(argv: list[str] | None = None) -> int:
     except ProtocolError as exc:
         parser.error(str(exc))
         return 2
+    if args.listen:
+        return serve_listening(args.listen, args.adapter, config)
     stream_in, stream_out, dedicated = protocol_streams()
     return serve(args.adapter, config, stream_in, stream_out, dedicated)
 

@@ -47,6 +47,7 @@ import numpy as np
 from a3_dual_arm_sim.collection import scene_by_name
 
 TWO_COOKIE_SCENE = "a3_libero_panda_two_cookies"
+SECOND_BATCH_SCENE = "a3_cookie_batch_second_batch"
 
 
 def _geometry(env, index: int) -> tuple[float, float]:
@@ -84,6 +85,47 @@ def _put_standing(env, index: int, xy: tuple[float, float], bottom: float) -> No
     mujoco.mj_forward(env.model, env.data)
 
 
+def _put_leaning(env, index: int, xy: tuple[float, float], tilt_rad: float) -> None:
+    """Lean a Cookie across the target box: lowest corner on the floor, ``tilt_rad`` off vertical.
+
+    The pose the unfreeze sweep video showed four of the second batch in -- one end
+    down on the box floor, the other resting on the first batch's pile.  Written as
+    the standing pose tilted about the box's own y axis, which puts a real corner of
+    the slab exactly on the floor; the support is left out (this is a teleported,
+    frozen state, as `_put_standing` builds), because the judgement reads state, not
+    dynamics.
+    """
+
+    import mujoco
+
+    joint_id = env._cookie_joints[index]
+    address = int(env.model.jnt_qposadr[joint_id])
+    tb_pos = env.data.xpos[env._target_bin_body]
+    tb_mat = env.data.xmat[env._target_bin_body].reshape(3, 3)
+    half = np.abs(env.COOKIE_HALF_SIZE)
+    # The tilt moves the 25 mm axis toward horizontal, so the vertical half extent is
+    # the axis-aligned bound of the tilted slab, and the lowest corner sits at the
+    # floor exactly when the centre is that bound above it.
+    vertical_half = half[2] * np.cos(tilt_rad) + half[0] * np.sin(tilt_rad)
+    floor_top = float(
+        env.config.cookie_transfer.target_floor_z_m
+        + env.config.cookie_transfer.bin_wall_thickness_m / 2
+    )
+    env.data.qpos[address : address + 3] = tb_pos + tb_mat @ np.array(
+        [xy[0], xy[1], floor_top + vertical_half], float
+    )
+    tilt_q = np.empty(4, dtype=np.float64)
+    mujoco.mju_axisAngle2Quat(tilt_q, np.array([0.0, 1.0, 0.0]), tilt_rad)
+    box_q = np.empty(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(box_q, tb_mat.reshape(-1))
+    quaternion = np.empty(4, dtype=np.float64)
+    # box_q * tilt_q: the tilt is applied in the box's own frame, so `r_rel` in the
+    # verdict is exactly the tilted standing pose however the bin is yawed.
+    mujoco.mju_mulQuat(quaternion, box_q, tilt_q)
+    env.data.qpos[address + 3 : address + 7] = quaternion
+    mujoco.mj_forward(env.model, env.data)
+
+
 def _hold(env, steps: int) -> None:
     """Step while commanding no motion, at the scene's own action width."""
 
@@ -93,6 +135,51 @@ def _hold(env, steps: int) -> None:
     action = np.zeros(width)
     for _ in range(steps):
         env.step(action)
+
+
+def test_second_batch_counts_a_cookie_leaning_across_the_target_box() -> None:
+    """Posture is not a reason to refuse a Cookie that is in the box.
+
+    The order the assertions are pinned in is deliberate: every boundary the verdict
+    actually needs -- footprint, floor, rim, settled, released -- is shown to hold
+    for a Cookie leaning 22 degrees with its lowest corner on the box floor, and the
+    verdict says yes because this scene does not ask for uprightness.  The same test
+    then puts a Cookie on the rim here and shows the floor clause refuses it too, so
+    the relaxation has not opened the hole the Panda rim test guards: still pinched,
+    perched, or out of the box are all still refusals.
+    """
+
+    scene = scene_by_name(SECOND_BATCH_SCENE)
+    env = scene.build_env(0.0, 0.0)
+    try:
+        env.reset(seed=0, options={})
+
+        _put_leaning(env, 0, (0.0, 0.0), np.deg2rad(22.0))
+        clauses = env.privileged_target_containment(0)
+        assert clauses["footprint"]
+        assert clauses["above_floor"]
+        assert clauses["below_rim"]
+        assert clauses["on_the_floor"], "the low corner is down on the box floor"
+        assert clauses["settled"]
+        assert clauses["released"]
+        assert not clauses["upright"], "22 degrees is past the 15-degree default"
+        assert env.privileged_cookie_in_target(0), (
+            "a Cookie leaning on the placed pile with one end on the floor is in the box"
+        )
+
+        # The rim: a standing Cookie balanced on the wall, a tenth of a millimetre
+        # inside the rim bound so that clause cannot be the one refusing it.
+        half_y = float(env.COOKIE_HALF_SIZE[1])
+        y = float(env.TARGET_INNER_HALF_SIZE[1] + env.CONTACT_CONTAINMENT_TOLERANCE_M) - half_y
+        _put_standing(env, 1, (0.0, y), float(env.TARGET_WALL_HEIGHT) - 0.0001)
+        rim = env.privileged_target_containment(1)
+        assert rim["below_rim"], "the rim bound must not be what rejects it"
+        assert not rim["on_the_floor"]
+        assert not env.privileged_cookie_in_target(1), (
+            "a Cookie resting on the box's rim is not on the floor of the box"
+        )
+    finally:
+        env.close()
 
 
 def test_two_standing_cookies_cannot_both_be_inside_the_box() -> None:
@@ -136,6 +223,40 @@ def test_two_standing_cookies_cannot_both_be_inside_the_box() -> None:
         assert half_extent > 0.010, "and it is standing, not lying flat"
         assert not env.privileged_cookie_in_target(1), (
             "a Cookie whose lowest face is above the wall top is not inside the box"
+        )
+    finally:
+        env.close()
+
+
+def test_the_step_snapshot_is_handed_out_only_for_the_state_it_describes() -> None:
+    """A step's containment work is kept for the readers after it -- and only while it is true.
+
+    Three claims, in the order they matter: a fresh reset has nothing to hand out; the numbers
+    a step keeps are the numbers a fresh computation gives; and a Cookie moved by hand, with no
+    step behind it, makes the kept verdicts stale rather than silently wrong.  The last one is
+    the reason this is a snapshot with a fingerprint and not a cache with a lifetime.
+    """
+
+    scene = scene_by_name(SECOND_BATCH_SCENE)
+    env = scene.build_env(0.0, 0.0)
+    try:
+        env.reset(seed=0, options={})
+        assert env.step_containment() is None, "a fresh reset has no step behind it"
+
+        _hold(env, 1)
+        snapshot = env.step_containment()
+        assert snapshot is not None, "the step that just ran filled it"
+        assert len(snapshot) == env.task_config.cookie_count
+        for index in range(env.task_config.cookie_count):
+            assert snapshot[index] == env.privileged_target_containment(index), (
+                "the kept verdicts must be the ones a fresh computation reaches"
+            )
+
+        # Moved without a step, and through a path that never calls `set_cookie_pose` --
+        # which is exactly the case a guard on the polite path would miss.
+        _put_standing(env, 0, (0.0, 0.0), float(env.TARGET_WALL_HEIGHT) + 0.002)
+        assert env.step_containment() is None, (
+            "verdicts about a pose the Cookie no longer has must not be handed out"
         )
     finally:
         env.close()

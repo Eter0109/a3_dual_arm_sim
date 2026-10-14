@@ -1,0 +1,77 @@
+# `pi05_a3_b2_unfreeze_14k.yaml` with the 20000-step run's final checkpoint.
+#
+# Same interface (joint_position 16-wide, chunk 50 / execute 16, three A3
+# cameras at 224^2, dt 0.05); the only change is the checkpoint path.
+#
+# Trained on: the same 1000-episode a3_b2_merged dataset, from the 14k
+# un-freeze checkpoint, extended to 20000 steps (batch 6, partial un-freeze
+# A3_UNFREEZE_LLM_LAYERS=18 A3_UNFREEZE_VISION=1, fused AdamW, cosine decay
+# zeroed at the end).  The run was interrupted at step 10000 by a full disk
+# and resumed from 008000 with lerobot's native resume (optimizer, scheduler
+# and RNG restored), so the step count is continuous.  Teacher-forced loss:
+# 0.004 at the 8000 resume point, 0.002 at the end (the cosine tail accounts
+# for part of the drop; the 14k twin ended at 0.0028 with the schedule still
+# mid-flight).
+#
+# Judged with the scene's relaxed containment (see collection.py: the
+# second-batch scene does not require uprightness), so scores are not
+# comparable to sweeps taken before that change.
+
+name: pi05-a3-b2-unfreeze-20k
+notes: >
+  pi0.5 fine-tuned on a3_b2_merged (1000 second-batch episodes) with the
+  partial un-freeze, extended from the 14k checkpoint to 20000 steps; final
+  loss 0.002 with the cosine decay completed.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b2_unfreeze_20k/checkpoints/020000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

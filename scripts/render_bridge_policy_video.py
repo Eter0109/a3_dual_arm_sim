@@ -271,12 +271,22 @@ def containment_lines(env: Any) -> list[str]:
         return []
 
     count = int(task_config.cookie_count)
+    # The step that just ran computed these already, for its own metric.  Reusing them is
+    # not a shortcut past the scene's own computation -- it *is* the scene's own
+    # computation, and the accessor refuses to answer unless the state is exactly the one
+    # they were reached about.  See `A3CookieTransferEnv.step_containment`.
+    kept = getattr(env, "step_containment", None)
+    snapshot = kept() if callable(kept) else None
+    if snapshot is not None and len(snapshot) != count:
+        snapshot = None
+    # `filtered` is about how many Cookies the scene has, not about where the numbers came
+    # from, so it is decided the same way either way.
     filtered = count > PER_COOKIE_LINE_LIMIT
     lines: list[str] = []
     packed = 0
     summary = {"in_target": 0, "in_source": 0, "held": 0, "tilted": 0}
     for index in range(count):
-        clause = inquiry(index)
+        clause = snapshot[index] if snapshot is not None else inquiry(index)
         above_floor_mm = 1000.0 * float(clause["bottom_above_floor_m"])
         tilt = float(clause["tilt_deg"])
         if clause["in_target"]:
