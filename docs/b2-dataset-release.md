@@ -105,19 +105,7 @@ to imperfect neighbours.
   after collection (a leaning Cookie with one end on the floor now counts), while these
   episodes were accepted under the stricter rule.
 
-**Mechanics.**  From a machine that can reach `huggingface.co`:
-
-```bash
-pip install -U "huggingface_hub[hf_transfer]"
-hf auth login                       # needs the official endpoint, not a mirror
-HF_HUB_ENABLE_HF_TRANSFER=1 hf upload <org>/a3-dual-arm-cookie-second-batch \
-    /path/to/release --repo-type dataset
-```
-
-`hf upload` resumes: an interrupted 3.7 GB push continues rather than restarting, which is
-worth knowing because the LFS upload is the part that fails on a flaky link.
-
-**The constraint on this machine.**  It cannot do the upload itself:
+**Where it goes.**  Not the Hugging Face Hub -- this machine cannot reach it:
 
 ```
 https://huggingface.co/api/whoami-v2   -> connection timed out (port 443)
@@ -125,9 +113,58 @@ https://hf-mirror.com/api/whoami-v2    -> HTTP 401 (reachable, but the mirror is
 HF_TOKEN / stored credentials          -> none
 ```
 
-So the release has to be pushed from a machine with access (a laptop, or a box with the
-official endpoint reachable), or the account has to be reachable through a proxy.  If the
-official endpoint stays blocked, **ModelScope** (`www.modelscope.cn`) answers from here and
-hosts LeRobot datasets as well; the same directory tree can be pushed there with its own CLI.
-Either way the work to prepare is identical, which is why the staging directory above is worth
-building now: it is the part that needs the data, and the data is here.
+`www.modelscope.cn` does answer from here, and hosts LeRobot datasets, so **ModelScope is the
+target**.  Its client is installed in a virtualenv of its own
+(`/root/autodl-tmp/ms-venv`) rather than in the training environment, so that pulling in its
+dependencies cannot disturb the one that trains and evaluates the policies.
+
+## 5. The bundle, as built
+
+`/root/autodl-tmp/release/a3-dual-arm-cookie-second-batch` — 40 files, 3.7 GB, with the bulk
+hard-linked to the collected dataset so the staging cost no extra disk:
+
+```
+README.md                     the card: task, prompt, four conditions, feature table,
+                              physical facts, caveats, licence, provenance
+LICENSE                       CC BY 4.0, full legal text
+episode_metadata.jsonl        renamed sidecar; the only place `seed` lives
+collection_summary.json       contract, prompt, randomisation, acceptance counts
+scene_config.yaml             copy of configs/cookie_batch_second_batch.yaml
+examples/load_and_filter_by_mode.py    loads the set, prints per-condition counts and the
+                                       block structure, reads one episode of each
+examples/train_pi05_example.sh         the recipe, with the four traps commented
+upload_modelscope.sh          create-if-absent + upload + the verification steps
+MANIFEST.sha256               hashes of the other 39 files
+data/ meta/ videos/           the LeRobot dataset, unmodified
+```
+
+Both examples were run against the bundle before it was sealed: the loader reads the sidecar,
+constructs `LeRobotDataset` (432,327 frames, 1000 episodes) and decodes one frame of each
+condition.  Two things it turned up while being written, both now in the card:
+
+* **The episodes are ordered in 20 blocks of 50-by-condition.**  Each of the 20 collection
+  shards contributed its episodes grouped by mode, so along `episode_index` the sequence is
+  50 `full`, 50 `prefill`, 50 `perturb`, 50 `prefill_perturb`, five times over.  A sequential
+  train/validation split therefore separates *conditions*, and correlates with shards.  Anyone
+  who splits this set without shuffling will measure something that is not generalisation.
+* **`video_backend="pyav"` is not optional in practice.**  lerobot's default is torchcodec,
+  which needs a matching FFmpeg build; where it is missing the failure is
+  `OSError: libavutil.so.57: cannot open shared object file`, which reads as a broken
+  environment rather than as a codec.  The parquet data, the sidecar and the metadata need no
+  decoder at all.
+
+**Remaining steps** (they need a ModelScope account, so they are the user's to take):
+
+```bash
+export MODELSCOPE_API_TOKEN=...          # modelscope.cn -> 个人中心 -> 访问令牌
+cd /root/autodl-tmp/release/a3-dual-arm-cookie-second-batch
+bash upload_modelscope.sh <owner>/a3-dual-arm-cookie-second-batch
+```
+
+The script creates the dataset repository if it does not exist (`--exist-ok`, so a retry is
+safe), uploads with 8 workers, and resumes an interrupted transfer rather than restarting the
+3.7 GB.  Afterwards, **check that the card is at the repository root** — an uploader that nests
+the payload under a directory named after the local one leaves the card at
+`<repo>/a3-dual-arm-cookie-second-batch/README.md`, where nobody reads it; the script prints
+the download command that answers this.  Then hand consumers `MANIFEST.sha256` so they can
+verify what arrived.
