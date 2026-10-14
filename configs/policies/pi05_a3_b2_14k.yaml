@@ -1,0 +1,73 @@
+# The b2 fine-tune, read at its last checkpoint: 1000 episodes of
+# `a3_cookie_batch_second_batch` (the four second-batch modes, 250 each), 14,000
+# steps at batch 8, expert-only (PaliGemma frozen, 693M trainable), final loss
+# 0.007 against b1's 0.008 at 20,000 steps on 200 episodes.
+#
+# The interface is `pi05_a3_finetuned.yaml`'s character for character -- same
+# three A3 cameras at 224, same 16-wide joint_position action, same chunk 50 /
+# execute 16 -- because the model is the same interface on newer data; only the
+# checkpoint this file points at, and the provenance in this header, differ.
+#
+# Check the wiring without loading anything:
+#   a3-sim policy check configs/policies/pi05_a3_b2_14k.yaml
+
+name: pi05-a3-b2-14k
+notes: >
+  pi0.5 fine-tuned on 1000 second-batch-augmented episodes of
+  a3_cookie_batch_second_batch (full/prefill/perturb/prefill_perturb, 250 each),
+  14000 steps, expert-only.  Solves the same interface as pi05_a3_finetuned.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b2_14k/checkpoints/014000/pretrained_model
+    - --config
+    - state_dims=16
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text

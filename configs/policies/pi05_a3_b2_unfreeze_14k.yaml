@@ -1,0 +1,73 @@
+# `pi05_a3_b2_14k.yaml` with the unfreeze run's final checkpoint.
+#
+# Same interface (joint_position 16-wide, chunk 50 / execute 16, three A3
+# cameras at 224^2, dt 0.05); the only change is the checkpoint path.
+#
+# Trained on: the same 1000-episode a3_b2_merged dataset, 14000 steps, with
+# the partial un-freeze (A3_UNFREEZE_LLM_LAYERS=18 A3_UNFREEZE_VISION=1,
+# 3.09 B trainable: vision tower + multi-modal projector + last 18 LLM
+# layers) at batch 6, fused AdamW.  Loss history against the frozen twin
+# (both 500-step-smoothed, same data and step budget):
+#
+#   <0.02   freeze step 2,380  |  unfreeze step 1,040
+#   <0.01   freeze step 8,400  |  unfreeze step 2,560
+#   end     freeze 0.0085      |  unfreeze 0.0028  (3x lower)
+
+name: pi05-a3-b2-unfreeze-14k
+notes: >
+  pi0.5 fine-tuned on a3_b2_merged (1000 second-batch episodes) with the
+  partial un-freeze: vision tower + projector + last 18 LLM layers trainable
+  (3.09 B), 14000 steps, final loss 0.0028 against the frozen twin's 0.0085.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b2_unfreeze_14k/checkpoints/014000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
