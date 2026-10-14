@@ -537,6 +537,7 @@ def _batch_scene(
     hold_steps: int,
     details: dict[str, Any] | None = None,
     visual_style: str = "plain",
+    require_upright: bool = True,
 ) -> CollectionScene:
     """Shared body of the two five-at-a-time scenes.
 
@@ -547,6 +548,9 @@ def _batch_scene(
     recording runs to the expert's own stopping rule instead of the environment
     cutting it off mid-retract.  ``success`` still comes from the environment, so
     the accepted-episode rule stays in one place.
+
+    ``require_upright`` is a scene-level contract difference, which is why it is a
+    parameter rather than a constant: see the callers for the two positions.
 
     ``visual_style`` reaches the model builder, so it has to arrive as a
     ``SimConfig`` rather than a path: the appearance is compiled into the XML, not
@@ -560,6 +564,7 @@ def _batch_scene(
             yaw_noise_rad=yaw_noise_rad,
             require_exact_slots=False,
             require_released=True,
+            require_upright=require_upright,
             terminate_on_success=False,
         )
         loaded = load_config(config)
@@ -585,6 +590,7 @@ def _batch_scene(
             "hold_steps": hold_steps,
             "require_exact_slots": False,
             "require_released": True,
+            "require_upright": require_upright,
             **(details or {}),
         },
     )
@@ -641,6 +647,18 @@ def cookie_batch_second_batch_scene(
             "second_batch_modes": "full / prefill / perturb / prefill_perturb, drawn by seed",
         },
         visual_style=visual_style,
+        # Not upright: this scene's subject is progress, not posture.  A rollout of the
+        # unfreeze checkpoint (seed 1, prefill mode) was judged "in target 6/10" while
+        # the video shows all ten in the box -- four of the second batch each with one
+        # end down on the box floor and the other resting on the first batch's pile,
+        # tilted past the 15-degree default.  Every clause that guards a real boundary
+        # is still enforced (``footprint``, ``on_the_floor`` via ``require_released``,
+        # ``below_rim``, ``settled``, ``released``), so a Cookie balanced on the rim or
+        # perched above the pile still does not count -- posture alone is no longer a
+        # reason to refuse one that is in the box.  The two-box relay made the same call
+        # for the same measured reason: a Cookie shoved flat by the push is still *in
+        # the box*.
+        require_upright=False,
     )
 
 
