@@ -134,9 +134,12 @@ model per sweep, and a resumable driver.
 * `a3_b2` at 20k, ten seeds, relaxed judging: **mean 6.6 / median 5.5**, all ten seeds
   placing something.  The same ten seeds on the 14k checkpoint re-judged: **mean 2.6**, six
   of them zero.
-* In `full` mode specifically (the model doing both batches from an empty box), the 20k
-  checkpoint reaches 10/10 on 4 of 9 samples; the 14k checkpoint does not reach 10 in any of
-  its three.
+* In `full` mode specifically -- the model doing both batches from an empty box -- the 20k
+  checkpoint reaches ten on 5 of 8 samples (mean 8.25, no zeros); the 14k checkpoint reaches
+  ten on 3 of 11 (mean 5.09) and lands on **zero** in 3 of them.  So the gap is smaller than
+  the all-mode numbers suggest and it is a gap in reliability rather than in capability: the
+  14k checkpoint can do the whole task, it just does not do it dependably.  On the three
+  seeds both checkpoints have been run on (0, 4, 8) the 14k scored 5/0/0 and the 20k 5/10/10.
 
 ## 6. Open questions
 
@@ -150,7 +153,11 @@ model per sweep, and a resumable driver.
    comparison is used.
 3. **The second batch is all-or-nothing.**  The score distribution is 5 or 10, not a spread:
    5 is "the first batch landed and the second did not".  Whatever the 20k checkpoint learned
-   raised the first batch to a certainty and left the second a coin toss.
+   raised the first batch to a certainty and left the second a coin toss.  The failure that
+   separates the two checkpoints is not "never places anything" so much as *losing* what is
+   already there: the 14k checkpoint lands on zero on 6 of 10 all-mode seeds, including
+   three `prefill` seeds that begin with five Cookies already in the box, and on 3 of 11
+   `full` seeds.  The 20k checkpoint has no zero in any of its 18 scored seeds.
 4. **Single seeds are not measurements.**  Seed 12 on the 20k checkpoint scored 11 and then
    5 on two runs of the identical configuration.  The policy is stochastic; ten seeds give
    the mean to about ±1.5 Cookies at this spread.
