@@ -143,10 +143,17 @@ model per sweep, and a resumable driver.
 
 ## 6. Open questions
 
-1. **Extra steps or warm restart?**  Run 15 differs from run 14 in two ways at once, and the
-   logs make both visible: 6000 more steps, and a learning rate re-heated from the floor to
-   peak and re-annealed.  A continuation at floor LR would separate them and has not been
-   run.
+1. **Extra steps or warm restart?**  Run 15 ran **20000** more steps than run 14 -- not the
+   6000 the names `14k`/`20k` invite -- starting from a checkpoint whose learning rate had
+   already annealed to the floor, with a fresh 20000-step cosine: re-heated from 2.5e-06 to
+   2.5e-05 over the first 1000 steps, then annealed back.  The windowed loss says what that
+   cost and what it bought.  The re-heat pushed the loss from 0.0029 (where run 14 stopped)
+   up to 0.0054, and it took until roughly step 12000 to get back below where run 14 had left
+   off; from there the second anneal took it 0.0027 → 0.0022 in 8000 steps.  So about 60 % of
+   the restart's budget went into recovering its own damage, and the gain is better described
+   as *a longer anneal* than as *an excursion that found a better basin* -- the more so
+   because run 14's schedule auto-scaled its decay to its own 14000-step budget, so a single
+   34000-step cosine was never tried and remains a live explanation for the same result.
 2. **The 14k judging baseline does not match the older 24-seed one** -- 2.6 against 4.6 on
    the same weights and scene, with the zero-count fraction going 5/24 → 6/10.  That is too
    large for seed noise; the older sweep's scene and step budget need checking before the
