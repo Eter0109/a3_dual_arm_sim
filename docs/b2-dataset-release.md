@@ -1,0 +1,133 @@
+# The second-batch dataset: what is in it, and how to release it
+
+1000 expert episodes on the A3 dual-arm cookie scene, collected to close one specific hole:
+every earlier episode was "start empty, do batch 0, do batch 1", so a policy met the second
+batch only from the state the *expert* leaves behind -- five perfectly placed Cookies -- which
+is a state a policy never produces itself.  These episodes meet the second batch four
+different ways, which is the point of the set.
+
+Everything below was read out of the dataset's own files
+(`meta/info.json`, `meta/episodes/`, `a3_episode_metadata.jsonl`, `collection_summary.json`).
+
+## 1. The four conditions
+
+Exactly 250 episodes each, assigned by `seed % 4` (that is the scene's rule, and since the
+seed travels in the episode metadata the condition is derivable after the fact).
+
+| mode | episodes | frames (min/mean/max) | what the episode contains |
+|---|---|---|---|
+| `full` | 250 | 530 / 561 / 874 | the whole task: empty box, both batches done by the expert |
+| `prefill` | 250 | 292 / 303 / 321 | **starts at the second batch**: five Cookies already in the box, imperfectly |
+| `perturb` | 250 | 530 / 558 / 599 | the whole task, and the five just placed are nudged at the moment of release |
+| `prefill_perturb` | 250 | 293 / 305 / 325 | `prefill` with the wider imperfections |
+
+The frame counts are the tell: the two `prefill` variants are ~300 frames because the first
+batch is teleported into the box rather than performed by the expert (a rollout that has to be
+teleported, 550-870).
+
+What "imperfectly" is drawn from, in `prefill`:
+
+* a **single coherent lean** for the whole group, uniform in `[0, 4°]` (`prefill_perturb`: `[0, 6°]`),
+  at a drawn azimuth.  One lean for all five rather than five independent draws, because the
+  column's slots are 6.33 mm apart against 6.33 mm-thick Cookies: independent leans
+  interpenetrate the neighbours and the solver explodes the group out of the box (measured).
+* yaw uniform in `±1°` (`±1.5°`), and per-Cookie position jitter `±0.2 mm` (`±0.3 mm`).
+
+`perturb` re-applies, to the five just placed, a coherent lean of up to 3° at a drawn azimuth
+plus per-Cookie jitter -- the state a second batch meets when the first one was inserted next
+to imperfect neighbours.
+
+## 2. Size, layout, schema
+
+* **3.7 GB** total, of which video is 3.66 GB: `front` 1.2 GB, `left_wrist` 1.9 GB,
+  `right_wrist` 560 MB.
+* 1000 episodes, **432,327 frames**, 20 fps → 21.6 s per episode on average.
+* LeRobot **v3.0** layout: `meta/info.json`, `meta/episodes/chunk-000/*.parquet`,
+  `meta/stats.json`, `meta/tasks.parquet`, `data/chunk-000/*.parquet`,
+  `videos/<camera>/chunk-000/*.mp4` (AV1, `libsvtav1`).
+* Per-step features: `observation.images.{front,left_wrist,right_wrist}` video 256×256×3,
+  `observation.state` f32[16], `observation.velocity` f32[16], `observation.eef_pose` f32[14],
+  `observation.force` f32[18], `action` f32[16], plus `timestamp`/`frame_index`/`episode_index`/`index`.
+* Two files that are ours rather than lerobot's: `a3_episode_metadata.jsonl` (one JSON object
+  per episode: `episode_index`, `seed`, `frames`, `success`, `source_shard`,
+  `controller_type`, `source_action_mode`, `stored_action_mode`, `task`) and
+  `collection_summary.json` (task, contract, prompt, randomisation ranges, acceptance counts).
+* Collection facts from that summary: 1030 attempts → **1000 accepted** (98.9 %), all
+  `success=True`; `placements_randomized=True`, `cookies_jittered=False` (the dense packing
+  cannot take per-Cookie jitter); the boxes move in x/y/yaw and the arm home in ±0.04 rad,
+  keeping 20 mm between the boxes.
+
+## 3. What the files do not say, and a consumer will need
+
+1. **There is no `mode` column.**  `meta/episodes/*.parquet` carries no seed either -- the
+   sidecar is the only place the mode is recoverable, via `modes[seed % 4]`.  A release must
+   ship the sidecar and document that mapping, or nobody downstream can slice by condition.
+2. The **scene config** (`configs/cookie_batch_second_batch.yaml`) and the code that defines
+   the task are in this repository, not in the dataset: the prompt string, the 1000 Hz/20 Hz
+   rates, the 2×5 target box, the finger-pad shim (0.5 mm half-thickness, without which the
+   dense packing is unsolvable rather than merely hard).
+3. The images are the **unmirrored A3 convention**.  A checkpoint fine-tuned on LIBERO expects
+   the horizontally mirrored view, and `A3_IMAGE_MIRROR=1` is what toggles it.
+4. `action` and `observation.state` are **A3 joint positions in radians** (16 wide: 7 + gripper
+   per arm) -- not Panda, not LIBERO, not Cartesian deltas.
+5. The videos are **AV1**: decoding needs pyav with an AV1 decoder.
+
+## 4. Releasing it
+
+**One dataset repo, the merged form, plus the four things that carry the semantics.**
+
+```
+<org>/a3-dual-arm-cookie-second-batch
+  README.md                     # the card, below
+  data/ meta/ videos/           # the lerobot dataset as-is, so LeRobotDataset(repo_id) works
+  episode_metadata.jsonl        # renamed a3_episode_metadata.jsonl; the mode authority
+  collection_summary.json       # contract, prompt, randomisation, acceptance
+  scene_config.yaml             # copy of configs/cookie_batch_second_batch.yaml
+  examples/                     # the two manifests + the render command actually used
+  MANIFEST.sha256               # hashes, so a consumer can verify what they downloaded
+```
+
+* **Do not** upload the 20 raw shard directories.  They are strict supersets of the merged
+  data (same frames, more files) and would double the download for no information.
+* **Do not** upload checkpoints here.  Each un-freeze checkpoint is 21 GB (weights + optimizer
+  state) and belongs in its own model repo; the dataset card should link to it, not contain it.
+* Drop `meta/stats.json.bak` (a repair artefact of the first training run) and describe the
+  repair in the card instead: the degenerate `q01 == q99` dimensions were recomputed from the
+  recorded rows, which matters to anyone who re-derives normalisation statistics.
+* `README.md` front-matter needs a **license**, and this repository has no `LICENSE` file --
+  that is a decision to make before publishing, not after.  The card should also carry
+  `task_categories: robotics`, `tags: [lerobot, mujoco, manipulation, dual-arm]` and a
+  `size_categories` consistent with 1000 episodes.
+* The card's body should state, in this order: the task and the exact prompt string; the four
+  conditions and how to derive them; what a step contains (the feature table); the physical
+  facts above (rates, joint space, camera convention, AV1); the contract that decided which
+  episodes were kept; and one known caveat -- the scene's *evaluation* grading was relaxed
+  after collection (a leaning Cookie with one end on the floor now counts), while these
+  episodes were accepted under the stricter rule.
+
+**Mechanics.**  From a machine that can reach `huggingface.co`:
+
+```bash
+pip install -U "huggingface_hub[hf_transfer]"
+hf auth login                       # needs the official endpoint, not a mirror
+HF_HUB_ENABLE_HF_TRANSFER=1 hf upload <org>/a3-dual-arm-cookie-second-batch \
+    /path/to/release --repo-type dataset
+```
+
+`hf upload` resumes: an interrupted 3.7 GB push continues rather than restarting, which is
+worth knowing because the LFS upload is the part that fails on a flaky link.
+
+**The constraint on this machine.**  It cannot do the upload itself:
+
+```
+https://huggingface.co/api/whoami-v2   -> connection timed out (port 443)
+https://hf-mirror.com/api/whoami-v2    -> HTTP 401 (reachable, but the mirror is read-only)
+HF_TOKEN / stored credentials          -> none
+```
+
+So the release has to be pushed from a machine with access (a laptop, or a box with the
+official endpoint reachable), or the account has to be reachable through a proxy.  If the
+official endpoint stays blocked, **ModelScope** (`www.modelscope.cn`) answers from here and
+hosts LeRobot datasets as well; the same directory tree can be pushed there with its own CLI.
+Either way the work to prepare is identical, which is why the staging directory above is worth
+building now: it is the part that needs the data, and the data is here.

@@ -168,3 +168,62 @@ model per sweep, and a resumable driver.
 4. **Single seeds are not measurements.**  Seed 12 on the 20k checkpoint scored 11 and then
    5 on two runs of the identical configuration.  The policy is stochastic; ten seeds give
    the mean to about ±1.5 Cookies at this spread.
+
+## 7. Why the second cycle helped, as far as the logs can say
+
+No experiment was run for this section.  It is the windowed loss of runs 14 and 15, read
+against what an anneal and a restart are each supposed to do -- and it is written down because
+the tempting summary ("the restart worked") does not follow from it.
+
+**What the two mechanisms predict**
+
+* An *anneal* is a noise-radius argument.  Stochastic optimisation does not settle on a
+  minimum; it wanders inside a ball whose radius scales with the learning rate, so the loss at
+  the end of training is roughly the objective averaged over that ball.  Only a decayed rate
+  makes the ball small enough to land.  The terminal loss is then set by how small the final
+  rate was and how far the trajectory had travelled before it -- by the *shape* of the
+  schedule, not by how many cycles it is cut into.
+* A *restart* has two candidate stories.  (i) **Escape**: raising the rate moves the weights
+  far enough in a few hundred steps to leave the basin the previous cycle ended in, and the
+  re-anneal lands in a different, possibly flatter one.  (ii) **Just a longer schedule**:
+  re-raising and re-decaying is equivalent to spending longer above the floor and then
+  annealing once more -- which a single long cosine also provides.  **A loss curve cannot tell
+  these two apart**, and that is the whole difficulty.
+
+**The windowed loss** (2000-step means, from the two logs)
+
+| run 14 (cosine auto-scaled to its 14000-step budget) | run 15 (from the 14k weights, fresh 20000-step cosine) |
+|---|---|
+| 8-9k  0.00422 | 2-4k  0.00538 -- **worse than where run 14 stopped** |
+| 11-12k 0.00322 | 6-8k  0.00390 |
+| 12-13k 0.00296 | 10-12k 0.00338 |
+| 13-14k 0.00292 (last window: −4e-05, after −2.6e-04 in the one before) | 12-14k 0.00272 -- back below run 14's endpoint |
+| | 18-20k 0.00217 |
+
+**Three readings.**  (1) The restart's immediate effect is negative: 0.0029 → 0.0054, +86 %.
+Stopping there would have been a pure loss.  (2) About 12000 of the 20000 steps went into
+repaying it -- the loss only got back below run 14's endpoint near step 12000.  (3) The whole
+net gain (0.00292 → 0.00217) accrued during the second *decay*, from ~step 12000 at a rate
+near 1e-05 down to the floor.
+
+**Which one, then.**  "Just more steps at the floor" does not explain it: run 14's last window
+was already at the floor (its rate was ~2.8e-06 against a 2.5e-06 floor), and the creep there
+was 4e-05 per 1000 steps, falling sixfold within one window.  Extrapolating that creep at its
+own constant rate for 20000 steps lands on ~0.0021 -- the observed value -- but the measured
+deceleration says the within-basin creep was nearly exhausted, which puts a floor-continuation
+at ~0.0029.  **The logs cannot settle which extrapolation is right.**  What they do support is
+that the gain came from *going back up to a high rate and annealing down again* -- the second
+cycle as a whole -- rather than from the extra steps as such, because steps spent at the floor
+barely move the loss.
+
+The restart is nevertheless not *necessary* for that process: a single 34000-step cosine
+supplies the same two ingredients (a long high-rate phase, then a full anneal) while spending
+nothing to repair an excursion.  That comparison is the experiment that would settle the
+question and it has not been run.  Mechanistically the re-heat is expensive here because the
+dataset is small next to the model -- 1000 episodes, ~250k frames, against 3.09 B trainable
+parameters -- so a high rate does not only explore, it forgets, which is what a 0.0025 rise in
+loss over the first 2000 steps is.
+
+One caveat that limits all of the above: the task metric is not the loss.  The loss moved 26 %;
+the task moved from 6/10 seeds landing nothing to 0/10.  A loss-level attribution does not
+transfer to the task level, so the two stories would have to be compared on the task metric.
