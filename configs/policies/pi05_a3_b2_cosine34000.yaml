@@ -1,0 +1,77 @@
+# Run 17: the single-cosine arm, at 34000 steps -- the incumbent's total budget, spent on
+# one continuous cosine instead of a 14000-step cosine followed by a re-heated 20000-step
+# one.  See §7 and §8 of `docs/pi05-training-history.md`, and `logs/long_cosine_train.sh`.
+#
+#   arm 14  14000 : a3_b2_unfreeze_14k/014000           one cosine to the floor
+#   arm 15  34000 : a3_b2_unfreeze_20k/020000           + a 20000-step re-heated cosine
+#   arm 16  34000 : a3_b2_floor20k/020000               + 20000 steps flat at the floor
+#   arm 17  34000 : a3_b2_cosine34000/034000            ONE cosine over all 34000
+#
+# Interface is unchanged from the 14k/20k/floor manifests -- same dataset, same partial
+# un-freeze, same 16-wide joint interface -- so the only difference between the four arms is
+# the weights.  The checkpoint path is what `--serve-config ckpt=` loads at evaluation time;
+# this field is the default for a manifest-driven (non-socket) run.
+#
+# Trained at 34000, warmup 1133 (= the preset's 1000/30000 ratio), decay 34000 so the cosine
+# reaches the floor exactly at the end, batch 6, seed 1000, from `lerobot/pi05_base`.
+#
+# If this ran at 32000 instead, the twin manifest is `pi05_a3_b2_cosine32000.yaml`.
+
+name: pi05-a3-b2-cosine34000
+notes: >
+  pi0.5 fine-tuned on a3_b2_merged (1000 second-batch episodes) from pi05_base with the
+  partial un-freeze, as a single 34000-step cosine -- the untried alternative to the
+  14000 + re-heated-20000 two-cycle recipe.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b2_cosine34000/checkpoints/034000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
