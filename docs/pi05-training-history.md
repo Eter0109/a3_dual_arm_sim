@@ -281,6 +281,13 @@ fused AdamW, and the same 20000-step auto-scaled cosine geometry (so the warmup 
 steps in both).  The training script is `logs/floor20k_train.sh`, with a pruner that keeps
 the two newest checkpoints because the disk is at 79 %.
 
+Paths in this section: `logs/` is `/root/autodl-tmp/logs` (the runners, the per-seed logs
+and the `<tag>_summary.json` files) and `pi05-runs/` is `/root/autodl-tmp/pi05-runs` (the
+checkpoints).  Both live outside the repository -- the weights and the logs are too large
+for git -- so the scripts that produced tonight's numbers are
+`logs/floor20k_train.sh`, `logs/floor20k_evals.sh`, `logs/floor20k_topup.sh` and
+`logs/matched_ruler.sh`.
+
 **Reading it.**  The three arms differ in exactly one factor each, and the first two were
 written down before the run finished.  The numbers below are the ones that survive tracing
 every sample back to the log that produced it -- see the correction note after the table,
