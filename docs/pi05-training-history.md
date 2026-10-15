@@ -135,9 +135,13 @@ model per sweep, and a resumable driver.
 * `a3_b2` at 20k, ten seeds, relaxed judging: **mean 6.6 / median 5.5**, all ten seeds
   placing something.  The same ten seeds on the 14k checkpoint re-judged: **mean 2.6**, six
   of them zero.
-* In `full` mode specifically -- the model doing both batches from an empty box -- the 20k
-  checkpoint reaches ten on 5 of 8 samples (mean 8.25, no zeros); the 14k checkpoint reaches
-  ten on 3 of 11 (mean 5.09) and lands on **zero** in 3 of them.  So the gap is smaller than
+* In `full` mode specifically -- the model doing both batches from an empty box -- the two
+  checkpoints are **the same on the mean** once every sample is traced to its own log
+  (14k 6.38 and 20k 6.38 on the eight seeds they share; see §8's correction, the 8.25 that
+  used to stand here was assembled from mixed tags).  What differs is the shape: the 14k
+  checkpoint lands on **zero** in 3 of those 8 and reaches ten or eleven in 3, while the 20k
+  checkpoint has no zero and two tens.  So the difference is a reliability difference, not a
+  capability one -- and the six zeros in ten of the all-mode ruler say the same thing louder.  So the gap is smaller than
   the all-mode numbers suggest and it is a gap in reliability rather than in capability: the
   14k checkpoint can do the whole task, it just does not do it dependably.  On the three
   seeds both checkpoints have been run on (0, 4, 8) the 14k scored 5/0/0 and the 20k 5/10/10.
@@ -155,11 +159,14 @@ model per sweep, and a resumable driver.
    as *a longer anneal* than as *an excursion that found a better basin* -- the more so
    because run 14's schedule auto-scaled its decay to its own 14000-step budget, so a single
    34000-step cosine was never tried and remains a live explanation for the same result.
-   **Answered by run 16 (§8):** the extra 20000 steps bought +0.3 Cookies on their own
-   (5.09 → 5.36) against +3.2 for the cycle, so the second cycle *is* the active ingredient
-   here; what a single long cosine would have done is still untested (§8, "What it does not
-   settle").  Run 16 also split the 0-vs-5-vs-10 structure apart: the extra steps are what
-   make the *first* batch reliable, and only the cycle produces the second.
+   **Answered by run 16 (§8), after a correction.**  The extra 20000 steps on their own
+   move the mean by nothing measurable (6.38 → 5.38 on the eight seeds run 16 shares with
+   run 14), and the second cycle does not beat the baseline it started from either (6.38 on
+   the same eight) -- the "+3.2 for the cycle against +0.3 for the steps" that stood here
+   first came from a run 15 mean assembled by hand across two sweep tags (§8, correction).
+   What both continuations do, and run 14 does not, is remove the *collapses*: it lands on
+   zero in 3 of 8 full-mode samples and 6 of 10 all-mode ones.  What a single long cosine
+   would have done is still untested (§8, "What it does not settle").
 2. **The 14k judging baseline does not match the older 24-seed one** -- 2.6 against 4.6 on
    the same weights and scene, with the zero-count fraction going 5/24 → 6/10.  That is too
    large for seed noise; the older sweep's scene and step budget need checking before the
@@ -234,13 +241,16 @@ One caveat that limits all of the above: the task metric is not the loss.  The l
 the task moved from 6/10 seeds landing nothing to 0/10.  A loss-level attribution does not
 transfer to the task level, so the two stories would have to be compared on the task metric.
 
-**Since run 16, they have been, and the reading above survives.**  §8 has the task-side
-trajectory of the same cycle and it is starker than the loss curve: 8000 steps in, the policy
-has lost both batches (6 of 8 seeds place nothing), and at 16000 steps it is still no better
-than the checkpoint it started from.  The whole net gain arrives in the final quarter, during
-the last of the decay.  So the "escape" story is not merely unproven -- on the task metric it
-is contradicted -- and "just train longer" is contradicted too, by run 16 sitting at the
-baseline mean after 20000 flat steps.
+**Since run 16, they have been, and the loss reading is confirmed while its task-level
+benefit is not.**  §8 has the task-side trajectory of the same cycle: by 8000 steps in, the
+re-heat has cost the policy *both* batches; at 16000 steps it is no better than the
+checkpoint it started from; and the last quarter -- the rate falling from about 1e-05 to the
+floor -- repairs it back to that same level and stops there.  So the "escape" story is not
+merely unproven: on the task metric the high-rate phase only destroys, and the low-rate phase
+only undoes it.  "Just train longer" is contradicted too, by run 16 sitting a Cookie below
+the baseline after 20000 flat steps.  What the second cycle does buy is the disappearance of
+the zero -- in 40 samples across runs 15 and 16, not one lands on nothing, against 3 of 8
+full-mode samples for run 14 -- and that is a change in reliability, not in capability.
 
 ## 8. Run 16, the control that was missing (started 10-15, ~00:10)
 
@@ -272,59 +282,91 @@ steps in both).  The training script is `logs/floor20k_train.sh`, with a pruner 
 the two newest checkpoints because the disk is at 79 %.
 
 **Reading it.**  The three arms differ in exactly one factor each, and the first two were
-written down before the run finished:
+written down before the run finished.  The numbers below are the ones that survive tracing
+every sample back to the log that produced it -- see the correction note after the table,
+which is the reason this section reads differently from its first version.
 
-| arm | first 14000 steps | next 20000 steps | full-mode score | distribution |
-|-----|-------------------|------------------|-----------------|--------------|
-| 14 (`a3_b2_unfreeze_14k`) | cosine to the floor | — | 5.09 (11 samples) | `{0:3, 5:5, 10:2, 11:1}` |
-| 15 (`a3_b2_unfreeze_20k`) | same | re-heat 2.5e-05 → floor | 8.25 (8 samples) | 5 of 8 at ten, 0 zeros |
-| 16 (`a3_b2_floor20k`) | same | hold at the floor | **5.36 (11 samples)** | `{5:8, 6:2, 7:1}` |
+| arm | first 14000 steps | next 20000 steps | full mode, 11 seeds | same 8 seeds | shape |
+|-----|-------------------|------------------|---------------------|--------------|-------|
+| 14 (`a3_b2_unfreeze_14k`) | cosine to the floor | — | 5.09 | 6.38 | 3 zeros, 3 tens or better |
+| 15 (`a3_b2_unfreeze_20k`) | same | re-heat 2.5e-05 → floor | 5.82 | 6.38 | no zeros, 2 tens |
+| 16 (`a3_b2_floor20k`) | same | hold at the floor | **5.36** | 5.38 | no zeros, no tens |
 
-On the eight seeds all three arms can be scored on (12/16/20/24/28/32/36/40): 14 scores
-6.38, 16 scores 5.375, and 15 is being topped up to the same eight.
+The "same 8 seeds" column is 12/16/20/24/28/32/36/40, the seeds all three arms have been
+scored on.
 
-* 16 ≈ 14 → the extra steps buy nothing on their own; the gain is the cycle. **← this is what
-  happened, for the mean.**
-* 16 ≈ 15 → the steps were the active ingredient and the re-heat was incidental.  (No.)
-* 16 < 14 → a long small-step continuation on 1000 episodes drifts, which is a warning
-  about the whole "just train it longer" instinct.  (Half: see below.)
+**Correction: the 20k arm's 8.25 was an artifact.**  An earlier version of this table gave
+run 15 "8.25 on 8 samples, 5 of them at ten", and the whole "the cycle is worth +3.2, the
+steps +0.3" reading was built on it.  That figure was assembled by hand from two different
+sweep tags, and seed 12 was read from `b2unf20k_seed12.log` -- a second-batch *all-mode*
+sample worth 11 -- instead of `b2unf20kfull_seed12.log`, which scored 5.  Retraced from the
+logs by tag, and topped up today with the seeds whose logs had been deleted, run 15's
+full-mode mean is 5.82 over eleven samples, and 6.38 over the eight the other arms share --
+**exactly the 14k baseline**.  The lesson is worth more than the number: this document's
+arm means had been computed from per-seed logs selected by eye across tags, and a single
+mislabelled sample moved the headline by 2.4 Cookies.
 
-So the mean says the answer plainly -- 20000 further steps at the rate run 14 ended on are
-worth +0.3 Cookies, against +3.2 for re-heating and annealing again over the same 20000
-steps -- and the loss agrees, which it was not obliged to: run 16 ended at **0.003**
-against run 14's 0.0028 and run 15's 0.002.  §7's linear extrapolation of the within-basin
-creep (0.0028 → 0.0021 over 20000 steps) was therefore the wrong one; the deceleration was
-real and the creep was exhausted.
+The three prediction bullets, marked:
 
-**The shape is the part the mean hides**, and it is new.  14's distribution is three modes
-apart -- 0, 5, 10/11 -- and 16's is a spike at 5: every one of its eleven seeds lands the
-first batch (no zeros, against 3/11 for 14), and none of them lands the second (no tens,
-against 3/11 for 14).  Both tails went to zero while the mean stayed put.  Read against
-§6's open question this is a decomposition rather than a puzzle: *the first batch is what
-20000 more steps of any kind secures* -- the policy stops losing the batch it already knew
--- while *the second batch is what only the cycle produces*.  Two honest caveats: eleven
-samples put "3/11 → 0/11" at about p ≈ 0.03 one-sided, suggestive and not settled; and the
-"0, 5, 10/11" spacing means a policy that reliably does the first batch and never the
-second scores the same as one that gambles on both, so a mean computed over this
-distribution is a poor summary of behaviour.
+* 16 ≈ 14 → the extra steps buy nothing on their own; the gain is the cycle.  (Only for the
+  *second batch*, and only weakly -- see the shape below.)
+* 16 ≈ 15 → the steps were the active ingredient and the re-heat was incidental.  (Not
+  that either.)
+* 16 < 14 → a long small-step continuation on 1000 episodes drifts.  (By 1.0 Cookie on the
+  shared eight, which is inside this ruler's noise.)
 
-**What it does not settle.**  That a re-heat-and-anneal cycle beats standing still does not
-say a *cycle* is the efficient way to spend the budget: the second cycle paid 12000 steps
-to recover ground the first one had already paid for.  A single long cosine is still the
-untried alternative (§7), and it is not the comparison this arm makes -- run 16 changes the
+What the corrected table says is narrower than the first version claimed, and it is not the
+one the run was designed to return: **on the full-mode mean the cycle does not beat the
+checkpoint it started from at all** (6.38 against 6.38), and on the same eight seeds the flat
+continuation is a Cookie behind both.  What both continuations do, and neither the baseline
+nor the loss curve showed, is remove the *collapses*: run 14 lands on zero in 3 of 8 full-mode
+samples and in 6 of 10 of the all-mode ones, while runs 15 and 16 have not produced a single
+zero in 19 and 21 samples respectively.  That is the effect this night actually measured.
+
+The loss, separately, does say which extrapolation was right: run 16 ended at **0.003**
+against run 14's 0.0028 and run 15's 0.002, so §7's linear extrapolation of the within-basin
+creep (0.0028 → 0.0021 over 20000 steps) was the wrong one -- the deceleration was real and
+the creep was exhausted.  That much of the original reading survives.
+
+**Which of the two continuations is better is not settled by this ruler.**  The all-mode
+numbers in this document (14k 2.6 with six zeros, 20k 6.6 with none, 16 at 5.10) point the
+same way as the shared-eight full-mode column, and they have the same provenance problem, so
+`logs/matched_ruler.sh` re-measures all three arms on both rulers in one batch with today's
+driver -- which is also the only way the "same 8 seeds" column above can be called matched
+rather than merely same-labelled, since a seed is not reproducible across sessions (0/4/8
+scored 5/10/10 once and 5/0/8 the next time).
+
+**The shape is the part the mean hides**, and it is the one thing that survives the
+correction above.  14's distribution is three modes apart -- 0, 5, 10/11 -- while both
+continuations are single-humped: 16 is a spike at 5 (eight of eleven samples at five, none
+below, none above seven) and 15 is 5, 5, 5, 5, 5, 6, 10, 10 on the shared eight.  So the
+same treatment that leaves the mean where it was removes the *zero*: run 14 lands on nothing
+in 3 of 8 full-mode samples and 6 of 10 all-mode ones, and runs 15 and 16 together have not
+produced one in 40 samples.  Two honest caveats: eleven samples put "3/11 → 0/11" at about
+p ≈ 0.03 one-sided, suggestive rather than settled; and because the distribution is lumpy at
+0, 5 and 10, a mean over it is a weak summary of behaviour -- a policy that always does the
+first batch and never the second scores exactly what a policy that gambles on both does.
+
+**What it does not settle.**  Neither continuation beats the 14k checkpoint on this ruler's
+mean, so nothing here argues that a *cycle* is the efficient way to spend a budget: the
+second cycle spent 16000 of its 20000 steps below the level it started from and finished
+level with it.  A single long cosine -- same two ingredients, no repair bill -- remains the
+untried alternative (§7), and it is not the comparison this arm makes: run 16 changes the
 rate, not the schedule's shape.
 
-The loss analogue is genuinely open no longer: extrapolating run 14's final within-basin
-creep at its own rate for 20000 steps lands on 0.0021 -- run 15's endpoint -- while the
-measured deceleration says the creep was nearly exhausted and a floor continuation should
-sit at ~0.0029.  Run 16 says the deceleration was right.  What remains true from the
-original caution is that only the task metric transfers: the loss moved 5 %, the task moved
-0.3 of 10.
+On the loss the question is answered: extrapolating run 14's final within-basin creep at its
+own rate for 20000 steps lands on 0.0021 -- run 15's endpoint -- while the measured
+deceleration says the creep was nearly exhausted and a floor continuation should sit at
+~0.0029.  Run 16 finished at 0.003, so the deceleration was right.  But the caution that
+opened §7 bites in the other direction too, and harder than expected: run 15's loss is 30 %
+below run 14's and its full-mode mean is identical to run 14's, so a teacher-forced loss
+that keeps falling can be telling you about the data it is fitting and nothing about the
+task.  What the task metric did move was the *failure rate*, not the score.
 
 **Riding along, for free.**  Run 15's own checkpoints (`008000`, `012000`, `016000`) were
-still on disk, so the same 8 full-mode seeds (12/16/20/24/28/32/36/40) were run against
-them.  This turns "the re-heat did +86 % damage and took 12000 steps to repay it" from a
-loss statement into a task statement, and the answer is the strongest result of the night:
+still on disk, so the same 8 full-mode seeds (12/16/20/24/28/32/36/40) were run against them.
+This turns "the re-heat did +86 % damage and took 12000 steps to repay it" from a loss
+statement into a task statement:
 
 | run 15's step | steps into the second cycle | full-mode mean, same 8 seeds | shape |
 |---------------|-----------------------------|------------------------------|-------|
@@ -332,25 +374,20 @@ loss statement into a task statement, and the answer is the strongest result of 
 | 8000 | 8000 | **1.25** | 6 of 8 land nothing |
 | 12000 | 12000 | 4.25 | 2 zeros, 1 ten |
 | 16000 | 16000 | 5.62 | no zeros, 1 ten |
-| 20000 | 20000 | 8.25 (documented) | 5 of 8 at ten, no zeros |
+| 20000 | 20000 | 6.38 | no zeros, 2 tens |
 
-The excursion is not an exploration, it is a wound.  At 8000 steps into the cycle the
-policy has lost *both* batches -- six of eight seeds place nothing, against three tens the
-baseline was still scoring -- and 16000 steps in it is still not back to the level it
-started from (5.62 against 6.38; with n = 8 on a three-mode distribution those are
-indistinguishable, which is the point).  **Every Cookie of the net gain appears in the last
-quarter of the run, while the rate finishes its decay from about 1e-05 to the floor.**  That
-kills the "escape" reading on the task metric, not just the loss: the high-rate phase does
-not find anything, and the score it costs takes 17000 of the 20000 steps to buy back.  What
-works is annealing again from a high rate down to a small one, and the fact that run 16
-(flat, no anneal) sits at the baseline mean with no second batch says the *anneal* is the
-ingredient, not the time spent high.
-
-One caveat on the endpoint row: 8.25 is the number this document already recorded for run
-15's 8 full-mode seeds; five of those eight logs still exist (12/16/20/24/28, mean 7.0) and
-the other three are being re-measured as fresh samples, so the exact endpoint will move by
-a Cookie at this spread.  Nothing in the trajectory depends on it -- the 8000- and 16000-step
-points are far enough from the baseline that the endpoint only has to be somewhere above it.
+The shape is a V, not a staircase.  At 8000 steps into the cycle the policy has lost *both*
+batches -- six of eight seeds place nothing, against three tens the baseline was still
+scoring -- and 16000 steps in it is still not back to where it started (5.62 against 6.38;
+at n = 8 on a three-mode distribution that is indistinguishable, which is the point).  The
+last quarter, in which the rate falls from about 1e-05 to the floor, undoes the damage and
+stops there.  That is what the trajectory says, and it is less flattering than the first
+version of this section: the high-rate phase finds nothing, the low-rate phase repairs what
+the high-rate phase broke, and the endpoint ties the starting point on the mean.  "Escape"
+is dead on the task metric as well as in the loss; "the second anneal buys the second batch"
+is not supported either -- run 14 already reached ten or eleven in 3 of these 8 samples,
+run 15 in 2.  What the endpoint does have that the baseline does not is the absence of
+collapse.
 
 **A missing flag cost the first six sweeps of that runner.**  `--serve-checkpoint` names the
 checkpoint for the summary and requires `--serve-adapter`; it does **not** configure the
