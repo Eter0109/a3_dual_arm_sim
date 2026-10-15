@@ -234,6 +234,14 @@ One caveat that limits all of the above: the task metric is not the loss.  The l
 the task moved from 6/10 seeds landing nothing to 0/10.  A loss-level attribution does not
 transfer to the task level, so the two stories would have to be compared on the task metric.
 
+**Since run 16, they have been, and the reading above survives.**  §8 has the task-side
+trajectory of the same cycle and it is starker than the loss curve: 8000 steps in, the policy
+has lost both batches (6 of 8 seeds place nothing), and at 16000 steps it is still no better
+than the checkpoint it started from.  The whole net gain arrives in the final quarter, during
+the last of the decay.  So the "escape" story is not merely unproven -- on the task metric it
+is contradicted -- and "just train longer" is contradicted too, by run 16 sitting at the
+baseline mean after 20000 flat steps.
+
 ## 8. Run 16, the control that was missing (started 10-15, ~00:10)
 
 Every sentence in the two sections above compares run 15 against run 14 and calls the
@@ -313,15 +321,36 @@ sit at ~0.0029.  Run 16 says the deceleration was right.  What remains true from
 original caution is that only the task metric transfers: the loss moved 5 %, the task moved
 0.3 of 10.
 
-**Riding along, for free.**  Run 15's own checkpoints (`008000`, `012000`, `016000`) are
-still on disk, so the same 8 full-mode seeds (12/16/20/24/28/32/36/40) can be run against
-the 8k/12k/16k points of the restart cycle.  That turns "the re-heat did +86 % damage and
-took 12000 steps to repay it" from a loss statement into a task statement: if the score
-dips at 8k-12k and recovers by 20k, the second *anneal* is what pays; if it rises steadily
-from 8k, the excursion itself was doing the work.  Runner: `logs/floor20k_evals.sh`, which
-waits for the training to exit and then runs six sweeps (≈ 1.7 h): the arm's own endpoint on
-11 seeds, the arm on the all-mode 10-seed ruler, the three trajectory points, and the three
-seeds that complete run 15's full-mode set.
+**Riding along, for free.**  Run 15's own checkpoints (`008000`, `012000`, `016000`) were
+still on disk, so the same 8 full-mode seeds (12/16/20/24/28/32/36/40) were run against
+them.  This turns "the re-heat did +86 % damage and took 12000 steps to repay it" from a
+loss statement into a task statement, and the answer is the strongest result of the night:
+
+| run 15's step | steps into the second cycle | full-mode mean, same 8 seeds | shape |
+|---------------|-----------------------------|------------------------------|-------|
+| 0 (= run 14) | 0 | 6.38 | 3 zeros, 3 tens or better, 2 fives |
+| 8000 | 8000 | **1.25** | 6 of 8 land nothing |
+| 12000 | 12000 | 4.25 | 2 zeros, 1 ten |
+| 16000 | 16000 | 5.62 | no zeros, 1 ten |
+| 20000 | 20000 | 8.25 (documented) | 5 of 8 at ten, no zeros |
+
+The excursion is not an exploration, it is a wound.  At 8000 steps into the cycle the
+policy has lost *both* batches -- six of eight seeds place nothing, against three tens the
+baseline was still scoring -- and 16000 steps in it is still not back to the level it
+started from (5.62 against 6.38; with n = 8 on a three-mode distribution those are
+indistinguishable, which is the point).  **Every Cookie of the net gain appears in the last
+quarter of the run, while the rate finishes its decay from about 1e-05 to the floor.**  That
+kills the "escape" reading on the task metric, not just the loss: the high-rate phase does
+not find anything, and the score it costs takes 17000 of the 20000 steps to buy back.  What
+works is annealing again from a high rate down to a small one, and the fact that run 16
+(flat, no anneal) sits at the baseline mean with no second batch says the *anneal* is the
+ingredient, not the time spent high.
+
+One caveat on the endpoint row: 8.25 is the number this document already recorded for run
+15's 8 full-mode seeds; five of those eight logs still exist (12/16/20/24/28, mean 7.0) and
+the other three are being re-measured as fresh samples, so the exact endpoint will move by
+a Cookie at this spread.  Nothing in the trajectory depends on it -- the 8000- and 16000-step
+points are far enough from the baseline that the endpoint only has to be somewhere above it.
 
 **A missing flag cost the first six sweeps of that runner.**  `--serve-checkpoint` names the
 checkpoint for the summary and requires `--serve-adapter`; it does **not** configure the
