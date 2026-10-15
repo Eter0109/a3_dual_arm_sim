@@ -28,6 +28,7 @@ interesting failures came from the runs that changed *nothing* and were read as 
 | 13 | 10-13 | `a3_b2_14k` | `a3_b2_merged` | `pi05_base` | frozen | 14000 / 6 | → 0.0085 |
 | 14 | 10-13 | `a3_b2_unfreeze_14k` | `a3_b2_merged` | `pi05_base` | vision + 18 layers + state projector | 14000 / 6 | 0.159 → 0.0028 |
 | 15 | 10-14 | `a3_b2_unfreeze_20k` | `a3_b2_merged` | **`a3_b2_unfreeze_14k/014000`** | as above | 20000 / 6 | 0.002 → 0.002 |
+| 16 | 10-15 | `a3_b2_floor20k` | `a3_b2_merged` | **`a3_b2_unfreeze_14k/014000`** | as above | 20000 / 6 | 0.0028 → 0.003 — run 15's control: same steps, rate held at 2.5e-06 (§8) |
 
 Run 15 is a **warm restart**, not a continuation of the same schedule: it started from a
 checkpoint whose learning rate had already annealed to the floor, with a fresh 20000-step
@@ -154,6 +155,11 @@ model per sweep, and a resumable driver.
    as *a longer anneal* than as *an excursion that found a better basin* -- the more so
    because run 14's schedule auto-scaled its decay to its own 14000-step budget, so a single
    34000-step cosine was never tried and remains a live explanation for the same result.
+   **Answered by run 16 (§8):** the extra 20000 steps bought +0.3 Cookies on their own
+   (5.09 → 5.36) against +3.2 for the cycle, so the second cycle *is* the active ingredient
+   here; what a single long cosine would have done is still untested (§8, "What it does not
+   settle").  Run 16 also split the 0-vs-5-vs-10 structure apart: the extra steps are what
+   make the *first* batch reliable, and only the cycle produces the second.
 2. **The 14k judging baseline does not match the older 24-seed one** -- 2.6 against 4.6 on
    the same weights and scene, with the zero-count fraction going 5/24 → 6/10.  That is too
    large for seed noise; the older sweep's scene and step budget need checking before the
@@ -227,3 +233,103 @@ loss over the first 2000 steps is.
 One caveat that limits all of the above: the task metric is not the loss.  The loss moved 26 %;
 the task moved from 6/10 seeds landing nothing to 0/10.  A loss-level attribution does not
 transfer to the task level, so the two stories would have to be compared on the task metric.
+
+## 8. Run 16, the control that was missing (started 10-15, ~00:10)
+
+Every sentence in the two sections above compares run 15 against run 14 and calls the
+difference "the second cycle".  That is not something run 14 can support: run 15 also ran
+**20000 more steps**, and the two changed together.  Run 16 changes one of them.
+
+| # | output | base | steps | effective learning rate | time |
+|---|--------|------|-------|-------------------------|------|
+| 16 | `a3_b2_floor20k` | `a3_b2_unfreeze_14k/014000` | 20000 / batch 6 | **constant 2.5e-06** | ≈ 6.4 h at 1.15 s/step |
+
+The rate is the one run 14 annealed to, held for the whole run: `--policy.optimizer_lr=2.5e-06`
+`--policy.scheduler_decay_lr=2.5e-06`, which makes the cosine flat (the scheduler is a
+`LambdaLR`, so the effective rate is `optimizer_lr x lambda` and `lambda` is 1 when
+`peak_lr == decay_lr`).  Two traps on the way there, both of which cost a launch:
+
+* `--scheduler.*` and `--optimizer.*` on the command line are **overwritten**:
+  `TrainPipelineConfig.validate` rebuilds both from the policy preset whenever
+  `use_policy_training_preset` is left at its default (`configs/train.py:137`).  The
+  surviving knobs are `--policy.optimizer_lr`, `--policy.scheduler_decay_lr`,
+  `--policy.scheduler_{warmup,decay}_steps`.
+* `Output directory ... already exists and resume is False`: `mkdir -p` on the output
+  directory itself is enough to fail the run, so the launcher creates only its parent.
+
+Everything else is byte-identical to run 15: `a3_b2_merged`, batch 6, seed 1000, the
+partial un-freeze (vision + 18 LLM layers + state projector), `drop_n_last_frames`, pyav,
+fused AdamW, and the same 20000-step auto-scaled cosine geometry (so the warmup is 667
+steps in both).  The training script is `logs/floor20k_train.sh`, with a pruner that keeps
+the two newest checkpoints because the disk is at 79 %.
+
+**Reading it.**  The three arms differ in exactly one factor each, and the first two were
+written down before the run finished:
+
+| arm | first 14000 steps | next 20000 steps | full-mode score | distribution |
+|-----|-------------------|------------------|-----------------|--------------|
+| 14 (`a3_b2_unfreeze_14k`) | cosine to the floor | — | 5.09 (11 samples) | `{0:3, 5:5, 10:2, 11:1}` |
+| 15 (`a3_b2_unfreeze_20k`) | same | re-heat 2.5e-05 → floor | 8.25 (8 samples) | 5 of 8 at ten, 0 zeros |
+| 16 (`a3_b2_floor20k`) | same | hold at the floor | **5.36 (11 samples)** | `{5:8, 6:2, 7:1}` |
+
+On the eight seeds all three arms can be scored on (12/16/20/24/28/32/36/40): 14 scores
+6.38, 16 scores 5.375, and 15 is being topped up to the same eight.
+
+* 16 ≈ 14 → the extra steps buy nothing on their own; the gain is the cycle. **← this is what
+  happened, for the mean.**
+* 16 ≈ 15 → the steps were the active ingredient and the re-heat was incidental.  (No.)
+* 16 < 14 → a long small-step continuation on 1000 episodes drifts, which is a warning
+  about the whole "just train it longer" instinct.  (Half: see below.)
+
+So the mean says the answer plainly -- 20000 further steps at the rate run 14 ended on are
+worth +0.3 Cookies, against +3.2 for re-heating and annealing again over the same 20000
+steps -- and the loss agrees, which it was not obliged to: run 16 ended at **0.003**
+against run 14's 0.0028 and run 15's 0.002.  §7's linear extrapolation of the within-basin
+creep (0.0028 → 0.0021 over 20000 steps) was therefore the wrong one; the deceleration was
+real and the creep was exhausted.
+
+**The shape is the part the mean hides**, and it is new.  14's distribution is three modes
+apart -- 0, 5, 10/11 -- and 16's is a spike at 5: every one of its eleven seeds lands the
+first batch (no zeros, against 3/11 for 14), and none of them lands the second (no tens,
+against 3/11 for 14).  Both tails went to zero while the mean stayed put.  Read against
+§6's open question this is a decomposition rather than a puzzle: *the first batch is what
+20000 more steps of any kind secures* -- the policy stops losing the batch it already knew
+-- while *the second batch is what only the cycle produces*.  Two honest caveats: eleven
+samples put "3/11 → 0/11" at about p ≈ 0.03 one-sided, suggestive and not settled; and the
+"0, 5, 10/11" spacing means a policy that reliably does the first batch and never the
+second scores the same as one that gambles on both, so a mean computed over this
+distribution is a poor summary of behaviour.
+
+**What it does not settle.**  That a re-heat-and-anneal cycle beats standing still does not
+say a *cycle* is the efficient way to spend the budget: the second cycle paid 12000 steps
+to recover ground the first one had already paid for.  A single long cosine is still the
+untried alternative (§7), and it is not the comparison this arm makes -- run 16 changes the
+rate, not the schedule's shape.
+
+The loss analogue is genuinely open no longer: extrapolating run 14's final within-basin
+creep at its own rate for 20000 steps lands on 0.0021 -- run 15's endpoint -- while the
+measured deceleration says the creep was nearly exhausted and a floor continuation should
+sit at ~0.0029.  Run 16 says the deceleration was right.  What remains true from the
+original caution is that only the task metric transfers: the loss moved 5 %, the task moved
+0.3 of 10.
+
+**Riding along, for free.**  Run 15's own checkpoints (`008000`, `012000`, `016000`) are
+still on disk, so the same 8 full-mode seeds (12/16/20/24/28/32/36/40) can be run against
+the 8k/12k/16k points of the restart cycle.  That turns "the re-heat did +86 % damage and
+took 12000 steps to repay it" from a loss statement into a task statement: if the score
+dips at 8k-12k and recovers by 20k, the second *anneal* is what pays; if it rises steadily
+from 8k, the excursion itself was doing the work.  Runner: `logs/floor20k_evals.sh`, which
+waits for the training to exit and then runs six sweeps (≈ 1.7 h): the arm's own endpoint on
+11 seeds, the arm on the all-mode 10-seed ruler, the three trajectory points, and the three
+seeds that complete run 15's full-mode set.
+
+**A missing flag cost the first six sweeps of that runner.**  `--serve-checkpoint` names the
+checkpoint for the summary and requires `--serve-adapter`; it does **not** configure the
+bridge.  The bridge command is built from `--serve-config` pairs alone
+(`sweep_policy_seeds.py:314`), so a run that passes only `--serve-checkpoint` starts a
+server with no `ckpt=`, the adapter falls back to its own `DEFAULT_REPO`/`DEFAULT_STATS`
+(both pointing at `gr00t-runs/b1`, deleted earlier to free disk), and every sweep spends the
+driver's 30-minute startup timeout before reporting "the bridge did not come up".  The fixed
+runner therefore ends with a keystone step that loads the bridge once and waits for its
+socket before any sweep starts, which turns five minutes of checking into insurance against
+three hours of silence.

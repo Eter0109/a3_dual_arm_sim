@@ -1,0 +1,76 @@
+# The control arm for `pi05_a3_b2_unfreeze_20k`: same 14k starting checkpoint, same 20000
+# further steps, same data, batch and seed -- but the learning rate is pinned at the floor
+# run 14 ended on (2.5e-06) instead of being re-heated to 2.5e-05.
+#
+#   run 14 (14k)        : from pi05_base, cosine 2.5e-05 -> 2.5e-06 scaled to 14000 steps
+#   run 15 (20k)        : from 14k, fresh cosine 2.5e-05 -> 2.5e-06 over 20000 steps
+#   this run (floor20k) : from 14k, constant 2.5e-06 over 20000 steps
+#
+# Read together with `pi05_a3_b2_unfreeze_20k.yaml`, the pair separates "the second cycle"
+# from "the extra steps": run 15 bought a loss rise of +86 % in its first 2000 steps plus
+# about 12000 steps spent repaying it, and this arm buys neither.  If the two land on the
+# same task score, the gain was the extra steps; if this one stays at the 14k score, the
+# gain was the re-heat-and-re-anneal cycle; if it lands below the 14k score, a long small-
+# step continuation on 1000 episodes drifts.
+#
+# Interface and scene are unchanged, so this manifest is the 20k one with a new checkpoint.
+
+name: pi05-a3-b2-floor20k
+notes: >
+  pi0.5 fine-tuned on a3_b2_merged (1000 second-batch episodes) from the 14k
+  un-freeze checkpoint for a further 20000 steps at the constant floor learning
+  rate (2.5e-06) the 14k schedule ended on -- the control for the warm restart
+  in pi05-a3-b2-unfreeze-20k.
+
+transport:
+  kind: subprocess
+  runtime:
+    kind: local
+  cwd: /root/autodl-tmp/a3-collect
+  command:
+    - .venv/bin/python
+    - /root/a3_dual_arm_sim/scripts/a3_bridge_server.py
+    - --adapter
+    - adapters/pi05_a3.py
+    - --config
+    - ckpt=/root/autodl-tmp/pi05-runs/a3_b2_floor20k/checkpoints/020000/pretrained_model
+  startup_timeout_s: 1800
+  request_timeout_s: 300
+  env:
+    HF_HOME: /root/autodl-tmp/hf
+    HF_ENDPOINT: https://hf-mirror.com
+    HF_HUB_OFFLINE: "1"
+
+observation:
+  images:
+    front_view:
+      source: observation.images.front
+      resize: [224, 224]
+    left_wrist_view:
+      source: observation.images.left_wrist
+      resize: [224, 224]
+    right_wrist_view:
+      source: observation.images.right_wrist
+      resize: [224, 224]
+  vectors:
+    observation.state:
+      source: observation.state
+      slice: [0, 16]
+
+action:
+  space: joint_position
+  dim: 16
+  joint_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  chunk: 50
+  execute: 16
+  dt: 0.05
+  normalize:
+    mode: none
+
+success:
+  probe: env
+
+evaluation:
+  regime: finetuned
+  primary_metric: both
+  prompt_kind: free_text
