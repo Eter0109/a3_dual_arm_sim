@@ -1,0 +1,283 @@
+# The second-batch scene, moved onto main's benchmark arrangement exactly.
+#
+# Built from `cookie_batch_second_batch.yaml` with three changes and nothing else, because the
+# 20k checkpoint scores 5+ on this branch's arrangement and 0/20 on main's: the failure is a
+# millimetre-scale grasp miss (`cookies_in_source` never leaves 80), so the arrangement has to
+# match rather than resemble.
+#
+#   1. every randomisation range is zero -- the boxes, the Cookies and the arm's home pose are
+#      pinned; variation comes from `collect --position-noise/--align-*` instead, so the amount is
+#      recorded per run rather than baked into a file;
+#   2. `target_bin_world_position_m` takes main's own height (0.74898 rather than 0.753);
+#   3. the `cameras:` block is main's, wrist look-at points included.
+#
+# `scripts/verify_main_alignment.py` is the gate that says this file plus
+# `main_alignment.apply_scene` reproduce main's three renders to 0.16/0.61/0.00 out of 255.
+physics_hz: 1000
+control_hz: 20
+horizon: 6000
+randomization:
+  source_bin_x_m:
+  - 0.0
+  - 0.0
+  source_bin_y_m:
+  - 0.0
+  - 0.0
+  source_bin_yaw_rad: 0.0
+  target_bin_x_m:
+  - 0.0
+  - 0.0
+  target_bin_y_m:
+  - 0.0
+  - 0.0
+  target_bin_yaw_rad: 0.0
+  arm_home_rad: 0.0
+  min_box_clearance_m: 0.02
+cookie_transfer:
+  second_batch_modes:
+  - full
+  - prefill
+  - perturb
+  - prefill_perturb
+  left_gripper_kp: 1200.0
+  left_finger_pad_half_thickness_m: 0.0005
+  right_gripper_kp: 2000.0
+  box_lift_m: 0.0
+  box_tilt_deg: 0.0
+  cookie_edge_bevel_m: 0.0025
+  cookie_bottom_edge_bevel_m: 0.001
+  cookie_collision_mode: compound
+  cookie_friction:
+  - 0.8
+  - 0.003
+  - 0.0002
+  cookie_solref:
+  - 0.004
+  - 1.0
+  cookie_solimp:
+  - 0.99
+  - 0.999
+  - 0.0005
+  - 0.5
+  - 2.0
+  source_bin_half_size_m:
+  - 0.1186
+  - 0.1010833333
+  source_bin_wall_height_m: 0.026
+  target_bin_half_size_m:
+  - 0.063
+  - 0.035
+  target_bin_world_position_m:
+  - 0.095
+  - 0.1
+  - 0.74898
+  target_bin_wall_height_m: 0.026
+  target_slots_local_m:
+  - - -.028
+    - -0.01266667
+  - - 0.028
+    - -0.01266667
+  - - -.028
+    - -0.00633333
+  - - 0.028
+    - -0.00633333
+  - - -.028
+    - 0.0
+  - - 0.028
+    - 0.0
+  - - -.028
+    - 0.00633333
+  - - 0.028
+    - 0.00633333
+  - - -.028
+    - 0.01266667
+  - - 0.028
+    - 0.01266667
+  cookie_source_positions_m:
+  - - 0.0994
+    - 0.23108333
+  - - 0.0994
+    - 0.23991667
+  - - 0.0994
+    - 0.24875
+  - - 0.0994
+    - 0.25758333
+  - - 0.0994
+    - 0.26641667
+  - - 0.0994
+    - 0.27525
+  - - 0.0994
+    - 0.28408333
+  - - 0.0994
+    - 0.29291667
+  - - 0.0994
+    - 0.30175
+  - - 0.0994
+    - 0.31058333
+  - - 0.0994
+    - 0.31941667
+  - - 0.0994
+    - 0.32825
+  - - 0.0994
+    - 0.33708333
+  - - 0.0994
+    - 0.34591667
+  - - 0.0994
+    - 0.35475
+  - - 0.0994
+    - 0.36358333
+  - - 0.0994
+    - 0.37241667
+  - - 0.0994
+    - 0.38125
+  - - 0.0994
+    - 0.39008333
+  - - 0.0994
+    - 0.39891667
+  - - 0.1498
+    - 0.23108333
+  - - 0.1498
+    - 0.23991667
+  - - 0.1498
+    - 0.24875
+  - - 0.1498
+    - 0.25758333
+  - - 0.1498
+    - 0.26641667
+  - - 0.1498
+    - 0.27525
+  - - 0.1498
+    - 0.28408333
+  - - 0.1498
+    - 0.29291667
+  - - 0.1498
+    - 0.30175
+  - - 0.1498
+    - 0.31058333
+  - - 0.1498
+    - 0.31941667
+  - - 0.1498
+    - 0.32825
+  - - 0.1498
+    - 0.33708333
+  - - 0.1498
+    - 0.34591667
+  - - 0.1498
+    - 0.35475
+  - - 0.1498
+    - 0.36358333
+  - - 0.1498
+    - 0.37241667
+  - - 0.1498
+    - 0.38125
+  - - 0.1498
+    - 0.39008333
+  - - 0.1498
+    - 0.39891667
+  - - 0.2002
+    - 0.23108333
+  - - 0.2002
+    - 0.23991667
+  - - 0.2002
+    - 0.24875
+  - - 0.2002
+    - 0.25758333
+  - - 0.2002
+    - 0.26641667
+  - - 0.2002
+    - 0.27525
+  - - 0.2002
+    - 0.28408333
+  - - 0.2002
+    - 0.29291667
+  - - 0.2002
+    - 0.30175
+  - - 0.2002
+    - 0.31058333
+  - - 0.2002
+    - 0.31941667
+  - - 0.2002
+    - 0.32825
+  - - 0.2002
+    - 0.33708333
+  - - 0.2002
+    - 0.34591667
+  - - 0.2002
+    - 0.35475
+  - - 0.2002
+    - 0.36358333
+  - - 0.2002
+    - 0.37241667
+  - - 0.2002
+    - 0.38125
+  - - 0.2002
+    - 0.39008333
+  - - 0.2002
+    - 0.39891667
+  - - 0.2506
+    - 0.23108333
+  - - 0.2506
+    - 0.23991667
+  - - 0.2506
+    - 0.24875
+  - - 0.2506
+    - 0.25758333
+  - - 0.2506
+    - 0.26641667
+  - - 0.2506
+    - 0.27525
+  - - 0.2506
+    - 0.28408333
+  - - 0.2506
+    - 0.29291667
+  - - 0.2506
+    - 0.30175
+  - - 0.2506
+    - 0.31058333
+  - - 0.2506
+    - 0.31941667
+  - - 0.2506
+    - 0.32825
+  - - 0.2506
+    - 0.33708333
+  - - 0.2506
+    - 0.34591667
+  - - 0.2506
+    - 0.35475
+  - - 0.2506
+    - 0.36358333
+  - - 0.2506
+    - 0.37241667
+  - - 0.2506
+    - 0.38125
+  - - 0.2506
+    - 0.39008333
+  - - 0.2506
+    - 0.39891667
+cameras:
+  workspace_target_m:
+  - 0.15
+  - 0.23
+  - 0.77
+  front_position_m:
+  - 0.5
+  - -0.18
+  - 1.25
+  front_fovy_deg: 48.0
+  left_wrist_position_m:
+  - 0.0
+  - 0.045
+  - 0.085
+  left_wrist_target_m:
+  - 0.0
+  - 0.15
+  - 0.0
+  right_wrist_position_m:
+  - 0.0
+  - -0.045
+  - 0.085
+  right_wrist_target_m:
+  - 0.0
+  - -0.15
+  - 0.0
+  wrist_fovy_deg: 70.0

@@ -130,6 +130,16 @@ TASKS: dict[str, TaskSpec] = {
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
     ),
+    # The same job and the same words, with the scene pinned to main's benchmark arrangement
+    # instead of this branch's.  Registered under its own name because a dataset's provenance
+    # records the task name, and "which arrangement was this collected on" decides whether a
+    # number can be compared with main's benchmark at all: the two arrangements differ by 23/42 mm
+    # on the bins, which is the difference between a grasp and closing the fingers on air.
+    "a3_cookie_batch_second_batch_aligned": TaskSpec(
+        name="a3_cookie_batch_second_batch_aligned",
+        prompt=COOKIE_PROMPT,
+        success_contract=_BATCH_CONTRACT,
+    ),
     # The same task on a different embodiment: the packing, the prompt and the contract are
     # `a3_cookie_batch`'s, and only the arm and the cameras are `libero_props`'.  Registered
     # as its own task rather than aliased because a dataset's provenance records the task

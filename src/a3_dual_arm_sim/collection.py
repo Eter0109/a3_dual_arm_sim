@@ -213,6 +213,7 @@ def collect_dataset(
     use_videos: bool = True,
     save_failed_episodes: bool = False,
     rollover_mb: float | None = None,
+    post_reset: Any = None,
 ) -> dict[str, Any]:
     """Collect accepted episodes of one scene, and write ``collection_summary.json``.
 
@@ -304,6 +305,7 @@ def collect_dataset(
             "randomize_scene": scene.randomize_placements,
             "randomize_cookies": scene.randomize_cookies,
         },
+        post_reset=post_reset,
     )
 
     results: list[dict[str, Any]] = []
@@ -658,6 +660,40 @@ def cookie_batch_second_batch_scene(
         # reason to refuse one that is in the box.  The two-box relay made the same call
         # for the same measured reason: a Cookie shoved flat by the push is still *in
         # the box*.
+        require_upright=False,
+    )
+
+
+def cookie_batch_second_batch_aligned_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
+    """`a3_cookie_batch_second_batch`, moved onto main's benchmark arrangement.
+
+    A separate scene rather than a flag, for the reason the LIBERO-matched scene is separate: the
+    two produce numbers that must not be compared, and a scene name is what survives into a
+    dataset's metadata and into a report.
+
+    The arrangement lives in `configs/cookie_batch_main_aligned.yaml`: every randomisation range
+    zeroed, main's own target-box height, and main's camera block.  Variation is supplied by the
+    collection call instead (`--position-noise`, `--align-bin-noise`, `--align-bin-yaw-noise`,
+    `--align-pose-noise`), so how far an episode was allowed to move is recorded per run rather
+    than frozen into a file.  `scripts/verify_main_alignment.py` is the gate on the arrangement;
+    without it the difference is 23/42 mm on the bins, which is the difference between a policy
+    that grasps and one that closes its fingers on air.
+    """
+
+    return _batch_scene(
+        "a3_cookie_batch_second_batch_aligned",
+        "configs/cookie_batch_main_aligned.yaml",
+        A3CookieBatchExpert,
+        hold_steps=hold_steps,
+        details={
+            "source_columns": "one exposed end of each of two columns",
+            "second_batch_modes": "full / prefill / perturb / prefill_perturb, drawn by seed",
+            "arrangement": "main's CookieBatchBenchmark, pinned; gate: "
+            "scripts/verify_main_alignment.py",
+        },
+        visual_style=visual_style,
         require_upright=False,
     )
 
@@ -1498,6 +1534,10 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_cookie_transfer": cookie_transfer_scene,
         "a3_cookie_batch": cookie_batch_scene,
         "a3_cookie_batch_second_batch": cookie_batch_second_batch_scene,
+        # The same scene, moved onto main's benchmark arrangement.  A separate name for the same
+        # reason the LIBERO-matched scene has one: the numbers must not be compared, and a name is
+        # the only thing that survives into a report.
+        "a3_cookie_batch_second_batch_aligned": cookie_batch_second_batch_aligned_scene,
         "a3_cookie_same_column": cookie_same_column_scene,
         "a3_cookie_two_box": cookie_two_box_scene,
         "a3_cookie_single_piece": cookie_single_piece_scene,

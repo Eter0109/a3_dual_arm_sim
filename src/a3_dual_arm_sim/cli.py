@@ -539,6 +539,20 @@ def _collect_scene(args: argparse.Namespace) -> int:
     from .collection import collect_dataset, scene_by_name
 
     scene = scene_by_name(args.scene, visual_style=args.visual_style)
+    post_reset = None
+    if getattr(args, "main_aligned", None) is not None:
+        from .main_alignment import post_reset_hook
+
+        # The aligned arrangement *is* the variation policy here: the reset still draws whatever
+        # the scene's own randomisation asks for, and then it is overwritten onto main's bench
+        # scene with these sigmas.  Zero sigmas reproduce main's evaluation scene exactly.
+        post_reset = post_reset_hook(
+            args.main_aligned,
+            bin_noise_m=args.align_bin_noise,
+            cookie_noise_m=args.position_noise,
+            bin_yaw_noise_rad=args.align_bin_yaw_noise,
+            pose_noise_rad=args.align_pose_noise,
+        )
     summary = collect_dataset(
         args.root,
         scene,
@@ -554,6 +568,7 @@ def _collect_scene(args: argparse.Namespace) -> int:
         fast_render=args.fast_render,
         save_failed_episodes=args.keep_failures,
         rollover_mb=getattr(args, "rollover_mb", None),
+        post_reset=post_reset,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -900,6 +915,34 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also write episodes the environment did not accept; for diagnosis, "
         "not for training",
+    )
+    # Reproduce main's benchmark arrangement inside this branch, with a small perturbation so the
+    # dataset covers more than one exact pose.  See `main_alignment.apply_scene`; the gate is
+    # `scripts/verify_main_alignment.py`, and a millimetre matters (a 23 mm bin offset turned a
+    # 5/10 policy into 0/20 on main's benchmark).
+    collect.add_argument(
+        "--main-aligned",
+        type=Path,
+        default=None,
+        help="Path to a scene dump from dump_main_scene.py; every reset is rewritten onto it",
+    )
+    collect.add_argument(
+        "--align-bin-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in metres applied to both bins on top of the aligned arrangement",
+    )
+    collect.add_argument(
+        "--align-pose-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in radians applied to the arm's home joints",
+    )
+    collect.add_argument(
+        "--align-bin-yaw-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in radians applied to the target box yaw",
     )
     _add_fast_render(collect)
     # Collection was the one command without this, on the grounds that pixels are a

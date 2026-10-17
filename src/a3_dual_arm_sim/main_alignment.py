@@ -128,7 +128,7 @@ def apply_scene(
     rng: np.random.Generator | None = None,
     bin_noise_m: float = 0.0,
     cookie_noise_m: float = 0.0,
-    cookie_yaw_noise_rad: float = 0.0,
+    bin_yaw_noise_rad: float = 0.0,
     pose_noise_rad: float = 0.0,
 ) -> dict[str, Any]:
     """Put `env` on main's arrangement, optionally with a small perturbation.
@@ -150,8 +150,8 @@ def apply_scene(
     )
     target_position = np.asarray(target["world_pos"], dtype=float) + perturb(bin_noise_m)
     target_yaw = _yaw_from_quat(target["world_quat"])
-    if rng is not None and cookie_yaw_noise_rad > 0.0:
-        target_yaw += float(rng.normal(0.0, cookie_yaw_noise_rad))
+    if rng is not None and bin_yaw_noise_rad > 0.0:
+        target_yaw += float(rng.normal(0.0, bin_yaw_noise_rad))
     _place_target_bin(env, target_position, _quat_from_matrix(_yaw_matrix(target_yaw)))
     mujoco.mj_forward(env.model, env.data)
 
@@ -170,6 +170,36 @@ def apply_scene(
 def _yaw_matrix(yaw: float) -> np.ndarray:
     cosine, sine = np.cos(yaw), np.sin(yaw)
     return np.asarray([[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]])
+
+
+def post_reset_hook(
+    path: str | Path,
+    *,
+    bin_noise_m: float = 0.0,
+    cookie_noise_m: float = 0.0,
+    bin_yaw_noise_rad: float = 0.0,
+    pose_noise_rad: float = 0.0,
+):
+    """Build an `EpisodeRunner.post_reset` callback for collection.
+
+    One scene for every episode, plus a perturbation drawn from that episode's own seed -- so a
+    dataset collected this way is reproducible from its seeds and states its perturbation in
+    exactly the place a reader would look for it.
+    """
+    scene = load_scene(path)
+
+    def hook(env, seed: int) -> None:
+        apply_scene(
+            env,
+            scene,
+            rng=np.random.default_rng(seed),
+            bin_noise_m=bin_noise_m,
+            cookie_noise_m=cookie_noise_m,
+            bin_yaw_noise_rad=bin_yaw_noise_rad,
+            pose_noise_rad=pose_noise_rad,
+        )
+
+    return hook
 
 
 def scene_fingerprint(env) -> dict[str, Any]:

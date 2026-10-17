@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -109,6 +109,7 @@ class EpisodeRunner:
         save_failed_episodes: bool = True,
         reset_options: Mapping[str, Any] | None = None,
         recorded_action: RecordedAction = "applied",
+        post_reset: Callable[[Any, int], None] | None = None,
     ) -> None:
         if policy.action_mode != env.action_mode:
             raise ValueError(
@@ -143,6 +144,13 @@ class EpisodeRunner:
         #: differently: boxes and start pose move, per-Cookie jitter stays off,
         #: because their insertion is aimed at 2.5 mm gaps a jitter would close.
         self.reset_options = dict(reset_options) if reset_options else None
+        #: Called with ``(env, seed)`` right after ``env.reset``, and the observation is
+        #: re-read afterwards.  Collection uses it to place the scene on an arrangement the
+        #: reset would not produce by itself (see `main_alignment.apply_scene`): the scene
+        #: has to be rewritten *after* reset, because reset re-derives the layout, and the
+        #: observation has to be re-read, because the one reset returned describes the old
+        #: layout.
+        self.post_reset = post_reset
 
     def run(self, *, seed: int = 0, max_steps: int | None = None) -> EpisodeResult:
         context = EpisodeContext(seed=seed, task=self.task, action_mode=self.env.action_mode)
@@ -164,6 +172,9 @@ class EpisodeRunner:
             else None
         )
         observation, _ = self.env.reset(seed=seed, options=self.reset_options)
+        if self.post_reset is not None:
+            self.post_reset(self.env, seed)
+            observation = self.env._observation()  # noqa: SLF001 - see `post_reset`
         self.policy.reset(context)
         if self.recorder is not None:
             self.recorder.start_episode(context, type(self.policy).__name__, mode)
