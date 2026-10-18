@@ -598,3 +598,27 @@ checkpoint) and costs speed.  Numbers produced without them -- including every s
 sections 5, 8 and 9.4 -- are samples, not measurements.  Chasing the last 0.6/255 is worth
 doing only after both sides are scored deterministically, because until then it is below the
 noise floor of the comparison it would be used for.
+
+**And with the instrument fixed, the two stacks agree exactly.**  20 seeds each, 900 steps,
+main's frozen arrangement, the same checkpoint:
+
+| stack | mean | distribution |
+|---|---|---|
+| main's benchmark, deterministic + fp32 | **5.25** | {5: 19, 10: 1} |
+| this branch, deterministic + fp32 | **5.25** | {5: 19, 10: 1} |
+
+Same mean, same distribution, and the single success lands on a different seed (10 here, 19
+there) -- which is what a knife-edge looks like when the only differences left are 0.2 mm of
+main's own residual bin jitter and 0.6/255 in the left-wrist render.  So:
+
+* the 7.55 was **the sampler**, not the stack: 20 draws from a bimodal outcome, averaged;
+* the honest figure for this checkpoint on this arrangement at 900 steps is **5.25**, i.e. it
+  completes the second batch in one run out of twenty, and 5.0-5.25 is the plateau both
+  stacks reach;
+* the comparison the section opened with was never a physics question at all.
+
+The checkpoint table in 9.4 has to be read with that in mind: 4.25 / 0.00 / 5.00 / 7.55 are
+*before* the fix, so the ordering between 1000 and 3000 is inside the sampling noise, and only
+the 20k zero and the 2000 collapse (0/20 twice, two sampler seeds) are large enough to survive
+it.  Re-running the four checkpoints deterministically is the first thing to do before any of
+them is called better than another.
