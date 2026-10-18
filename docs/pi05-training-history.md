@@ -560,3 +560,41 @@ amplifies last-bit differences into "one batch or two".  Two consequences:
 The 2000-step collapse and this nondeterminism point the same way: at this epsilon the task
 is bimodal, and the only numbers worth quoting are distributions with the scene and the
 stack both named.
+
+### 9.7 What the 5.00 vs 7.55 gap actually was: an instrument, not a scene
+
+Three measurements, in the order that isolates them.
+
+**1. The simulator is deterministic; the policy is not.**  Replaying one fixed action sequence
+twice gives cookie trajectories that differ by **0.000000 mm**, so every bit of the run-to-run
+variation is in inference.  `A3_PI05_DETERMINISTIC=1` alone does not fix it (10 then 5);
+`A3_PI05_DETERMINISTIC=1 A3_PI05_FP32=1` does (10 then 10).  The checkpoint runs in bf16, and
+bf16 matmuls on this card are not bit-reproducible no matter which deterministic-kernel switch
+is set.
+
+**2. The two simulators agree.**  The same 548 actions -- episode 0 of the aligned dataset,
+replayed with no policy at all -- put every Cookie within **0.454 mm** of the same place in
+main's simulator and in this branch's, and both finish **10/10**.  `observation.state` agrees
+to 5.4e-4 rad.  So dynamics, judge, action space and state are not the difference.
+
+**3. What is left is pixels, and only pixels.**  At the same step of the same replay:
+front 0.16-0.20, **left wrist 0.61-2.12**, right wrist **0.000** of 255.  The left wrist is
+the camera that watches the grasp, and its difference grows exactly where the arm moves; the
+right wrist, pointed at empty space, is bit-identical.  That is a renderer-configuration
+difference (shadow/reflection passes over the arm and the lights), not a camera placement one:
+the camera's world matrix matches to 6e-19.
+
+So the earlier framing was wrong in both directions.  It is **not** a distribution difference
+-- the scene is the same to 0.0004 mm -- and it is **not** an undiscovered large difference
+either: the simulators agree to half a millimetre under identical commands.  It is a
+**measurement** difference: a bimodal task scored with a nondeterministic sampler, on two
+stacks whose renders differ by under 1 % in the one view that matters.  Main's twenty
+identical 5s were one draw repeated; this branch's 7.55 was twenty draws from the same
+coin, biased by that 0.6/255.
+
+**What to do about it.**  Any comparison from now on should run with
+`A3_PI05_DETERMINISTIC=1 A3_PI05_FP32=1`, which makes a rollout a function of (scene,
+checkpoint) and costs speed.  Numbers produced without them -- including every sweep in
+sections 5, 8 and 9.4 -- are samples, not measurements.  Chasing the last 0.6/255 is worth
+doing only after both sides are scored deterministically, because until then it is below the
+noise floor of the comparison it would be used for.
