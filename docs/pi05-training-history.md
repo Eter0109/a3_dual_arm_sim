@@ -524,3 +524,39 @@ Both ends of the distribution moved: tens 3 -> 5, zeros 2 -> 0.  The aligned dat
 narrower distribution than the randomised layout, and training on it acted as a regulariser
 rather than a trade.  So the 4000-step checkpoint dominates the incumbent on *both*
 arrangements, which is the reason to ship it and not a branch of checkpoints.
+
+### 9.6 Verified on main's own benchmark -- and 7.55 does not transfer
+
+Run in `/tmp/a3-main` (the worktree of main @ 29fe90e) with `bench_main_20k.py`, no scene
+shim, 20 episodes, 900 steps, 20 workers, one bridge on `/tmp/bench-main.sock` holding the
+4000-step checkpoint:
+
+| main's benchmark | mean | distribution |
+|---|---|---|
+| default (`randomize_boxes` +-1 cm, cookies 0.3 mm) | **4.55** | {0: 4, 5: 13, 6: 1, 10: 2} |
+| `--no-randomize` (layout frozen, closest to our training scene) | **5.00** | {5: 20} |
+
+The incumbent's 0/20 there is unchanged, so the improvement is real on the authority stack:
++4.55 with main's randomisation, +5.00 without it.  But our own stack's 7.55 is *not*
+reproduced, and the gap is not the scene -- section 9.1's gates rule that out.  It is the
+evaluation itself.
+
+**`A3_PI05_SEED` does not make a rollout reproducible.**  Same checkpoint, same frozen
+scene, one worker, one seed, run twice: **5/10 and then 10/10**.  The seed pins the
+flow-matching noise (`torch.manual_seed` before every `predict_action_chunk`), but the
+inference is bf16 GPU work with nondeterministic kernels, and a 900-step contact task
+amplifies last-bit differences into "one batch or two".  Two consequences:
+
+* A single rollout is one draw from a distribution, so a *single-seed* comparison is not a
+  comparison.  Main's frozen row above is 20 identical rollouts, which means the whole row is
+  one draw repeated -- not evidence that this checkpoint always scores exactly 5.
+* Our 7.55 and main's 5.00 differ by less than this measurement's own variance: 11 of our 20
+  runs got the second batch, 0 of main's 20 did, and a repeat of one identical configuration
+  spans 5 to 10.  Until the rollout is made deterministic (`torch.use_deterministic_algorithms`,
+  autotune off, fp32) or the episode count is raised far beyond 20 on both sides, the honest
+  claim is **"on main's benchmark: 0.00 -> 4.5-5.0, and up to 7.5 on our stack"**, not
+  "7.55".
+
+The 2000-step collapse and this nondeterminism point the same way: at this epsilon the task
+is bimodal, and the only numbers worth quoting are distributions with the scene and the
+stack both named.
