@@ -113,6 +113,36 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--main-aligned",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a scene dump from dump_main_scene.py. Every rollout is rewritten "
+            "onto that arrangement after its reset, so a policy can be scored on the "
+            "scene it was trained on while the scene file itself stays untouched. "
+            "Zero noise freezes it: every seed then runs one identical scene, which is "
+            "what a checkpoint comparison wants."
+        ),
+    )
+    parser.add_argument(
+        "--align-bin-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in metres applied to both bins on top of the aligned arrangement",
+    )
+    parser.add_argument(
+        "--align-pose-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in radians applied to the arm's home joints",
+    )
+    parser.add_argument(
+        "--align-bin-yaw-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian sigma in radians applied to the target box's yaw",
+    )
+    parser.add_argument(
         "--visual-style",
         choices=VISUAL_STYLES,
         default="plain",
@@ -124,6 +154,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+def alignment_digest(env: Any) -> str:
+    """A one-line receipt that this rollout ran on the scene it was meant to.
+
+    Printed per rollout because the aligned arrangement is applied *after* the reset, so
+    nothing in the scene file proves it happened.  Bins plus a hash of all 80 Cookie
+    positions is enough to catch a layout that silently reverted, and short enough to
+    read across twenty lines of log.
+    """
+
+    import hashlib
+
+    import mujoco
+    import numpy as np
+
+    bins = {}
+    for name in ("source_bin", "target_bin"):
+        body = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, name)
+        bins[name] = np.asarray(env.data.xpos[body], dtype=float)
+    cookies = np.asarray(env.cookie_positions, dtype=float)
+    digest = hashlib.sha1(np.round(cookies, 6).tobytes()).hexdigest()[:8]
+    return (
+        f"source_bin {bins['source_bin'].round(4).tolist()} "
+        f"target_bin {bins['target_bin'].round(4).tolist()} "
+        f"cookies {cookies.shape[0]} sha={digest}"
+    )
+
 
 def remove_cookies(env: Any) -> int:
     """Take every Cookie out of the scene.  Returns how many were removed.
@@ -389,6 +446,17 @@ def main() -> int:
 
     task = args.task or scene_task
 
+    alignment = None
+    if args.main_aligned is not None:
+        from a3_dual_arm_sim.main_alignment import post_reset_hook
+
+        alignment = post_reset_hook(
+            args.main_aligned,
+            bin_noise_m=args.align_bin_noise,
+            bin_yaw_noise_rad=args.align_bin_yaw_noise,
+            pose_noise_rad=args.align_pose_noise,
+        )
+
     if args.expert:
         # The scene's own `build_policy`: the same expert a collection run would drive, on the
         # same environment object the recording is about to step.
@@ -452,6 +520,12 @@ def main() -> int:
         )
     )
     print(f"scene      : {args.scene}")
+    if alignment is not None:
+        print(
+            f"aligned to : {args.main_aligned}  "
+            f"(bin {args.align_bin_noise} m, yaw {args.align_bin_yaw_noise} rad, "
+            f"pose {args.align_pose_noise} rad)"
+        )
     print(f"task       : {task!r}")
     print(f"output     : {args.output}")
     print(f"frame      : {composer.width}x{composer.height} at {fps} fps")
@@ -469,6 +543,15 @@ def main() -> int:
         # ahead of it would be undone by it.
         if args.without_cookies:
             print(f"probe      : {remove_cookies(env)} Cookies removed after reset")
+        if alignment is not None:
+            # Same place and the same reason as the probe above: the reset is what
+            # places the Cookies, the bins and the cameras, so the arrangement has
+            # to be rewritten after it, not before.  The rollout then starts from the
+            # observation *after* the rewrite -- a policy that saw the pre-rewrite
+            # frame would be scored on a scene it never acted in.
+            alignment(env, args.seed)
+            print(f"aligned    : {alignment_digest(env)}")
+            observation = env._observation()
         gateway.reset(EpisodeContext(seed=args.seed, task=task, action_mode=env.action_mode))
 
         while not terminated and not truncated and step < args.steps:

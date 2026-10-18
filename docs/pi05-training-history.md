@@ -406,3 +406,121 @@ driver's 30-minute startup timeout before reporting "the bridge did not come up"
 runner therefore ends with a keystone step that loads the bridge once and waits for its
 socket before any sweep starts, which turns five minutes of checking into insurance against
 three hours of silence.
+
+## 9. The aligned scene: 1000 episodes on main's arrangement, and 4000 steps from the 20k incumbent (10-18)
+
+Section 8 ends with a policy that scores well on this branch's layout and **0/20 on main's
+benchmark**.  The two benchmarks were not merely different code: they were different scene
+regimes, and the 20k checkpoint had never seen main's arrangement.  That is the whole of the
+"2-Cookie discrepancy" that took a day to chase -- not a physics difference, not a judge
+difference (both were verified identical), but a train/test scene mismatch, made invisible
+by an unseeded sampler that turned every comparison into a coin flip.
+
+### 9.1 The dataset (`a3_b2_main_aligned_merged`)
+
+Main's arrangement as shipped, pinned: bins, all 80 Cookies and the arm's home joints are
+rewritten onto main's own dump after every reset (`main_alignment.apply_scene`), and the
+*only* variation is the target box's yaw, sigma 0.005 rad.  `--position-noise 0`,
+cookies not jittered.  The four second-batch modes (`full`, `prefill`, `perturb`,
+`prefill_perturb`) still supply the variety, 250 episodes each.
+
+* 1000 episodes, 425,354 frames (against `a3_b2_merged`'s 1000 / 432,327 -- same scale)
+* 1000/1000 accepted, seeds 2000-2999, 3.9 GB, 20 shards, 20-way parallel: 40 probe
+  episodes took 7 min 22 s, the full run 3 h 41 m
+* audit: 1000 unique episode indices, 0 NaN/Inf in state and action, 16-wide, [-1.507, 1.709]
+
+Two gates, because "aligned in process" and "aligned in the data" are different claims:
+
+| gate | result |
+|---|---|
+| `scripts/verify_main_alignment.py` (in-process) | PASS -- bins 0.000 mm, 80 Cookies 0.000 mm, 18 joints 0.000 rad, cameras 0.000; render MAE 0.157 / 0.614 / 0.000 |
+| first training frame vs main's render (the data) | MAE **2.25 / 3.34 / 1.48** of 255 |
+
+The frame gate reads ten to twenty times larger than the in-process one, and that is not a
+defect: the in-process gate compares two renders of *one* state, while the frame gate
+compares episode 0 of the dataset -- which carries the 0.005 rad yaw draw and the expert's
+own first step -- against main.  About 1 % mean absolute difference is the expected size of
+that, and it is the number a reader should quote when asking whether training frames sit in
+main's observation distribution.
+
+### 9.2 The run (`a3_b2_aligned4000`)
+
+From `a3_b2_unfreeze_20k/checkpoints/020000` -- not from the base.  4000 steps, one cosine
+**5e-06 -> 2.5e-07**, warmup 133, batch 6, seed 1000, the same partial un-freeze (vision +
+18 LLM layers + state projector), pyav, fused AdamW.  Four checkpoints kept, no pruning.
+
+The peak is 5x below the recipe's 2.5e-05 for the reason §8 measured: re-heating an already
+trained two-batch policy destroys both batches and spends 16000 steps repairing itself.  A
+scene shift is a smaller change than that, and the loss agrees -- 0.022 at 1000, 0.002 at
+4000, never a spike.
+
+Measured: 1.24 s/step, 1 h 22 m, 31.6 GB VRAM, 84 GB of checkpoints.
+
+### 9.3 The protocol, and why the old baseline does not apply
+
+`scripts/render_bridge_policy_video.py` grew `--main-aligned` in the same place
+`--without-cookies` already sits: *after* `env.reset`, because the reset is what places the
+Cookies, the bins and the cameras.  All three sigmas are 0, so the scene is **frozen** --
+every seed runs one identical arrangement and only the rollout differs.  `A3_PI05_SEED=0`,
+20 seeds, 900 steps, one bridge and 20 workers per checkpoint.
+
+Frozen means these numbers are not the layout-averaged numbers of §5 and §8.  The 5.35 on
+this branch's `a3_cookie_batch_second_batch` scene and the 6.38s of §8 come from the scene's
+own randomised layout; they cannot be compared with the table below, and mixing them is
+exactly the mistake §8 had to correct.
+
+### 9.4 What 4000 steps bought
+
+Same stack, 20 seeds, main's arrangement frozen:
+
+| checkpoint | mean | distribution |
+|---|---|---|
+| 20k incumbent (control) | **0.00** | {0: 20} |
+| +1000 | 4.25 | {0: 3, 1: 1, 5: 12, 6: 4} |
+| +2000 | **0.00** | {0: 20} |
+| +3000 | 5.00 | {5: 20} |
+| **+4000** | **7.55** | {5: 9, 9: 4, 10: 7} |
+
+The control is the important row, and it is worse than it looks: `in_source` never leaves
+80, nothing is ever held, and the arm's mean motion is 0.004 rad over 900 steps.  20k does
+*not* fail at this scene so much as not attempt it -- the same 0/20 main's own benchmark
+reported, now with a receipt.  Re-running it under a different sampler seed
+(`A3_PI05_SEED=7`) gives 0/5 again, so the zeroes are the weights, not one unlucky draw.
+
+7.55 is the first time this arrangement is solved at all, and 7 of 20 seeds place all ten
+Cookies -- both batches -- from a state the policy produced itself.
+
+**2000 is a V, not a fluke.**  All 20 seeds score 0 and the trajectory is distinct from the
+incumbent's: it grasps five Cookies by step 100 and then holds them, rate-limited, for the
+remaining 800 steps (`rate_limited_fraction` climbs 0.02 -> 0.05, motion 0.01 rad).  A
+burst-then-freeze, not paralysis.  Reproduced at `A3_PI05_SEED=7` (0/5).  So the same V that
+§8 found inside the 20k cycle also exists here at a twentieth of the learning rate: the
+high-rate part of the cosine destroys the behaviour before the anneal rebuilds it.  The
+practical reading is to keep all four checkpoints, always -- one sweep of a mid-cosine
+checkpoint would have declared this arm a failure.
+
+**The zero is the weights, and two confounds were checked.**  The control's 0.00 was not a
+normalisation accident: the aligned dataset's own statistics differ from `a3_b2_merged`'s by
+0.083 rad on state[0] and 0.173 against 0.113 on its std, which is ~0.7 sigma and enough to
+ruin a policy, so the control was re-run with the incumbent's *own* statistics
+(`stats=a3_b2_merged`) -- 0/5 again, with the same frozen arm.  Nor is it one unlucky
+sampler draw: `A3_PI05_SEED=7` gives 0/5 as well.  Three independent stacks now agree on
+this number (main's own benchmark without a shim, 0/20; this stack with the aligned
+statistics, 0/20; this stack with the incumbent's statistics, 0/5).
+
+### 9.5 Nothing was forgotten: the old layout improved too
+
+The obvious risk of a scene-adaptation fine-tune is that it buys main's arrangement by
+giving up the one the branch had already solved.  It did not -- same scene
+(`a3_cookie_batch_second_batch`, its own randomised layout), 900 steps, 20 seeds,
+`A3_PI05_SEED=0`, each model with its own training statistics:
+
+| policy | mean | distribution |
+|---|---|---|
+| 20k incumbent | 5.35 | {0: 2, 3: 1, 4: 1, 5: 11, 6: 1, 9: 1, 10: 3} |
+| +4000 aligned | **6.25** | {5: 15, 10: 5} |
+
+Both ends of the distribution moved: tens 3 -> 5, zeros 2 -> 0.  The aligned data is a
+narrower distribution than the randomised layout, and training on it acted as a regulariser
+rather than a trade.  So the 4000-step checkpoint dominates the incumbent on *both*
+arrangements, which is the reason to ship it and not a branch of checkpoints.
