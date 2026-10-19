@@ -763,3 +763,28 @@ The one measurement that would settle it: record the *policy's* action sequence 
 rollout here and replay it into main's environment.  If main then completes both batches, the
 drift is not the cause and the difference is upstream in the observation path; if it stalls at
 five, the 0.454 mm is the cause and this is settled.
+
+**The drift is not the cause.**  Recording the policy's own 900 actions from a ten-mode rollout
+in this branch (it reaches 10/10 at step 600) and replaying them with no policy at all:
+
+| replayed into | result |
+|---|---|
+| this branch's environment | in_target **10**, in_source 70 |
+| main's environment | in_target **10**, in_source 70 |
+
+So when the same actions arrive, both simulators finish the task.  The 0.454 mm of dynamics
+drift cannot explain a stack that stalls at five, because it does not stall when handed those
+actions.  What differs is therefore **upstream of the actions**: the same checkpoint, at the
+same seed, under the same flags, in two processes, produces two different action sequences --
+"finish both batches" in most launches here, "stall after the first" in every launch on main's
+side and in one of seven here.
+
+Everything the model is given has now been measured equal -- scene (0.0000 mm), pixels at equal
+state (0.000-0.010 of 255), `observation.state` (5.4e-4), prompt, statistics, checkpoint, seed,
+precision.  What has *not* been compared is the tensor the adapter actually hands to the model:
+the resized uint8 frames, their channel order and dtype, and the normalised state vector.  That
+is the next probe, and it is a hash comparison, not a rollout: dump the inputs in both stacks
+and diff.  If they are identical, then the two stacks are feeding the same model the same bytes
+and the mode difference is inside fp32 inference -- at which point it is not a bug in either
+benchmark but a property of the instrument, and the only honest response is to quote
+distributions over launches rather than single numbers.
