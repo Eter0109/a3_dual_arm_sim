@@ -731,3 +731,35 @@ one.  Estimating the rate is what the `mode_rate` runs are for; until it exists,
 statement is the deflating one: on this arrangement the checkpoint either finishes both batches
 or stalls after the first, the outcome is decided somewhere inside fp32 inference, and neither
 benchmark can currently tell you which it will be.
+
+### 9.11 The mode is per-process, and each stack has its own propensity
+
+`mode_rate` launched each stack eight times (four rounds of 6 episodes, then the earlier
+sequences) with identical flags, scene, checkpoint and settings.  Within a launch every episode
+lands on the same side; across launches the side is what changes:
+
+| launch | this branch (6 eps) | main (6 eps) |
+|---|---|---|
+| 1 | 10.00 {10: 6} | 5.00 {5: 6} |
+| 2 | 10.00 {10: 6} | 5.00 {5: 6} |
+| 3 | 10.00 {10: 6} | 5.00 {5: 6} |
+| 4 | 10.00 {10: 6} | 5.00 {5: 6} |
+
+Counting the earlier 20-episode launches as well: **this branch reaches the ten-mode in 6 of 7
+launches** (the seventh scored 5.25), **main in 0 of 7**.  Under a shared 50/50 coin the chance
+of seven main launches all landing on one side is ~1 %, and combined with ours 6-of-7 it is
+~2e-5.  So this is not sampling noise: each stack has its own propensity, decided per process,
+and main's 5.25 is what main always produces on this arrangement -- not a bad draw.
+
+What that leaves is the only measured difference between the stacks: **0.454 mm of trajectory
+drift when both are fed the same 548 actions**, with every other measured quantity equal
+(reset pose 0.0000 mm, state 5.4e-4 rad, pixels at equal state 0.000-0.010 of 255).  A
+sub-millimetre difference deciding five cookies sounds absurd until it is set against what this
+task tolerates: the Cookies are packed 2.5 mm apart, and a 0.01 rad change of the arm's home
+pose is enough to make the scripted expert fail outright.  The margin is thinner than the
+difference, which is the same shape as the 2-cookie discrepancy that started all of this.
+
+The one measurement that would settle it: record the *policy's* action sequence from a ten-mode
+rollout here and replay it into main's environment.  If main then completes both batches, the
+drift is not the cause and the difference is upstream in the observation path; if it stalls at
+five, the 0.454 mm is the cause and this is settled.
