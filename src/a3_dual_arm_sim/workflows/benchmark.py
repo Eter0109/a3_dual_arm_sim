@@ -38,9 +38,16 @@ class CookieBatchBenchmark(EpisodeExecution):
     diagnostic_dir = None
 
     def _episode_task(self, column, seed):
-        if self.prompt_style == "training":
+        if self.prompt_style in ("training", "short"):
             return "transfer 10 cookies into target box"
         return super()._episode_task(column, seed)
+
+    def _episode_metadata(self, column, seed):
+        return {
+            **super()._episode_metadata(column, seed),
+            "prompt_style": self.prompt_style,
+            "task_instruction": self._episode_task(column, seed),
+        }
 
     def run_episode(self, policy, seed, episode_idx=1, **kwargs):
         if policy == "expert":
@@ -223,13 +230,18 @@ class Cookie2x10Benchmark(Cookie2x10EpisodeExecution, CookieBatchBenchmark):
 
     task = "2x10"
 
+    def _episode_task(self, column, seed):
+        if self.prompt_style == "short":
+            return "transfer 20 cookies into target box"
+        return super()._episode_task(column, seed)
+
 
 def make_cookie_benchmark(task="2x5", *, prompt_style="task", first_grasp=None, **kwargs):
     """Shared construction for the benchmark CLI and grid evaluations."""
     if task not in ("2x5", "2x10"):
         raise ValueError("task must be 2x5 or 2x10")
-    if prompt_style not in ("task", "training"):
-        raise ValueError("prompt_style must be task or training")
+    if prompt_style not in ("task", "training", "short"):
+        raise ValueError("prompt_style must be task, training or short")
     if task == "2x10":
         benchmark = Cookie2x10Benchmark(first_grasp=first_grasp, **kwargs)
     else:

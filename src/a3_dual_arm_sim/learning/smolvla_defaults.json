@@ -1,0 +1,9 @@
+{
+  "steps": 10000,
+  "batch_size": 16,
+  "lr": 0.00005,
+  "seed": 1000,
+  "device": "cuda",
+  "save_freq": 2000,
+  "num_workers": 2
+}

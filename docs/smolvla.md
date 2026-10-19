@@ -5,7 +5,7 @@
 本流程以 A3 MuJoCo 左臂装盒为示例。示例数据为
 [`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)，
 示例基座为 [`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base)。
-也可使用审计通过的自采 8D/16D 数据，通过 --root 和 --repo-id 指定；Hub 的示例 8D 数据无需再转换。
+也可使用审计通过的自采 8D/16D 数据，通过 --root 指定（--repo-id 可选）；Hub 的示例 8D 数据无需再转换。
 
 ## 1. 环境准备
 
@@ -76,7 +76,6 @@ python examples/audit_smolvla_data.py \
 ```bash
 a3-sim train-smolvla \
   --root datasets/a3_front_close_left_100 \
-  --repo-id Eter0109/a3-front-close-left-100 \
   --model models/smolvla_base --output outputs/smolvla_smoke/model \
   --steps 10 --batch-size 1 --num-workers 0 --save-freq 10 \
   --seed 1000 --device cuda --dry-run
@@ -92,7 +91,6 @@ a3-sim train-smolvla \
 set -o pipefail
 a3-sim train-smolvla \
   --root datasets/a3_front_close_left_100 \
-  --repo-id Eter0109/a3-front-close-left-100 \
   --model models/smolvla_base --output outputs/smolvla_smoke/model \
   --steps 10 --batch-size 1 --num-workers 0 --save-freq 10 \
   --seed 1000 --device cuda 2>&1 | tee outputs/smolvla_smoke/train.log
@@ -109,7 +107,6 @@ mkdir -p outputs/smolvla_20k
 set -o pipefail
 a3-sim train-smolvla \
   --root datasets/a3_front_close_left_100 \
-  --repo-id Eter0109/a3-front-close-left-100 \
   --model models/smolvla_base --output outputs/smolvla_20k/model \
   --steps 20000 --batch-size 8 --num-workers 2 --save-freq 2000 \
   --lr 0.00005 --seed 1000 --device cuda \
@@ -149,13 +146,12 @@ python examples/smolvla_offline_error.py \
 
 ## 7. 20 控制步部署冒烟
 
-将 `CHECKPOINT` 设置为刚保存的冒烟检查点，再运行：
+将 `CHECKPOINT` 设置为刚保存的冒烟检查点，再运行。完整检查点自带归一化处理器，闭环测试无需训练数据；第6节离线误差计算仍需数据样本。
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --policy "smolvla:$CHECKPOINT" \
-  --dataset-root datasets/a3_front_close_left_100 \
-  --repo-id Eter0109/a3-front-close-left-100 --device cuda \
+  --device cuda \
   --episodes 1 --seed-start 9000 --max-steps 20 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --output outputs/smolvla_smoke/deploy20.json
@@ -168,14 +164,13 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --policy "smolvla:$CHECKPOINT" \
-  --dataset-root datasets/a3_front_close_left_100 \
-  --repo-id Eter0109/a3-front-close-left-100 --device cuda \
+  --device cuda \
   --episodes 20 --seed-start 1000 --max-steps 500 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --output outputs/smolvla_20k/dev20.json
 # 单 回合 动作与三路视频追踪；diagnostic-dir 必须为新目录
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --policy "smolvla:$CHECKPOINT" --dataset-root datasets/a3_front_close_left_100 \
+  --policy "smolvla:$CHECKPOINT" \
   --episodes 1 --seed-start 1000 --max-steps 500 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --diagnostic-dir outputs/smolvla_20k/trace_seed1000 \
@@ -201,6 +196,37 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 | 输出目录已存在 | 新训练用新目录；恢复用训练器 resume，不覆盖旧结果 |
 
 环境兼容性与功能边界见 [已知限制](limitations.md)。
+
+## 简化入口与旧检查点
+
+本地 SmolVLA 训练只需 `--root`。`--repo-id` 可省略，按目录名生成 `local/<目录名>`；显式传入仍优先。默认输出为 `outputs/<目录名>_smolvla`，已有输出目录会拒绝覆盖。以下命令从仓库根目录运行；自动生成的 repo-id 只是本地数据标识，不会触发上传。
+
+训练默认值保存在 `src/a3_dual_arm_sim/learning/smolvla_defaults.json`：10000 步、batch 16、学习率 5e-5、seed 1000、CUDA、每 2000 步保存、2 个数据加载 worker。可通过 `--train-config custom.json` 设置默认值，显式命令行参数优先。例如：
+
+```json
+{"steps": 20000, "batch_size": 32, "lr": 0.00005}
+```
+
+```bash
+python -m a3_dual_arm_sim.cli train-smolvla --root datasets/cookie_2x5_trial \
+  --train-config custom.json --batch-size 16
+```
+
+启动配置写入输出目录旁的 `<输出名>_launch.json`；成功完成后，输出目录内保存 `a3_training_config.json`，每个已保存检查点包含 `a3_inference_manifest.json`，记录训练数据标识、统计量哈希和处理器文件哈希。权重、模型输入输出配置及归一化处理器由 LeRobot 保存。
+
+SmolVLA 测试默认从模型目录加载预处理和反归一化参数，无需训练数据目录、视频或 repo-id；任务、prompt、步数和执行步长等评测设置仍由测试入口指定。已有完整检查点无需迁移。环境变量工厂只需 `A3_SMOLVLA_CHECKPOINT`（设备可用 `A3_SMOLVLA_DEVICE` 指定）。这里的自包含指数据集独立：VLM/tokenizer 依赖仍需本地文件或可用缓存，不能据此认定模型目录已完全离线可移植。
+
+对完全没有 `policy_preprocessor.json` 和 `policy_postprocessor.json` 的旧检查点，可在测试时提供 `--dataset-root`，按模型配置和指定统计量临时创建处理器。一次性补齐：
+
+```bash
+python -m a3_dual_arm_sim.learning.checkpoint_bundle \
+  --checkpoint <pretrained_model目录> --dataset-root <对应训练数据目录>
+```
+
+例如某些旧检查点 config 的文本长度为16，但保存的处理器长度为48。完整检查点继续采用已保存的48；处理器丢失后按 config 重建只能得到16，不能视作原行为的精确恢复。
+
+补齐命令在该检查点目录保存处理器和来源记录。请使用原训练数据；其重建行为依据 checkpoint 配置，不保证恢复未保存的自定义预处理。已存在处理器保持原样；只有部分处理器或状态文件缺失时明确报错，需恢复原文件。ACT 的数据参数要求保持原流程。
+
 ## 评测中的闲置右臂选项
 
 网格测试和 `examples/benchmark_cookie_batch.py` 支持 `--inactive-right-arm auto|off`，默认 `auto`。

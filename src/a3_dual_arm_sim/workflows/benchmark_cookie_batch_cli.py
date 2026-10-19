@@ -77,10 +77,17 @@ def run_metadata(args, benchmark):
         with (checkpoint / "model.safetensors").open("rb") as stream:
             metadata["weights_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
         metadata["checkpoint_config"] = json.loads((checkpoint / "config.json").read_text())
+        if args.policy.startswith("smolvla:"):
+            from a3_dual_arm_sim.learning.checkpoint_bundle import inference_fingerprints
+
+            metadata["processor_sha256"] = inference_fingerprints(checkpoint, args.dataset_root)
+
         dataset_root = (
             project_root() / (args.dataset_root or Path("datasets/a3_front_close_left_100"))
         ).resolve()
-        metadata["dataset_root"] = str(dataset_root)
+        metadata["dataset_root"] = (
+            str(dataset_root) if args.dataset_root or args.policy.startswith("act:") else None
+        )
         marker = dataset_root / ".a3_download_revision.json"
         metadata["dataset_revision"] = json.loads(marker.read_text()) if marker.is_file() else None
     metadata["cookie_id_convention"] = "cookie_positions array index is the cookie ID"
@@ -172,7 +179,7 @@ def main() -> int:
         help="Group boundary coverage tolerance in meters",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default=None)
-    parser.add_argument("--repo-id", default="Eter0109/a3-front-close-left-100")
+    parser.add_argument("--repo-id", default=None)
     parser.add_argument("--inference-seed", type=int, default=None)
     parser.add_argument("--n-action-steps", type=int, default=None)
     parser.add_argument(
@@ -196,9 +203,9 @@ def main() -> int:
     parser.add_argument("--first-grasp", type=parse_first_grasp)
     parser.add_argument(
         "--prompt-style",
-        choices=("training", "task"),
+        choices=("training", "task", "short"),
         default="training",
-        help="2x5: training short prompt or column-specific task prompt; 2x10 always uses its native prompt",
+        help="training: original 2x5 prompt (2x10 stays native); task: native task prompt; short: transfer 10/20 cookies into target box",
     )
     parser.add_argument("--num-steps", type=int, default=None, help="SmolVLA flow inference steps")
     args = parser.parse_args()
@@ -293,8 +300,11 @@ def main() -> int:
             args.policy.split(":", 1)[1],
             dataset_root=(
                 project_root() / (args.dataset_root or Path("datasets/a3_front_close_left_100"))
-            ).resolve(),
-            repo_id=args.repo_id,
+            ).resolve()
+            if args.dataset_root or args.policy.startswith("act:")
+            else None,
+            repo_id=args.repo_id
+            or ("Eter0109/a3-front-close-left-100" if args.policy.startswith("act:") else None),
             device=args.device,
             inference_seed=args.inference_seed,
             n_action_steps=args.n_action_steps,

@@ -38,3 +38,6 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.setuptools.package-data]
+a3_dual_arm_sim = ["learning/smolvla_defaults.json"]

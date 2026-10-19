@@ -69,7 +69,7 @@ python examples/prepare_left_arm_dataset.py \
   --source datasets/cookie_2x5_trial --output datasets/cookie_2x5_left
 ```
 
-训练器支持 8D 或 16D；无需为了训练强制转换。转换后训练的 `--root` 和评测的 `--dataset-root` 都应指向转换结果。转换可能用符号链接引用原视频，勿删除原始数据。已有 8D 数据不要重复转换。
+训练器支持 8D 或 16D；无需为了训练强制转换。转换后训练的 `--root` 应指向转换结果；SmolVLA 完整检查点评测不再需要 `--dataset-root`，旧检查点补齐和 ACT 评测仍需匹配的数据。转换可能用符号链接引用原视频，勿删除原始数据。已有 8D 数据不要重复转换。
 
 2×10 使用相同审计入口，替换数据路径和 repo-id；其审计还检查二十块的四次抓取计划和释放记录。
 
@@ -89,8 +89,6 @@ MUJOCO_GL=egl a3-sim run --scene cookie_transfer \
 
 ```bash
 A3_SMOLVLA_CHECKPOINT=outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-A3_SMOLVLA_DATASET_ROOT=datasets/a3_front_close_left_100 \
-A3_SMOLVLA_REPO_ID=local/a3-front-close-left-100 \
 A3_SMOLVLA_DEVICE=cuda MUJOCO_GL=egl \
 a3-sim run --scene cookie_transfer --config configs/cookie_batch.yaml \
   --policy a3_dual_arm_sim.policies.smolvla:make_policy \
@@ -98,7 +96,7 @@ a3-sim run --scene cookie_transfer --config configs/cookie_batch.yaml \
   --record datasets/smolvla_debug --repo-id local/smolvla-debug --videos
 ```
 
-上例检查点是本机已有训练产物的路径示例，仓库不附带权重；使用自己的检查点和对应训练数据。`--record` 应指向新目录。
+上例检查点是本机已有训练产物的路径示例，仓库不附带权重；使用自己的完整检查点。`--record` 应指向新目录。
 
 通用执行器默认可以保存失败轨迹，不生成标准专家采集的完整 `collection_summary.json`；其输出不能直接作为已经通过训练审计的成功演示集。尤其 2×10 审计要求四次抓取的真值记录，任意神经策略不自动提供这些记录。若要从任意策略批量采集可训练数据，需要补齐专用采集、成功筛选及真实元数据，不能伪造摘要绕过审计。通用 `a3-sim run --scene cookie_transfer` 也不能代替 2×10 评测的任务调度。
 
@@ -119,7 +117,7 @@ a3-sim download-smolvla \
 
 ```bash
 a3-sim train-smolvla \
-  --root datasets/cookie_2x5_trial --repo-id local/cookie-2x5-trial \
+  --root datasets/cookie_2x5_trial \
   --model models/smolvla_base --output outputs/cookie_2x5_smoke/model \
   --steps 20 --batch-size 1 --num-workers 0 --save-freq 20 --device cuda
 ```
@@ -130,7 +128,7 @@ a3-sim train-smolvla \
 mkdir -p outputs/cookie_2x5_train
 set -o pipefail
 a3-sim train-smolvla \
-  --root datasets/cookie_2x5_trial --repo-id local/cookie-2x5-trial \
+  --root datasets/cookie_2x5_trial \
   --model models/smolvla_base --output outputs/cookie_2x5_train/model \
   --steps 20000 --batch-size 8 --num-workers 2 --save-freq 2000 \
   --lr 0.00005 --seed 1000 --device cuda \
@@ -139,7 +137,7 @@ a3-sim train-smolvla \
 
 这里数据路径沿用教程，正式训练应替换为足量且审计通过的数据。批大小按显存调整。`--dry-run` 可以输出训练命令，但仍会审计并生成适配文件；`--output` 指定的训练目录必须不存在。
 
-2×10 使用自己的数据目录、repo-id 和新输出目录。训练器读取 `collection_summary.json` 的 `target_layout: 2x10` 后，为 SmolVLA 配置 128-词元文本长度。仅将旧十块模型放到 2×10 环境是迁移测试，不等于模型经过该任务训练；旧检查点的 tokenizer 设置不会由评测自动升级。
+2×10 使用自己的数据目录和新输出目录；repo-id 可自动生成。训练器读取 `collection_summary.json` 的 `target_layout: 2x10` 后，为 SmolVLA 配置 128-词元文本长度。仅将旧十块模型放到 2×10 环境是迁移测试，不等于模型经过该任务训练；旧检查点的 tokenizer 设置不会由评测自动升级。
 
 检查点通常位于 `model/checkpoints/<step>/pretrained_model`，保存配置、处理器和权重。精确评测应指定该目录，勿把基座误作微调模型；传实验运行目录时解析器选择最新有效步骤，并可能优先该步骤的 EMA 权重。继续训练需恢复训练状态，具体命令见 [恢复训练](smolvla.md#5-完整训练与恢复)，不要仅重复新训练命令或覆盖目录。
 
@@ -168,21 +166,20 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --max-steps 500 --workers 1 --output outputs/expert_2x10_basic_500.json
 ```
 
-换成 `--task 2x5` 时删除 `--first-grasp`。下面以本机现有 40k 普通权重为例；其他机器必须替换检查点和训练数据：
+换成 `--task 2x5` 时删除 `--first-grasp`。下面以本机现有 40k 普通权重为例；其他机器必须替换检查点：
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --task 2x10 \
   --policy smolvla:outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-  --dataset-root datasets/a3_front_close_left_100 \
-  --repo-id local/a3-front-close-left-100 --device cuda \
+  --device cuda \
   --profile basic --source-column 1 --first-grasp random \
   --episodes 20 --seed-start 13000 --inference-seed 13000 \
   --max-steps 500 --n-action-steps 8 --num-steps 25 --workers 1 \
   --output outputs/smolvla_2x10_basic_500.json
 ```
 
-改 `--profile medium|advanced` 切换难度，`--randomization-config` 可指定自己的 YAML。2×5 默认 `--prompt-style training` 使用原短指令 `transfer 10 cookies into target box`；若模型用新按列指令训练，应显式选 `--prompt-style task`。2×10 始终使用包含当前数量计划的原生长指令。
+改 `--profile medium|advanced` 切换难度，`--randomization-config` 可指定自己的 YAML。2×5 默认 `--prompt-style training` 使用原短指令 `transfer 10 cookies into target box`；若模型用新按列指令训练，应显式选 `--prompt-style task`。2×10 默认使用包含当前数量计划的原生长指令；`--prompt-style short` 使用 `transfer 20 cookies into target box`，用于数量 baseline，不验证遵守四次抓取计划。
 
 `--seed-start` 控制场景；`--inference-seed` 控制策略采样。统一 CLI 的单个 `--inference-seed` 会在每次重置重置为同一个值；网格脚本则逐回合设为该回合的场景随机种子，复现网格单条时两者都传对应随机种子。模型评测用单进程；专家支持 `--workers N`。
 
@@ -217,19 +214,19 @@ JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录。完整任务 `su
 ```bash
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --checkpoint outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-  --dataset-root datasets/a3_front_close_left_100 --repo-id local/a3-front-close-left-100 \
+  --prompt-style-2x5 training --prompt-style-2x10 short \
   --max-steps 500 --episodes 20 --seed-start 13000 \
   --n-action-steps 8 --num-steps 25 --device cuda \
-  --output outputs/smolvla_grid_500
+  --output outputs/smolvla_grid_short_500
 ```
 
-默认六项为 `2x5/2x10 × basic/medium/advanced`；每项 20 次，总共 120 次。按随机种子一轮轮执行六项，固定来源第 1 列；2×10 首夹数量读取 `configs/randomization_2x10.yaml`。2×5 固定训练短指令，2×10 使用原生任务指令。当前脚本不自动切换不同任务的检查点；如果只在 2×5 训练，2×10 成绩应标为迁移测试。
+默认六项为 `2x5/2x10 × basic/medium/advanced`；每项 20 次，总共 120 次。按随机种子一轮轮执行六项，固定来源第 1 列；2×10 首夹数量读取 `configs/randomization_2x10.yaml`。上例显式采用2×5训练原指令、2×10简短二十块指令；省略指令参数时，2×5默认为训练原指令，2×10默认为原生长指令。可用 `--profiles basic` 只测一个档位。当前脚本不自动切换不同任务的检查点；如果只在 2×5 训练，2×10 成绩应标为迁移测试。
 
 首次运行输出目录必须不存在。先加 `--dry-run` 可打印配置、不加载策略；中断后用**完全相同的命令加 `--resume`**，跳过已写入的完整回合。Ctrl+C/SIGTERM 会标记停止；正在执行但未写完的回合不计入成绩，续跑会重做。配置、检查点、脚本或共享执行代码哈希变化会拒绝续跑，应换新目录。
 
 | 文件 | 用途 |
 | --- | --- |
-| `protocol.json` | 实验参数、权重/数据统计/代码哈希及处理器配置 |
+| `protocol.json` | 实验参数、权重/处理器/代码哈希及处理器配置；显式提供数据时另记统计量哈希 |
 | `episodes.jsonl` | 每个完成回合的最终计数、场景与运行信息 |
 | `summary.md` / `summary.json` | 六项均值、累计放入量、分布、进度与状态 |
 | `current.json` | 最近开始的任务/档位/随机种子，不代表已完成 |
@@ -354,3 +351,7 @@ MUJOCO_GL=egl a3-sim replay --root datasets/cookie_2x5_trial \
 - 录制依赖缺失：安装 `.[train]`；遥操作控制面板需要 Python Tk 支持，Ubuntu 可安装 `python3-tk`。
 - 命令返回任务失败：先检查报告的失败原因、最大步数和布局；不能把启动正常标为装盒成功。
 - 数据或输出目录冲突：使用新目录，保留旧产物，不覆盖已完成实验运行。
+
+## SmolVLA 简化入口
+
+SmolVLA 训练可省略 `--repo-id` 和 `--output`，测试完整检查点可省略数据参数。上文显式参数示例继续兼容；新用法、JSON 默认配置和旧检查点补齐见 [简化入口与旧检查点](smolvla.md#简化入口与旧检查点)。

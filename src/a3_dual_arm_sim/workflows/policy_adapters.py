@@ -129,8 +129,8 @@ class SmolVLAPolicyAdapter(LearnedPolicyAdapter):
     def __init__(
         self,
         checkpoint: str | Path,
-        dataset_root: str | Path = Path("datasets/a3_front_close_left_100"),
-        repo_id: str = "Eter0109/a3-front-close-left-100",
+        dataset_root: str | Path | None = None,
+        repo_id: str | None = None,
         device: str | None = None,
         name: str = "smolvla",
         **kwargs: Any,
@@ -143,7 +143,7 @@ class SmolVLAPolicyAdapter(LearnedPolicyAdapter):
 
         dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.plugin = SmolVLAPolicyPlugin(
-            checkpoint_path, Path(dataset_root), repo_id, dev, **kwargs
+            checkpoint_path, Path(dataset_root) if dataset_root else None, repo_id, dev, **kwargs
         )
         self.name = name
         self.action_mode: ActionMode = "joint_position"
