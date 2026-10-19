@@ -835,3 +835,47 @@ That is where the 5-versus-10 lives: **a client-side image-preparation differenc
 not the sampler.  The next step is one log line with shape/dtype/mean per array on our side --
 the sweep's bridge log did not capture it in the run above -- and then a diff that names the
 line of code.
+
+### 9.13 Found it: the alignment dump never carried the Cookies' orientation
+
+The hash probe named the arrays, and the arrays named the field.  Our `front_view` and
+`left_wrist_view` differed from main's while `right_wrist_view` and `observation.state` matched
+-- so the difference was something visible to two cameras and invisible to the third, and not in
+the state vector.  The Cookies are exactly that: 80 objects in the first two views, none in the
+third, and their poses are free joints that `observation.state` (arm joints + grippers) does not
+carry.
+
+Measured at each stack's own reset, seed 0:
+
+| quantity | this branch | main | same? |
+|---|---|---|---|
+| bin poses | -- | -- | yes |
+| Cookie **positions** (80) | -- | -- | **0.000000 mm, 0 of 80 different** |
+| Cookie **quaternions** (80) | `[1, 0, 0, 0]` | `[0.999976, 0, 0, -0.006885]` | **0 of 80 equal, up to 0.43° of yaw** |
+| rendered frames | -- | -- | differ exactly in front + left wrist, 0.005 / 0.001 mean of 255 |
+
+`/tmp/main_scene.json` has `cookie_positions` but no `cookie_quaternions`, so
+`main_alignment.apply_scene` could only pin positions and `set_cookie_pose` fell back to its
+default -- perfectly upright.  The scene we collected on and evaluated on therefore differed from
+main's by a sub-degree rotation of every Cookie, and that is enough to move the rendered pixels
+and, through 900 steps of contact, the score.
+
+**The fix and what it costs.**  `apply_scene` now reads an optional `cookie_quaternions` field
+(older dumps still load); the dump needs the field added from main's own reset.  With it pinned:
+
+| aligned evaluation, 20 seeds, det+fp32 | mean | distribution |
+|---|---|---|
+| Cookies upright (as collected) | 10.00 | {10: 20} |
+| **Cookies at main's orientations** | **7.25** | {5: 11, 10: 9} |
+| main's benchmark | 5.00-5.25 | {5: 6} / {5: 19, 10: 1} |
+
+So the missing field explains most of the 10.00-versus-5.00 gap and not all of it: 7.25 sits
+between.  The dump also carries `gripper_state`, which `apply_scene` does not apply either, so at
+least one more unpinned input remains -- and the same probe (per-array hash at step 0) will name
+it in one run.
+
+**What this means for the dataset.**  The 1000 aligned episodes were collected with upright
+Cookies, i.e. on a scene that differs from main's benchmark by 0.43° of Cookie yaw.  That is a
+genuine train/benchmark mismatch of exactly the kind this whole section has been chasing, and it
+is a property of the data, not of the evaluation: fixing the evaluation does not change what the
+policy was trained on.

@@ -155,9 +155,21 @@ def apply_scene(
     _place_target_bin(env, target_position, _quat_from_matrix(_yaw_matrix(target_yaw)))
     mujoco.mj_forward(env.model, env.data)
 
+    # Orientation as well as position.  Main's reset gives every Cookie a sub-degree yaw
+    # (measured: up to 0.43 degrees, all 80 of them), and pinning only the position leaves
+    # them perfectly upright -- which is a different scene, and a visible one: the Cookies sit
+    # in the front and left-wrist views, so the two stacks then render different pixels and
+    # score 5 against 10 on the same arrangement.  The field is optional so an older dump
+    # still loads.
+    quaternions = scene.get("cookie_quaternions")
     for index, position in enumerate(scene["cookie_positions"]):
         offset = perturb(cookie_noise_m)
-        env.set_cookie_pose(index, tuple(np.asarray(position, dtype=float) + offset))
+        quaternion = None
+        if quaternions is not None:
+            quaternion = tuple(np.asarray(quaternions[index], dtype=float))
+        env.set_cookie_pose(
+            index, tuple(np.asarray(position, dtype=float) + offset), quaternion
+        )
     _set_joints(env, scene["joints"], rng, pose_noise_rad)
     mujoco.mj_forward(env.model, env.data)
 
@@ -235,6 +247,11 @@ def scene_fingerprint(env) -> dict[str, Any]:
         "bodies": bodies,
         "joints": joints,
         "cookie_positions": np.asarray(env.cookie_positions, dtype=float).tolist(),
+        "cookie_quaternions": [
+            np.asarray(env.data.qpos[int(env.model.jnt_qposadr[j]) + 3 :
+                                     int(env.model.jnt_qposadr[j]) + 7], dtype=float).tolist()
+            for j in env._cookie_joints
+        ],
     }
 
 
