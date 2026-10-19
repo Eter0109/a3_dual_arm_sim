@@ -693,3 +693,41 @@ complete description of an evaluation.**  Two stacks can agree to 0.0004 mm on t
 and still disagree by 5 cookies because one of them jitters and the other does not.  Any
 comparison between these two benchmarks has to state (a) the arrangement, (b) the jitter model,
 and (c) whether the sampler is deterministic -- in that order, and all three.
+
+### 9.10 Both explanations above are wrong, and what is left
+
+Two measurements, made after writing 9.9, remove every difference it blamed.
+
+**Main's "frozen" is zero-jitter too.**  Resetting main's benchmark for each of the 20 seeds and
+reading the bins *before* any rollout gives the same pose every time: target (0.095000,
+0.100000), source (0.175000, 0.315000), **0.0000 mm spread**.  The 0.2 mm variation quoted in
+9.9 came from `EpisodeScore.target_bin_pos`, which `episode_execution.py:289` reads *after* the
+rollout -- it is the arm nudging the box, not the reset.  So our hook and main's reset start
+from the identical arrangement, and the 7.45-vs-5.00 "convergence" that 9.9 used as evidence was
+simply our evaluation perturbed away from a favourable point.  Gaussian jitter of main-like size
+is a sensitivity probe, not a reproduction of main.
+
+**The renderers agree at the same state.**  One state (step 300 of the expert replay) written
+into both environments joint by joint -- 99 joints by name, qvel zeroed -- renders as:
+
+| camera | MAE | max | pixels off by >2/255 |
+|---|---|---|---|
+| front | **0.000** | 1 | 0.00 % |
+| left_wrist | **0.010** | 76 | 0.04 % |
+| right_wrist | **0.000** | 0 | 0.00 % |
+
+So the 0.61-2.12 left-wrist difference measured during replay was entirely the 0.45 mm of
+trajectory drift that travelled with it, not the renderer.  The two stacks see the same pixels
+when they are in the same state.
+
+**What is actually left.**  Identical reset state, identical pixels at equal state, `state`
+equal to 5.4e-4, and a fixed action sequence landing within 0.454 mm -- yet main reads 5.00 on
+three launches and this branch reads 10.00 on two of three, with 5.25 on the third.  The one
+number that does not fit is our own third launch: the same stack, same scene, same weights,
+produced both 5.25 and 10.00.  That is a per-process coin flip in fp32 GPU inference, and it
+means the 5-vs-10 split between stacks is, so far, **not distinguishable from that coin** --
+three launches on one side and three on the other cannot separate a 50/50 coin from a biased
+one.  Estimating the rate is what the `mode_rate` runs are for; until it exists, the correct
+statement is the deflating one: on this arrangement the checkpoint either finishes both batches
+or stalls after the first, the outcome is decided somewhere inside fp32 inference, and neither
+benchmark can currently tell you which it will be.
