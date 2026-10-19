@@ -6,7 +6,7 @@
 
 ## 运行
 
-在仓库根目录安装现有环境依赖，或将 `src` 加入 `PYTHONPATH`。默认执行器是当前 main 的仿真真值专家，定位也明确标记为 `simulator_truth`。
+在仓库根目录安装现有环境依赖，或将 `src` 加入 `PYTHONPATH`。默认 `--executor grounded` 是目标绑定的接触抓取技能，定位明确标记为 `simulator_truth`。旧专家通过 `--executor expert` 保留作参考。
 
 ```bash
 MUJOCO_GL=egl PYTHONPATH=src python -m a3_batch_skills \
@@ -77,8 +77,90 @@ python -m a3_batch_skills --task 2x5 --exercise-adjustment \
 
 2026-10-19 的开发种子 26124：参考执行器完成 2×5（556 步）、2×10（1303 步）；4 mm 显式重新夹放检查后继续完成两批（824 步）。这些是单种子的集成结果，不能推导成功率或 VLA 泛化改善。模型与定位模式须分别报告。
 
-早期 π0.5 接入检查发现其第一批实际搬动编号 2–6，而不是预设 0–4；修正实际批次跟踪后，750 步开发检查完成了第一批，第二批尚未抓稳。该次为显式 auto 来源、尚未启用实际预抓取对齐的版本；不能标为两批成功，也不能与最终对齐版直接合并统计。新的定位和单批技能仍需要单独验证。
+早期 π0.5 接入检查第一批实际搬动编号 2–6。750 步总预算中，第一批占用 322 步，第二批只有约 428 步，且早期版本仍存在跨缺口分组问题。该次显式 auto 来源检查不能作为现有模型缺乏连续抓取能力的证据。新分支已修正缺口分组，原检查记录保留。
 
 另一次启用物理预抓取对齐的检查，在第一批 750 步预算到达时仍未完成抓取（总计 752 步包含状态切换），因此预对齐默认关闭。不能将参考专家的成功视为旧 π0.5 权重已经适应新技能起点；应通过单批片段和批次衔接数据后训练，再做配对对照。
 
 本模块借鉴旧 dev-cookie-manipulation 分支的技能边界和执行/验证结构，沿用当前 main 的环境、专家及动作约定；不整体回退旧相机或旧训练配置。
+
+## 目标绑定与每批重新定位
+
+`grounded` 在任何抓取动作之前，将所选五块绑定到原生接触控制器的候选入口。控制器不再另选一组，随后根据这组物体的实际位姿计算接近、预闭合、插入、夹紧和提起动作。每批重新建立控制器局部状态，并保留已完成物体记录，仿真不 reset。接近过程中若物体发生超过 3 mm 的位移或明显转动，最多重新定位三次；开始插入后不追逐位姿噪声。
+
+规划器优先选连续可用段的暴露端，不跨缺失编号拼组。目标绑定执行器还检查真实间隙、横向散开程度和可用夹持宽度。抓起后核对指定五块是否保持双指接触链，以及是否多带了其他物体。抓取的力、深度和滑落保护沿用原生控制器。
+
+```bash
+MUJOCO_GL=egl PYTHONPATH=src python -m a3_batch_skills.suite \
+  --output outputs/grounded_basic_dev --executors grounded \
+  --tasks 2x5 2x10 --episodes 20 --seed-start 26200 --workers 4
+
+# 改变来源列和场景扰动，不改变五块技能接口
+MUJOCO_GL=egl PYTHONPATH=src python -m a3_batch_skills.suite \
+  --output outputs/grounded_medium_dev --columns 2 --profile medium \
+  --episodes 4 --seed-start 26240 --workers 2
+```
+
+这是复用当前 main 接触抓取方法的几何参考，并非提出了新的抓取算法；完整工作流中的目标绑定、重新定位、放置及验证均显式记录。当前仅验证既有 2×5、2×10 场景，不声称支持任意盒型或坍塌状态。
+
+## π0.5 的干净配对对照
+
+```bash
+MUJOCO_GL=egl PYTHONPATH=src python -m a3_batch_skills.paired \
+  --output outputs/pi05_queue_pair \
+  --job /path/to/pi05_job --checkpoint /path/to/030000/pretrained_model \
+  --policy-module-dir /path/to/benchmark_research_v3 \
+  --camera-reference /path/to/training_camera_profile.json \
+  --prompt-file /path/to/original_training_prompt.txt \
+  --tasks 2x5 2x10 --seeds 26220 --video
+```
+
+该检查串行复用一份模型，比较 `continuous` 与 `queue_reset`。两组使用相同初始物理状态、RGB、原训练指令、相机、推理设置及总控制步数；逐项写入 `*_pair_check.json`。默认保留检查点自己的 `n_action_steps`，不再隐式从 16 改成 8；若显式调整 `--n-action-steps`，两组一起调整。
+
+`queue_reset` 只在五块已松手、连续稳定并且夹爪中点撤离至少 4 cm 后清空神经动作队列。它不额外移动机械臂，不做几何放置，不改变指令，不在批次边界重设随机种子。2×5/2×10 总预算分别为 1500/3000 步。宽松判据和原生最终结果分别记录。若 2×10 继续使用写有“两批/十块”的训练指令，这一指令迁移限制会写入协议，不能忽略。
+
+## 单批示范与明确的学习目标
+
+```bash
+MUJOCO_GL=egl PYTHONPATH=src python -m a3_batch_skills \
+  --task 2x5 --executor grounded --seed 26200 \
+  --record-skills --output outputs/skill_demo \
+  --camera-reference /path/to/training_camera_profile.json
+
+# --record-skills 也可用于 suite，自动覆盖多个起点和连续批次
+PYTHONPATH=src python -m a3_batch_skills.export \
+  --inputs outputs/skill_demo/skill_clips --output datasets/a3_goal_batch_left8
+```
+
+每批保存为独立片段，包括实际第一批起点及上一批撤离后的起点；保留连续任务中原本的物体状态，不把每段都伪造成干净初始场景。三相机无损 RGB、动作前左臂 8D 状态、同一步实际施加的左臂 8D 关节目标、阶段、物体局部坐标及全局步号对应。失败片段保留，但默认不导出为正确动作示范。导出后每批是独立的 LeRobot v3 episode，动作窗口不会跨批次。
+
+默认录制 `projected_batch_targets_v1`：在原三视角 RGB 上用青色框标记所选五块、绿色框标记本批目标区域，并使用固定的短技能指令。这是明确的目标输入，避免调度器知道目标而模型只收到泛化文字。状态、动作仍为 8D。当前目标框来自仿真真值投影，可能标出被遮挡物体的位置；因此这是一种有真值目标提示的协议，不能宣称为纯 RGB 感知能力。实际视觉部署仍需独立的目标定位来源。
+
+`--unmarked-skills` 记录无标记画面，适用于独立对照，不能与有标记片段无说明混用。只把数值位姿写进旁路元信息不会自动使原 VLA 使用这些数值。
+
+完成适配训练的检查点需同时保存 `goal_conditioning.json`，才能通过 `--goal-conditioned` 使用同一投影规则进行推理。该选项对旧 30k 权重默认关闭，不假定模型已经理解新标记。旁路中的仿真位姿和接触量不是额外的神经输入。
+
+## 数据审计和后续适配入口
+
+```bash
+PYTHONPATH=src python -m a3_batch_skills.audit \
+  --root datasets/a3_goal_batch_left8 \
+  --job /path/to/pi05_job --checkpoint /path/to/030000/pretrained_model \
+  --policy-module-dir /path/to/benchmark_research_v3
+```
+
+审计通过真实数据读取器检查：每批最后一帧的 50 步动作窗口中只有首行动作有效，后续均为填充；状态和动作与原始片段一致；既有 π0.5 预处理保留 `action_is_pad`。原片段目录应保持可访问，以完成精确对应审计。
+
+`a3_batch_skills.adapt` 是现有训练启动器的包装入口。参数 `--launcher`、`--dataset`、`--output` 后用 `--` 传入原先训练参数。它校验 8D 数据，保留受训状态投影，安装同时屏蔽时间填充和 8D 以外维度的 flow loss，并保留批次末尾的真实撤离帧。学习率、优化器、解冻范围与训练预算由原配置明确给定，包装器不擅自选择。原模型及原数据不覆盖。
+
+新训练示例的参数结构为：
+
+```bash
+PYTHONPATH=src python -m a3_batch_skills.adapt \
+  --launcher /path/to/pi05_job/repo/scripts/train_pi05_launcher.py \
+  --dataset datasets/a3_goal_batch_left8 --output outputs/pi05_batch_adapt \
+  -- --config_path=/path/to/existing_train_config.json \
+  --policy.path=/path/to/030000/pretrained_model \
+  --steps=5000 --save_freq=5000 --resume=false
+```
+
+该命令仅用于后续明确配置的适配训练。本轮导出的两段样例用于验证数据通路，不能作为足够的训练量或训练效果证据；本轮没有启动新的权重训练。

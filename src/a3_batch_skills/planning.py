@@ -21,7 +21,8 @@ def target_regions(slots, center_z):
 
 
 class BatchPlanner:
-    def __init__(self, env, *, source_column=1):
+    def __init__(self, env, *, source_column=1, require_geometry=False):
+        self.require_geometry = require_geometry
         self.regions = target_regions(env.TARGET_SLOTS_LOCAL, env._target_cookie_center_z)
         source = np.asarray(env.SOURCE_POSITIONS)
         columns = np.unique(source[:, 0])
@@ -42,11 +43,30 @@ class BatchPlanner:
     def next_goal(self, index, completed, scene):
         selected = None
         for column in self.column_orders:
-            for start in range(len(column) - 4):
-                candidate = column[start:start + 5]
-                if all(i not in completed and scene.cookies[i].in_source for i in candidate):
-                    selected = candidate
-                    break
+            # Select the exposed end of each uninterrupted available run. A
+            # missing object starts a new run, never a stitched five-object set.
+            runs, run = [], []
+            for i in column:
+                if i in completed or not scene.cookies[i].in_source:
+                    if run:
+                        runs.append(run)
+                    run = []
+                else:
+                    run.append(i)
+            if run:
+                runs.append(run)
+            for run in runs:
+                if len(run) < 5:
+                    continue
+                candidate = tuple(run[:5])
+                if self.require_geometry:
+                    from .grounding import validate_pick_group
+                    try:
+                        validate_pick_group(scene, candidate)
+                    except ValueError:
+                        continue
+                selected = candidate
+                break
             if selected is not None:
                 break
         if selected is None:

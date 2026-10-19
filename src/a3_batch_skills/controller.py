@@ -14,7 +14,8 @@ class BatchSkillController:
                  exercise_adjustment=False):
         self.env, self.provider, self.servo, self.executor = env, provider, servo, executor
         self.config = config or BatchConfig()
-        self.planner = BatchPlanner(env, source_column=self.config.source_column)
+        self.planner = BatchPlanner(env, source_column=self.config.source_column,
+            require_geometry=getattr(executor, "goal_grounded", False))
         self.phase = Phase.LOCATE
         self.batch_index = 0
         self.completed = []
@@ -62,6 +63,9 @@ class BatchSkillController:
         self.step += 1
         try:
             scene = self.provider.observe(observation)
+            update_scene = getattr(self.executor, "update_scene", None)
+            if update_scene is not None:
+                update_scene(scene)
             if scene.safety_stop:
                 raise RuntimeError("Environment safety stop")
             if self.phase != Phase.LOCATE and self.step - self.batch_started > self.config.max_batch_steps:
@@ -79,6 +83,7 @@ class BatchSkillController:
                     self.phase = Phase.TRANSFER
                 self._event("batch_started", object_ids=list(self.goal.cookie_ids),
                     preserved_completed=list(self.completed), localization=scene.source,
+                    goal_binding=getattr(self.executor, "goal_binding", "unconditioned_or_reference"),
                     target_positions=self.goal.target_positions.tolist())
                 return self.servo.hold()
             if self.phase == Phase.ALIGN_PICK:
@@ -94,6 +99,8 @@ class BatchSkillController:
                 observe_batch = getattr(self.executor, "observed_batch", None)
                 actual = observe_batch(scene, self.completed) if observe_batch else None
                 if actual is not None and set(actual) != set(self.goal.cookie_ids):
+                    if getattr(self.executor, "goal_grounded", False):
+                        raise RuntimeError("The goal-conditioned policy moved an unrequested group")
                     if not set(actual) <= self.planner.allowed_ids:
                         raise RuntimeError("Policy moved objects outside the requested source column; unrestricted tasks may use --source-column auto")
                     self.goal = BatchGoal(self.goal.index, actual, self.goal.target_positions)

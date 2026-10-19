@@ -97,4 +97,4 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
 
 ## Repeatable batch skills
 
-Run `python -m a3_batch_skills --task 2x5 --output outputs/batch_2x5` for the reference five-cookie loop. The module supports two/four batches, measured placement, bounded regrasp correction, and a left8 learned-policy adapter. Default localization is explicitly simulator truth; this is not a validated pure-vision VLA result. See [batch skill usage and validation](docs/batch_skills.md).
+Run `python -m a3_batch_skills --task 2x5 --output outputs/batch_2x5` for the goal-bound contact skill. Each batch remeasures the requested five cookies, executes the contact grasp, places and verifies them, then localizes the next group without resetting physics. The module also provides paired pi0.5 queue-reset diagnostics, short RGB/left8 skill recording, LeRobot v3 export and padding audits, and an optional continuation-training wrapper. Default localization and projected goal cues explicitly use simulator truth. These geometric results are not evidence of a trained pure-vision VLA improvement. See [batch skill usage and validation](docs/batch_skills.md).

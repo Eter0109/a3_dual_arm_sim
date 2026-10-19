@@ -54,13 +54,20 @@ class PolicyBatchExecutor:
     name = "learned_left8_with_geometric_placement"
     requires_prealign = True
 
-    def __init__(self, policy, servo, config, seed):
+    def __init__(self, policy, servo, config, seed, instruction_override=None):
         self.policy, self.servo, self.config, self.seed = policy, servo, config, seed
+        self.instruction_override = instruction_override
+        self.goal_grounded = callable(getattr(policy, "set_batch_goal", None))
+        self.goal_binding = "projected_target_cues" if self.goal_grounded else "unconditioned_policy"
+
+    @property
+    def instruction(self):
+        return self.instruction_override or self.goal.instruction
 
     def start(self, goal, completed, observation):
         from a3_dual_arm_sim.contracts import EpisodeContext
         self.goal = goal
-        self.policy.reset(EpisodeContext(self.seed, goal.instruction, self.policy.action_mode))
+        self.policy.reset(EpisodeContext(self.seed, self.instruction, self.policy.action_mode))
         hook = getattr(self.policy, "set_batch_goal", None)
         if hook is not None:
             hook(goal)
@@ -88,11 +95,11 @@ class PolicyBatchExecutor:
         return None
 
     def act(self, observation):
-        action = self.policy.act(observation, self.goal.instruction)
+        action = self.policy.act(observation, self.instruction)
         return self.servo.canonical(action)
 
     def pause(self):
         from a3_dual_arm_sim.contracts import EpisodeContext
         goal = getattr(self, "goal", None)
-        self.policy.reset(EpisodeContext(self.seed, goal.instruction if goal else "",
+        self.policy.reset(EpisodeContext(self.seed, self.instruction if goal else "",
                                          self.policy.action_mode))
