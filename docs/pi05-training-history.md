@@ -879,3 +879,45 @@ Cookies, i.e. on a scene that differs from main's benchmark by 0.43° of Cookie 
 genuine train/benchmark mismatch of exactly the kind this whole section has been chasing, and it
 is a property of the data, not of the evaluation: fixing the evaluation does not change what the
 policy was trained on.
+
+### 9.14 The re-collection: same seeds, same schedule, one field more (10-19)
+
+The dump was rebuilt with the field (`/tmp/dump_main_scene.py` writes `cookie_quaternions`
+from each Cookie's free-joint `qpos[3:7]`) and re-verified before a single episode was recorded:
+quaternion difference **0.000e+00, 0 of 80 different**, render means `80.070938` front /
+left wrist `-0.000011` / right wrist `0.000000` against main's own frames.  The scene adapter
+needed no further change -- `apply_scene` already read the optional field.
+
+The collection is a re-run of seeds **2000-2999**, not a new seed range: the point is to change
+one input and hold everything else fixed, so the new 1000 episodes are comparable episode by
+episode with the old ones.  Command line identical to the first pass except the dump:
+
+```
+--main-aligned /tmp/main_scene_full.json --position-noise 0 --align-pose-noise 0 \
+--align-bin-yaw-noise 0.005
+```
+
+20 shards x 50 episodes, 1000 attempts, **1000 accepted** (100.0%), both gates passed:
+non-finite 0, parquet rows 425,393 == frame sum, modes 250/250/250/250.  Frame counts are the
+same shape as the first pass (full 548/548.7/550, prefill 302/302.0/303, perturb 548/548.8/550,
+prefill_perturb 302/302.1/303) -- which is the expected outcome: pinning the Cookies' rotation
+changes what the cameras see, not how long the expert takes.
+
+The frame gate moves in the right direction, and only on the two cameras that can see a Cookie:
+
+| first frame vs main's render, MAE of 255 | revision 1 (upright) | revision 2 (oriented) |
+|---|---|---|
+| front | 2.248 | **2.198** |
+| left wrist | 3.339 | **3.061** |
+| right wrist | 1.475 | 1.475 |
+
+Right wrist is bit-identical across the two revisions, which is the control: that camera sees no
+Cookie at reset, so a change there would have meant something other than the orientations had
+moved.
+
+**The second arm.**  Same recipe as 9.1, base = `a3_b2_aligned4000/checkpoints/004000` (i.e. the
+20k incumbent plus the first 4000 aligned steps), 4000 more steps on the re-collected set,
+cosine 5e-06 -> 2.5e-07, warmup 133, batch 6, seed 1000, `--save_freq=1000`, ~1.21 s/step,
+output `a3_b2_aligned_v2_4000`.  Launcher: `/root/autodl-tmp/logs/aligned_v2_finetune.sh`.
+Evaluation to follow on `/tmp/main_scene_full.json` with `A3_PI05_DETERMINISTIC=1
+A3_PI05_FP32=1`, 20 seeds, 900 steps.
