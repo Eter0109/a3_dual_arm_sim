@@ -622,3 +622,35 @@ The checkpoint table in 9.4 has to be read with that in mind: 4.25 / 0.00 / 5.00
 the 20k zero and the 2000 collapse (0/20 twice, two sampler seeds) are large enough to survive
 it.  Re-running the four checkpoints deterministically is the first thing to do before any of
 them is called better than another.
+
+### 9.8 The rebuilt table, and the variance that survives determinism
+
+Five checkpoints, `A3_PI05_DETERMINISTIC=1 A3_PI05_FP32=1`, `A3_PI05_SEED=0`, 20 seeds, 900
+steps, each scored against its own training statistics (`a3_b2_merged` for the 20k incumbent,
+the aligned set for the four fine-tuned ones):
+
+| checkpoint | mean | distribution |
+|---|---|---|
+| 20k incumbent | **0.00** | {0: 20} |
+| +1000 | 2.30 | {0: 6, 1: 3, 2: 1, 3: 2, 4: 5, 5: 3} |
+| +2000 | 2.50 | {0: 10, 5: 10} |
+| +3000 | 7.40 | {5: 8, 9: 12} |
+| +4000 | **10.00** | {10: 20} |
+
+This is a much cleaner story than 9.4: 20k cannot do the arrangement at all, 1000-2000 learn
+one batch and stall, 3000 nearly always finishes both, and 4000 finishes both on every seed.
+Notably +2000 is no longer a collapse -- the "V" in 9.4 was the sampler, not the training.
+
+**The residual variance is between processes, not within one.**  The 4000 row was measured in
+three separate launches of the same command: **5.25** {5:19, 10:1}, then **10.00** {10:20},
+then **10.00** {10:20}.  Inside a launch the rollouts are reproducible (the same seed twice in
+one process gives the same score), and `CUBLAS_WORKSPACE_CONFIG` is set before any CUDA work,
+so this is not the usual cuBLAS-workspace trap -- fp32 GPU inference on this card simply is not
+bit-identical from process to process, and this task's margin is thinner than that.
+
+Practical reading: the **20k zero is solid** (four independent measurements, every one 0), the
+ordering 1000 < 2000 < 3000 < 4000 is wider than the between-launch spread at every step except
+3000->4000, and the 4000 figure should be quoted as **"10.00 on two launches out of three,
+5.25 on the third"** rather than as a single number.  Getting an error bar on the other three
+points costs three launches each -- 12 minutes apiece -- and is worth doing before any of them
+is used to choose a training recipe.
