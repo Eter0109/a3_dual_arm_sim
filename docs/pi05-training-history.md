@@ -921,3 +921,60 @@ cosine 5e-06 -> 2.5e-07, warmup 133, batch 6, seed 1000, `--save_freq=1000`, ~1.
 output `a3_b2_aligned_v2_4000`.  Launcher: `/root/autodl-tmp/logs/aligned_v2_finetune.sh`.
 Evaluation to follow on `/tmp/main_scene_full.json` with `A3_PI05_DETERMINISTIC=1
 A3_PI05_FP32=1`, 20 seeds, 900 steps.
+
+### 9.15 The second arm did not learn anything, and the third arm asks the real question (10-19)
+
+The second arm continued `a3_b2_aligned4000/004000` for 4000 steps on the corrected data.  Its
+loss was **0.002 at step 20**, against **0.093 at step 20** for the first arm: the base already
+fit a dataset that differs from the one it was trained on only in the Cookies' sub-degree yaw.
+There was no gradient left to follow, so the 4000 steps were a warm restart of the cosine at
+5e-06 with nothing to optimise -- drift, not training.
+
+It shows up as a regression, measured on main's actual reset (same instrument, same scene
+digest `cookies 80 sha=535695d0`, yaw noise 0, det+fp32, 20 seeds, 900 steps):
+
+| checkpoint | trained on | main's scene | rev-1 upright scene |
+|---|---|---|---|
+| `a3_b2_aligned4000/004000` | rev-1, 4000 steps from 20k | **7.25** {5: 11, 10: 9} | 10.00 {10: 20} |
+| `a3_b2_aligned_v2_4000/003000` | rev-2, +3000 from above | 5.00 {5: 20} | -- |
+| `a3_b2_aligned_v2_4000/004000` | rev-2, +4000 from above | 5.00 {5: 20} | 9.75 {10: 19, 5: 1} |
+| main's own benchmark | -- | 5.00-5.25 | -- |
+
+Three checkpoints of the arm and its base: the collapse is present by 3000 and stays, and it is
+specific to the scene where the second-batch insertion is hard (upright 9.75 against 10.00, a
+0.25 difference; oriented 5.00 against 7.25, a 2.25 difference).
+
+**What the policy does instead.**  Seed 0, step by step: the first batch is placed by step 250
+in both checkpoints, and both have grabbed the second batch by step 400.  Then they part --
+the base releases into the box by step 500 and reads 10/10 at 850; the drifted arm keeps
+holding, is still at `in_source 75` at step 800, releases at 850, and every one of the five
+lands `below_rim, on_the_floor, OUT` at floor +28.8 mm.  So it is not a forgotten skill: it is
+a second-batch insertion that misses by roughly the box wall, with the Cookies held for 450
+extra steps first.
+
+**The data itself is not the suspect, and this was checked before blaming it.**  rev-1 and rev-2
+were collected on the same seeds with the same command; comparing the two datasets file by file:
+
+| check | result |
+|---|---|
+| first frame, `right_wrist` (sees no Cookie) | **MAE 0.000000** -- bit-identical |
+| first frame, `front` / `left_wrist` (see the Cookies) | 0.691 / 1.305 |
+| same state rendered upright vs oriented, same camera pattern | 0.222 / 2.116 / **0.000** |
+| `meta/stats.json` means and stds, all keys | identical to 1e-6 (only `count` differs, by 39 frames) |
+| episodes, frames, per-camera video files (10 / 10 / 4) | identical |
+
+The right-wrist camera is the control: a change there would have meant something other than the
+Cookie orientations had moved, and there is none.  The dataset is what it claims to be.
+
+**So the question the second arm was meant to answer is still open**, and it cannot be answered
+by continuing -- only by starting from the 20k incumbent again on the corrected data
+(`aligned_v3_finetune.sh`, same recipe, same seeds, same four conditions).  That arm is running;
+its 1000/2000/3000/4000 checkpoints are all scored, because the slope matters more than the
+endpoint when an arm is known to be able to drift.
+
+**The published dataset is rev 2.**  `yunsx114/a3-dual-arm-cookie-main-aligned` was overwritten
+in place (same repository id, no new one), 39 files, `MANIFEST.sha256` regenerated; the card now
+documents the orientation correction and states that rev 1 is superseded.  Verified after
+upload: `meta/info.json` reads 1000 episodes / 425,393 frames, the card sits at the repository
+root, the remote `MANIFEST.sha256` is byte-identical, and two downloaded files (`file-001.parquet`,
+one left-wrist video) hash to the same values as the local bundle.
