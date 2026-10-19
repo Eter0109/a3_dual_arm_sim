@@ -654,3 +654,42 @@ ordering 1000 < 2000 < 3000 < 4000 is wider than the between-launch spread at ev
 5.25 on the third"** rather than as a single number.  Getting an error bar on the other three
 points costs three launches each -- 12 minutes apiece -- and is worth doing before any of them
 is used to choose a training recipe.
+
+### 9.9 Correction: 9.7's "both 5.25" was a coincidence, and the scene was under-specified
+
+Section 9.7 closed by reporting 5.25 on both stacks and calling the gap closed.  Repeated
+launches say that was one number meeting one number:
+
+| stack, 4000 checkpoint, det+fp32 | launch 1 | launch 2 | launch 3 |
+|---|---|---|---|
+| main's benchmark, `--no-randomize` | 5.25 {5:19, 10:1} | **5.00** {5:6} | **5.00** {5:6} |
+| this branch, aligned scene, zero jitter | 5.25 {5:19, 10:1} | **10.00** {10:20} | **10.00** {10:20} |
+
+Both numbers are real and both are reproducible *for their stack* -- and they disagree.  The
+reason is not physics and not the renderer; it is that **the two "frozen" scenes are not the
+same kind of frozen.**  Main's `--no-randomize` still moves both bins by up to 0.2 mm from
+episode to episode (measured from its own per-episode `target_bin_pos`: 94.8-95.0 mm in x,
+99.2-99.9 mm in y), while this branch's alignment hook pins them to the dump to the last digit.
+So our evaluation was strictly *more* frozen than the benchmark it was meant to reproduce, and
+the exactly-frozen arrangement happens to be a favourable point: all 20 seeds are the same
+rollout, and it succeeds.
+
+Give our evaluation the same 0.2 mm of jitter main has, and the uniform tens break up:
+
+| our aligned scene | mean | distribution |
+|---|---|---|
+| zero jitter | 10.00 | {10: 20} |
+| `--align-bin-noise 0.0002` | **7.45** | {5: 10, 9: 1, 10: 9} |
+
+That is the same bimodal behaviour main shows, and it closes most of the gap: with jitter, 7.45
+against main's 5.00-5.25 instead of 10.00 against 5.25.  What is left (~2 cookies) is not yet
+attributable, because the two jitters are not the same shape -- ours is Gaussian sigma 0.2 mm
+on both bins, main's is a small systematic per-episode offset that its own reset produces.
+Matching it exactly means replaying main's recorded per-episode bin offsets through our hook,
+which is the next measurement to make, not an argument to have.
+
+The methodological lesson, and the reason this section exists: **"the same scene" is not a
+complete description of an evaluation.**  Two stacks can agree to 0.0004 mm on the arrangement
+and still disagree by 5 cookies because one of them jitters and the other does not.  Any
+comparison between these two benchmarks has to state (a) the arrangement, (b) the jitter model,
+and (c) whether the sampler is deterministic -- in that order, and all three.
