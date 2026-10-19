@@ -788,3 +788,50 @@ and diff.  If they are identical, then the two stacks are feeding the same model
 and the mode difference is inside fp32 inference -- at which point it is not a bug in either
 benchmark but a property of the instrument, and the only honest response is to quote
 distributions over launches rather than single numbers.
+
+### 9.12 The hash comparison: the model is deterministic, the client is not
+
+`a3_bridge_server.py` grew an env-gated `A3_LOG_IO_SHA` that prints a hash of every inference's
+input arrays and output actions -- the single place both stacks pass through, so a difference
+there cannot be blamed on anything downstream.
+
+**1. The model answers identically to identical input.**  Two separate launches of *this* stack,
+same scene, same seed, 150 steps = 10 chunks:
+
+```
+inputs identical across the two runs:  True
+outputs identical across the two runs: True
+```
+
+Every chunk, input *and* output.  So fp32 + `A3_PI05_DETERMINISTIC` really does make inference a
+function of its input, across processes; the earlier 5.25-versus-10.00 spread within this stack
+has to come from the input, not from the model.
+
+**2. Across the stacks the input differs at step 0, in the images only.**
+
+| array | this branch | main | same? |
+|---|---|---|---|
+| `observation.state` | 7ad58774b8e2 | 7ad58774b8e2 | **yes** |
+| `right_wrist_view` | 7da91cb49086 | 7da91cb49086 | **yes** |
+| `front_view` | e26a8afa735b | f6b222d76169 | no |
+| `left_wrist_view` | bd7feac43a7d | 7b64befb997a | no |
+
+**3. Everything upstream of those images is bit-identical**, measured directly:
+
+* bins after each stack's own reset: identical;
+* **all 80 Cookie poses after each stack's own reset: max 0.000000 mm, 0 of 80 different**;
+* the joint state the model receives: same hash;
+* the raw rendered observation at that state: **MAE 0.0000, max 0, 0 pixels different, all
+  three cameras**.
+
+So the two simulators, at their own resets, are bit-for-bit the same scene; the model is
+deterministic; and yet the two *clients* hand the bridge different `front_view` and
+`left_wrist_view` tensors.  Both resize with `cv2.INTER_AREA` to 224x224 (`observation.py` and
+`bench_main_20k.py:238` agree on the filter), so the difference must be in what each client
+feeds that resize or how it names/orders what it feeds it.
+
+That is where the 5-versus-10 lives: **a client-side image-preparation difference**, amplified by
+900 steps of contact.  It is not the scene, not the renderer, not the physics, not the judge, and
+not the sampler.  The next step is one log line with shape/dtype/mean per array on our side --
+the sweep's bridge log did not capture it in the run above -- and then a diff that names the
+line of code.

@@ -31,6 +31,7 @@ one ruler.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -284,6 +285,11 @@ def load_inference(adapter_path: Path, config: dict[str, Any]) -> tuple[Any, Any
     return load(config), infer
 
 
+#: Print a hash of every inference's input and output.  Off by default: it is a diagnostic,
+#: and the log has one line per chunk rather than one per episode.
+_LOG_IO_SHA = os.environ.get("A3_LOG_IO_SHA", "") not in ("", "0")
+
+
 def serve_stream(
     model: Any,
     infer: Any,
@@ -344,11 +350,33 @@ def serve_stream(
                 timestamp=fields.get("timestamp"),
                 arrays=arrays,
             )
+            if _LOG_IO_SHA:
+                # The one place both stacks pass through.  A hash of exactly what the model is
+                # handed separates "the upstream observations differ" from "the model answers
+                # differently to the same bytes" -- which no rollout can tell apart.
+                digest = hashlib.sha256()
+                parts = []
+                for name in sorted(request.arrays):
+                    block = np.ascontiguousarray(request.arrays[name])
+                    digest.update(name.encode())
+                    digest.update(block.tobytes())
+                    parts.append(
+                        f"{name}={block.shape}/{block.dtype}/"
+                        f"{float(np.asarray(block, dtype=np.float64).mean()):.6f}/"
+                        f"{hashlib.sha256(block.tobytes()).hexdigest()[:8]}")
+                digest.update(request.task.encode())
+                print(f"[in-sha] step={request.step} {digest.hexdigest()[:16]} "
+                      + " ".join(parts), file=sys.stderr, flush=True)
             if lock is None:
                 actions, space, units, info = _coerce_chunk(infer(model, request))
             else:
                 with lock:
                     actions, space, units, info = _coerce_chunk(infer(model, request))
+            if _LOG_IO_SHA:
+                out = hashlib.sha256(
+                    np.ascontiguousarray(np.asarray(actions)).tobytes()
+                ).hexdigest()[:16]
+                print(f"[out-sha] step={request.step} {out}", file=sys.stderr, flush=True)
             write_frame(
                 stream_out,
                 encode_message(
