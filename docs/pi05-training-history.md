@@ -1141,3 +1141,39 @@ the part every checkpoint gets right -- is itself occasionally lost.
 
 The practical reading: report the distribution, name the stack and the contract, and stop
 attributing differences of this size to the model.
+
+### 9.19 A fixed half-millimetre moves eleven of twenty seeds, and it moves them *one way* (10-20)
+
+9.18 perturbed the scene randomly per episode and scattered the outcomes.  A real second stack
+does not scatter: it applies *the same* slightly-different physics to every episode.  So the same
+experiment was repeated with a single fixed offset -- the target bin moved +0.454 mm in x, which
+is the size of the replay residual between the two stacks -- and nothing else changed.
+
+| scene (same 20 seeds) | mean | distribution | seeds that changed |
+|---|---|---|---|
+| frozen | 7.75 | {5: 9, 10: 11} | -- |
+| target bin **+0.454 mm fixed** | **8.80** | {4: 4, 10: 16} | **11 / 20** |
+
+Seven of the nine "5" seeds become 10.  Two tens drop to 4.  Nothing about the policy changed --
+only where the box is, by half a millimetre.
+
+**What this settles.**  The 5-vs-10 outcome is not a coin flip that noise decides; it is a
+deterministic function of a sub-millimetre geometric relationship between the second batch, the
+slots and the box.  Each seed sits on one side of that relationship, and the side is decided by
+detail at the 1e-4 m scale.  A stack-to-stack residual of 0.454 mm is therefore *large enough to
+pin the whole distribution*, which is exactly what is observed: our stack reads ~50 % tens
+reproducibly, main's reads 0 % tens reproducibly.  The direction is stable because the bias is
+stable, not because we were lucky 4 times.
+
+**What it does not settle.**  The sign.  The +0.454 mm offset made *our* stack better, not worse,
+so "our stack scores higher" is not evidence that it is the more faithful simulator -- a shift of
+the same size in the other direction could plausibly have hurt just as much.  The honest claim is
+that the two stacks differ by an amount that dominates this task's outcome, with a sign we cannot
+derive from first principles.
+
+**The actionable consequence is about the policy, not the stack.**  Nine of twenty seeds miss the
+second-batch insertion by less than half a millimetre, and they miss it the same way every time.
+The dataset pinned the box (only a 0.005 rad yaw draw), so the policy never saw a placement error
+of that size during training and has no reason to be robust to one.  Small box jitter in
+collection -- ±0.5 mm, which is the scale that matters -- is the change most likely to remove the
+knife-edge, and it is worth more than any further alignment of the two simulators.
