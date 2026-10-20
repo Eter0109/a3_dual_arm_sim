@@ -1099,3 +1099,45 @@ rollout-level comparison of the two stacks on the *same* observation stream, whi
 already bit-identical for `right_wrist_view` and `observation.state` and differs only in the two
 Cookie-facing views; (3) demonstrations filtered for exact-slot placement, which is the one thing
 the current data never asked for.
+
+### 9.18 The task is knife-edge at the micrometre, so the cross-stack gap cannot be "aligned away" (10-20)
+
+The render now matches between the stacks to 0.0009 / 0.0136 / 0.0000 of 255 at an equal joint
+state, and a 548-step identical-action replay lands every Cookie within 0.454 mm on both.  Those
+are the residuals.  This section asks whether that size of residual can matter -- by perturbing
+the scene on *one* stack, far below the residual, and re-running the same 20 seeds.
+
+The perturbation is target-bin yaw noise, seeded per episode: 1e-4 rad is 0.006 degrees, i.e.
+~5 micrometres at the box rim, 50x smaller than the 0.005 rad the dataset itself varies and 70x
+smaller than the 0.43-degree Cookie yaw the alignment fix restored.
+
+| scene | mean | distribution | seeds that changed verdict vs no perturbation |
+|---|---|---|---|
+| frozen (yaw 0) | 7.75 | {5: 9, 10: 11} | -- |
+| + 1e-4 rad (5 um) | 6.60 | {0: 2, 3: 1, 4: 1, 5: 7, 10: 9} | **10 / 20** |
+| + 1e-2 rad (0.5 mm) | 6.10 | {0: 3, 4: 1, 5: 8, 9: 2, 10: 6} | **14 / 20** |
+
+Ten of twenty episodes change their score when the box is rotated by five micrometres.  Two seeds
+that read 10 collapse to 0, one drops to 3; two seeds that read 5 jump to 10.  The first batch --
+the part every checkpoint gets right -- is itself occasionally lost.
+
+**Consequences, in order of how much they change what is worth doing.**
+
+1. **Per-seed cross-stack comparisons are meaningless.**  A stack difference of 0.454 mm is ~90x
+   the perturbation that flips ten seeds.  "Our stack gets 10, main's gets 5" on a given seed is
+   not evidence about the policy; it is a coin flip whose bias is set by sub-micron numerics.
+2. **20 seeds cannot resolve a 7.75-versus-5.00 gap on this task.**  With 10/20 seeds unstable
+   under a change far smaller than the between-stack residual, the binomial noise floor of a
+   20-episode comparison is of the same order as the effect.  Distributions over hundreds of
+   seeds, or a continuous score, are the only honest instruments here.
+3. **No amount of further scene alignment will close it.**  The scene already matches to 0.000 mm
+   / 0.000e+00, the pixels to ~0.01/255, and the dynamics to 0.45 mm; each of those is *larger*
+   than a perturbation that already moves the outcome.  The remaining gap is not a bug to find,
+   it is the task's own sensitivity to floating-point detail across two independent simulators.
+4. **What this does not excuse.**  Main's 0/20 at 5.00 is a genuine one-batch plateau in *that*
+   stack, and the relaxed-contract 22/40 tens is genuine in this one; both are real observations
+   of their own instrument.  They just do not estimate the same quantity, and neither is a
+   measurement of "the policy" to better than the sensitivity above.
+
+The practical reading: report the distribution, name the stack and the contract, and stop
+attributing differences of this size to the model.
