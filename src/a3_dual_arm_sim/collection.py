@@ -214,6 +214,7 @@ def collect_dataset(
     save_failed_episodes: bool = False,
     rollover_mb: float | None = None,
     post_reset: Any = None,
+    post_reset_description: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect accepted episodes of one scene, and write ``collection_summary.json``.
 
@@ -430,6 +431,11 @@ def collect_dataset(
         "scene_randomization_m": scene_randomization,
         "position_noise_m": applied_position_noise,
         "yaw_noise_rad": applied_yaw_noise,
+        # A `post_reset` hook overwrites the layout *after* the environment's own reset, so the
+        # two fields above describe a perturbation that no longer exists in the frames.  Three
+        # datasets were collected through such a hook before this field existed, and each time
+        # the only record of the real distribution was the launcher's command line.
+        **({"post_reset": post_reset_description} if post_reset_description else {}),
         "requested_episodes": episodes,
         "accepted_episodes": accepted,
         "attempts": len(results),

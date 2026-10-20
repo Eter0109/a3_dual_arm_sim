@@ -127,7 +127,12 @@ def apply_scene(
     *,
     rng: np.random.Generator | None = None,
     bin_noise_m: float = 0.0,
+    bin_noise_dist: str = "uniform",
+    bin_noise_horizontal_only: bool = True,
     cookie_noise_m: float = 0.0,
+    cookie_noise_dist: str = "uniform",
+    cookie_noise_horizontal_only: bool = True,
+    cookie_yaw_noise_rad: float = 0.0,
     bin_yaw_noise_rad: float = 0.0,
     pose_noise_rad: float = 0.0,
 ) -> dict[str, Any]:
@@ -135,23 +140,51 @@ def apply_scene(
 
     All noises default to zero: that is the evaluation scene, and it is what the pixel gate checks.
     The collection run passes non-zero values so the policy sees more than one exact pose.
+
+    The defaults reproduce main's own reset (`sim/randomization.py`): uniform per-axis draws,
+    horizontal components only, and a Cookie yaw re-drawn from the same uniform range.  They are
+    the defaults rather than the Gaussian ones this file started with because a Gaussian sigma is
+    not comparable to main's `+-noise` bound, and because the vertical component is not a
+    perturbation of main's task at all -- see `sample`.
     """
-    def perturb(scale: float, dims: int = 3) -> np.ndarray:
+    def sample(scale: float, dist: str, dims: int, horizontal_only: bool) -> np.ndarray:
+        """One draw of a noise term, in the shape main's own reset uses.
+
+        `uniform` with `horizontal_only=True` is main: `randomization.py` draws
+        `uniform(-s, s, size=2)` for each bin and nothing at all in z.  The vertical
+        component is not cosmetic -- this branch's source bin is a **mocap** body, so a
+        z offset never settles, and a 4 mm lift makes the episode unsolvable (measured:
+        0 of 1046 attempts beyond 4 mm were accepted).  Main never introduces it.
+        """
         if rng is None or scale <= 0.0:
             return np.zeros(dims)
-        return np.asarray(rng.normal(0.0, scale, size=dims))
+        if dist == "uniform":
+            values = np.asarray(rng.uniform(-scale, scale, size=dims), dtype=float)
+        elif dist in ("normal", "gaussian"):
+            values = np.asarray(rng.normal(0.0, scale, size=dims), dtype=float)
+        else:
+            raise ValueError(f"unknown noise distribution {dist!r}; use uniform or normal")
+        if horizontal_only and dims > 2:
+            values = values.copy()
+            values[2:] = 0.0
+        return values
+
+    def perturb(scale: float, dist: str, horizontal_only: bool) -> np.ndarray:
+        return sample(scale, dist, 3, horizontal_only)
 
     source = scene["bodies"]["source_bin"]
     target = scene["bodies"]["target_bin"]
     _place_source_bin(
         env,
-        np.asarray(source["world_pos"], dtype=float) + perturb(bin_noise_m),
+        np.asarray(source["world_pos"], dtype=float)
+        + perturb(bin_noise_m, bin_noise_dist, bin_noise_horizontal_only),
         _quat_from_matrix(_yaw_matrix(_yaw_from_quat(source["world_quat"]))),  # keep axis-aligned
     )
-    target_position = np.asarray(target["world_pos"], dtype=float) + perturb(bin_noise_m)
+    target_position = np.asarray(target["world_pos"], dtype=float) + perturb(
+        bin_noise_m, bin_noise_dist, bin_noise_horizontal_only
+    )
     target_yaw = _yaw_from_quat(target["world_quat"])
-    if rng is not None and bin_yaw_noise_rad > 0.0:
-        target_yaw += float(rng.normal(0.0, bin_yaw_noise_rad))
+    target_yaw += float(sample(bin_yaw_noise_rad, bin_noise_dist, 1, False)[0])
     _place_target_bin(env, target_position, _quat_from_matrix(_yaw_matrix(target_yaw)))
     mujoco.mj_forward(env.model, env.data)
 
@@ -163,10 +196,17 @@ def apply_scene(
     # still loads.
     quaternions = scene.get("cookie_quaternions")
     for index, position in enumerate(scene["cookie_positions"]):
-        offset = perturb(cookie_noise_m)
+        offset = sample(cookie_noise_m, cookie_noise_dist, 3, cookie_noise_horizontal_only)
         quaternion = None
         if quaternions is not None:
             quaternion = tuple(np.asarray(quaternions[index], dtype=float))
+        if rng is not None and cookie_yaw_noise_rad > 0.0:
+            # Main *replaces* each Cookie's orientation with a pure z rotation, it does not
+            # compose one onto a nominal pose (`_sample_source_cookie_pose`).  Replacing keeps
+            # the lift-out-of-upright fix this hook exists for: the dumped quaternions and a
+            # fresh uniform yaw are the same kind of object -- upright, yawed by under a degree.
+            yaw = float(sample(cookie_yaw_noise_rad, cookie_noise_dist, 1, False)[0])
+            quaternion = (float(np.cos(yaw / 2)), 0.0, 0.0, float(np.sin(yaw / 2)))
         env.set_cookie_pose(
             index, tuple(np.asarray(position, dtype=float) + offset), quaternion
         )
@@ -188,7 +228,12 @@ def post_reset_hook(
     path: str | Path,
     *,
     bin_noise_m: float = 0.0,
+    bin_noise_dist: str = "uniform",
+    bin_noise_horizontal_only: bool = True,
     cookie_noise_m: float = 0.0,
+    cookie_noise_dist: str = "uniform",
+    cookie_noise_horizontal_only: bool = True,
+    cookie_yaw_noise_rad: float = 0.0,
     bin_yaw_noise_rad: float = 0.0,
     pose_noise_rad: float = 0.0,
 ):
@@ -206,7 +251,12 @@ def post_reset_hook(
             scene,
             rng=np.random.default_rng(seed),
             bin_noise_m=bin_noise_m,
+            bin_noise_dist=bin_noise_dist,
+            bin_noise_horizontal_only=bin_noise_horizontal_only,
             cookie_noise_m=cookie_noise_m,
+            cookie_noise_dist=cookie_noise_dist,
+            cookie_noise_horizontal_only=cookie_noise_horizontal_only,
+            cookie_yaw_noise_rad=cookie_yaw_noise_rad,
             bin_yaw_noise_rad=bin_yaw_noise_rad,
             pose_noise_rad=pose_noise_rad,
         )

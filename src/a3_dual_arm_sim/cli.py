@@ -540,6 +540,7 @@ def _collect_scene(args: argparse.Namespace) -> int:
 
     scene = scene_by_name(args.scene, visual_style=args.visual_style)
     post_reset = None
+    post_reset_description = None
     if getattr(args, "main_aligned", None) is not None:
         from .main_alignment import post_reset_hook
 
@@ -549,10 +550,28 @@ def _collect_scene(args: argparse.Namespace) -> int:
         post_reset = post_reset_hook(
             args.main_aligned,
             bin_noise_m=args.align_bin_noise,
+            bin_noise_dist=args.align_noise_dist,
+            bin_noise_horizontal_only=not args.align_noise_3d,
             cookie_noise_m=args.position_noise,
+            cookie_noise_dist=args.align_noise_dist,
+            cookie_noise_horizontal_only=not args.align_noise_3d,
+            cookie_yaw_noise_rad=args.align_cookie_yaw_noise,
             bin_yaw_noise_rad=args.align_bin_yaw_noise,
             pose_noise_rad=args.align_pose_noise,
         )
+        # The hook runs after `env.reset` and rewrites the whole arrangement, so the summary's
+        # own noise fields describe a perturbation that is no longer in the frames.  This is
+        # the field that says what the dataset actually contains.
+        post_reset_description = {
+            "source_scene": str(args.main_aligned),
+            "bin_noise_m": args.align_bin_noise,
+            "bin_noise_dist": args.align_noise_dist,
+            "bin_noise_3d": bool(args.align_noise_3d),
+            "bin_yaw_noise_rad": args.align_bin_yaw_noise,
+            "cookie_position_noise_m": args.position_noise,
+            "cookie_yaw_noise_rad": args.align_cookie_yaw_noise,
+            "arm_pose_noise_rad": args.align_pose_noise,
+        }
     summary = collect_dataset(
         args.root,
         scene,
@@ -569,6 +588,7 @@ def _collect_scene(args: argparse.Namespace) -> int:
         save_failed_episodes=args.keep_failures,
         rollover_mb=getattr(args, "rollover_mb", None),
         post_reset=post_reset,
+        post_reset_description=post_reset_description,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -930,7 +950,36 @@ def parser() -> argparse.ArgumentParser:
         "--align-bin-noise",
         type=float,
         default=0.0,
-        help="Gaussian sigma in metres applied to both bins on top of the aligned arrangement",
+        help="Noise on the position of both bins, on top of the aligned arrangement",
+    )
+    collect.add_argument(
+        "--align-noise-dist",
+        choices=("uniform", "normal"),
+        default="uniform",
+        help=(
+            "Shape of the aligned-path noises.  `uniform` is main's: it draws "
+            "uniform(-s, s) per axis, so s is a bound.  `normal` treats s as a sigma, "
+            "which is not comparable to main's profile numbers."
+        ),
+    )
+    collect.add_argument(
+        "--align-noise-3d",
+        action="store_true",
+        help=(
+            "Also perturb the vertical axis.  Off by default because main never does, "
+            "and because this branch's source bin is a mocap body whose z offset cannot "
+            "settle -- measured: no attempt with |z| > 4 mm was ever accepted."
+        ),
+    )
+    collect.add_argument(
+        "--align-cookie-yaw-noise",
+        type=float,
+        default=0.0,
+        help=(
+            "Sigma/bound in radians for a per-Cookie yaw re-draw around upright.  "
+            "main's `basic` uses 0.015.  Without this the aligned hook keeps the dumped "
+            "orientations verbatim, so `--yaw-noise` has no effect on the aligned path."
+        ),
     )
     collect.add_argument(
         "--align-pose-noise",

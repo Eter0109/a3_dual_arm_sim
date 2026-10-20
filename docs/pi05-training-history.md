@@ -1275,3 +1275,54 @@ Reproduce:
 /tmp/bench_main_rand.sh      # bridge per checkpoint, then bench_main_20k.py --episodes 20
                              # --workers 20 --max-steps 900, no --no-randomize, no shim
 ```
+
+### 9.22 The aligned hook was perturbing an axis main never touches, and it cost two thirds
+of the collection (10-20)
+
+The first randomised collection (`a3_b2_main_aligned_v3_rand5mm`, 20 shards, seed 5000) was meant
+to widen the layout from rev-2's pinned arrangement to main's `basic` profile.  It ran at a 34.7 %
+expert acceptance rate, which was read as "5 mm of box shift is hard for the scripted expert".
+That reading was wrong.
+
+`apply_scene` drew `rng.normal(0, sigma, size=3)` for each bin, so the **vertical** axis moved too.
+Main never moves it: `sim/randomization.py` draws `uniform(-s, s, size=2)` for the bins and writes
+nothing in z.  And this branch's source bin is a **mocap** body (`_place_source_bin` writes
+`mocap_pos`), which is kinematic -- a lifted bin never settles, the Cookies stay where gravity put
+them, and the grasp becomes impossible.  Acceptance is almost exactly a function of that one
+number, recovered from the seeds the logs record:
+
+| \|source-bin z\| | attempts | acceptance |
+|---|---|---|
+| 0-1 mm | 394 | 80.2 % |
+| 1-2 mm | 381 | 76.6 % |
+| 2-3 mm | 360 | 67.8 % |
+| 3-4 mm | 301 | **3.3 %** |
+| 4-6 mm | 495 | **0.0 %** |
+| 6-10 mm | 447 | **0.0 %** |
+| > 10 mm | 104 | **0.0 %** |
+
+Accepted episodes: \|z\| median 1.39 mm, max 3.36 mm.  The horizontal components were *not*
+filtered -- accepted sd 4.78 / 4.64 mm against 4.93 / 5.09 mm over all attempts -- so the dataset
+was a clean sigma=5 mm horizontal set, but 65 % of the compute went into episodes that were
+unsolvable for a reason main's task does not contain.
+
+Four other places where the hook disagreed with `basic`, found in the same audit:
+
+| term | main `basic` | hook before | hook now |
+|---|---|---|---|
+| bins, horizontal | `uniform(+-10 mm)` per axis | `normal(0, 5 mm)` | `uniform(+-10 mm)`, default |
+| bins, vertical | **none** | `normal(0, 5 mm)` | none (`--align-noise-3d` to restore) |
+| target yaw | `uniform(+-0.03 rad)` | `normal(0, 0.03)` | `uniform(+-0.03)` |
+| Cookie xy | `uniform(+-0.3 mm)` | `normal(0, 0.3 mm)` in 3D | `uniform(+-0.3 mm)`, horizontal |
+| Cookie yaw | `uniform(+-0.015 rad)` | **0** -- `--yaw-noise` is overwritten by the hook | `--align-cookie-yaw-noise`, passed through |
+
+The Cookie-yaw row is the quiet one: `post_reset` runs after `env.reset`, so it replaces the
+quaternions with the dumped ones and the environment's own `yaw_noise_rad` never reaches a frame.
+A flag that is silently inert is worse than a flag that is missing.
+
+**Measured after the fix.**  Six episodes at `--align-bin-noise 0.01 --align-noise-dist uniform`
+with the horizontal-only default: **6 attempts, 6 accepted**.  Against 10-13 % at the same
+magnitude in 3D.  The vertical axis was the whole effect.
+
+`collection_summary.json` now also records a `post_reset` block with every sigma the hook applied,
+because this is the fourth dataset whose real distribution lived only in a launcher command line.
