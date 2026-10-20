@@ -1,4 +1,15 @@
 # A3 双臂 MuJoCo 仿真
+AI305-Project
+
+## 链接发布页
+
+SmolVLA模型数据(后续更新)：[`a3-cookie-multi-left8-40k-v1`](https://huggingface.co/Eter0109/a3-cookie-multi-left8-40k-v1)
+
+SmolVLA基座模型：[`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base)
+示范数据集：[`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)
+
+---
+
 
 A3 机器人双臂仿真项目，提供规则专家、键盘遥操作、可替换策略接口、LeRobot v3 数据录制，以及 SmolVLA 微调、ACT 训练和闭环评估。机器人每臂 7 个关节和一个夹爪控制量。
 
