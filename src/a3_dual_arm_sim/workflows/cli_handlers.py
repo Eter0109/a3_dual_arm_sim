@@ -307,6 +307,8 @@ def _train_smolvla(args: argparse.Namespace) -> int:
         offline=args.offline,
         save_freq=args.save_freq,
         num_workers=args.num_workers,
+        episode_indices=(json.loads(args.train_episodes_json.read_text())["train_episodes"]
+                         if args.train_episodes_json else None),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

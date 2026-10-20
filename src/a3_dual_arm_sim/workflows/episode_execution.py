@@ -44,6 +44,8 @@ class EpisodeExecution:
         config_path: Path | str | None = None,
         *,
         max_steps: int = 1000,
+        complete_demonstrations: bool = False,
+        strict_policy_completion: bool = False,
         randomize_boxes: bool = True,
         target_bin_noise_m: float = 0.010,
         target_bin_yaw_noise_rad: float = 0.030,
@@ -60,6 +62,8 @@ class EpisodeExecution:
         slot_tolerance_m: tuple[float, float] = (0.015, 0.005),
         wall_contact_tolerance_m: float = 0.030,
     ):
+        self.complete_demonstrations = complete_demonstrations
+        self.strict_policy_completion = strict_policy_completion
         self.randomization_settings = load_randomization_config(
             randomization_config, config=randomization_settings
         )
@@ -119,6 +123,8 @@ class EpisodeExecution:
             task_config=CookieTransferTaskConfig(
                 cookie_count=80,
                 required_cookies=10,
+                require_released=self.complete_demonstrations or self.strict_policy_completion,
+                terminate_on_success=not self.complete_demonstrations,
                 success_hold_steps=self.success_hold_steps,
                 wall_contact_tolerance_m=self.wall_contact_tolerance_m,
                 position_noise_m=self.cookie_noise_m,
@@ -150,7 +156,46 @@ class EpisodeExecution:
         return {"profile": self.profile or "basic", "source_column": column, "seed": seed}
 
     def _completed_episode_metadata(self, runner_policy: Any, info: dict) -> dict:
-        return {}
+        expert = getattr(runner_policy, "expert", None)
+        return {"grasp_reports": getattr(expert, "batch_reports", []),
+                "final_expert_phase": getattr(getattr(expert, "phase", None), "name", None)}
+
+    def _describe_incomplete_fill(self, info: dict) -> str:
+        """Explain why a non-expert, non-truncated episode missed the success contract.
+
+        The previous fallback reported "only N/M cookies in target box" even when the
+        real miss was a disturbed source bin (e.g. 69/70 cookies, target already full);
+        rebuild the reason from the env's info fields instead.
+        """
+        cookies_in_target = int(info.get("cookies_in_target", 0))
+        cookies_in_source = int(info.get("cookies_in_source", 0))
+        expected_source = (
+            len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
+        )
+        parts = []
+        if cookies_in_target != self.required_cookies:
+            parts.append(f"{cookies_in_target}/{self.required_cookies} cookies in target box")
+        if cookies_in_source != expected_source:
+            parts.append(
+                f"{cookies_in_source}/{expected_source} cookies left in source "
+                "(collateral disturbance)"
+            )
+        if not parts:
+            reasons = []
+            occupancy = info.get("target_slot_occupancy")
+            if occupancy is not None and any(int(index) < 0 for index in occupancy):
+                reasons.append("target slots not one-to-one matched")
+            if info.get("target_touches_all_walls") is False:
+                reasons.append("target does not touch all walls")
+            counts = info.get("target_column_counts")
+            if counts is not None and tuple(counts) != (10, 10):
+                reasons.append(f"target column counts {tuple(counts)} != (10, 10)")
+            hold = int(info.get("success_hold_count", 0))
+            required_hold = int(info.get("required_success_hold_steps", 0))
+            if required_hold and hold < required_hold:
+                reasons.append(f"valid fill held {hold}/{required_hold} control steps")
+            parts.append("; ".join(reasons) if reasons else "success condition not met")
+        return "; ".join(parts)
 
     def run_episode(
         self,
@@ -189,6 +234,21 @@ class EpisodeExecution:
         observation, info = env.reset(seed=seed, options=reset_options)
         self.last_attempt_metadata.update(getattr(env, "randomization_metadata", {}))
         self.last_attempt_metadata["reset_options"] = reset_options
+        if self.complete_demonstrations or self.strict_policy_completion:
+            from a3_dual_arm_sim.controllers.placement_order import front_camera_column_order
+            column_order = front_camera_column_order(env)
+            if self.complete_demonstrations:
+                env.demonstration_column_order = column_order
+                self.last_attempt_metadata.update(
+                    placement_order="front_camera_bottom_first",
+                    target_column_order=list(column_order),
+                    completion_contract="released_retracted_expert_done_stable",
+                )
+            else:
+                self.last_attempt_metadata.update(
+                    evaluation_target_column_order=list(column_order),
+                    evaluation_completion_contract="released_and_20_step_stable",
+                )
 
         try:
             if hasattr(runner_policy, "bind_env"):
@@ -220,12 +280,14 @@ class EpisodeExecution:
             if hasattr(recorder, "set_episode_metadata"):
                 recorder.set_episode_metadata(self.last_attempt_metadata)
         steps = 0
+        first_column_seen = [None, None]
         terminated = False
         truncated = False
 
         try:
             while steps < self.max_steps:
                 steps += 1
+                policy_start = time.perf_counter()
                 if hasattr(runner_policy, "act"):
                     try:
                         action = runner_policy.act(observation, task)
@@ -238,8 +300,18 @@ class EpisodeExecution:
                         f"Policy {runner_policy} does not have act() and is not callable"
                     )
 
+                policy_seconds = time.perf_counter() - policy_start
                 previous_observation = observation
                 observation, _, terminated, truncated, info = env.step(action)
+                if self.strict_policy_completion:
+                    counts = info.get("target_column_counts")
+                    if counts is None:
+                        occupancy = info.get("target_slot_occupancy", ())
+                        counts = [sum(int(cookie) >= 0 for cookie in occupancy[column::2])
+                                  for column in range(2)]
+                    for target_column in range(2):
+                        if first_column_seen[target_column] is None and counts[target_column] > 0:
+                            first_column_seen[target_column] = steps
                 if diagnostic is not None:
                     plugin = getattr(runner_policy, "plugin", runner_policy)
                     diagnostic.add_frame(
@@ -248,6 +320,7 @@ class EpisodeExecution:
                         info,
                         raw_action=getattr(plugin, "last_raw_action", None),
                         phase=getattr(runner_policy, "phase_name", ""),
+                        env=env, policy_seconds=policy_seconds,
                     )
                 if recorder is not None:
                     recorder.add_frame(previous_observation, info["applied_action"])
@@ -274,7 +347,22 @@ class EpisodeExecution:
             and cookies_in_source == expected_source
             and not info.get("safety_reason")
         )
+        if self.complete_demonstrations:
+            expert = getattr(runner_policy, "expert", None)
+            success = success and getattr(getattr(expert, "phase", None), "name", None) == "DONE"
+            success = success and bool(getattr(expert, "batch_reports", [])) and all(
+                r.get("released", False) or r.get("skipped", False) for r in expert.batch_reports
+            )
         self.last_attempt_metadata.update(self._completed_episode_metadata(runner_policy, info))
+        if self.strict_policy_completion:
+            front, back = self.last_attempt_metadata["evaluation_target_column_order"]
+            front_step, back_step = first_column_seen[front], first_column_seen[back]
+            self.last_attempt_metadata.update(
+                evaluation_first_column_seen_steps=first_column_seen,
+                evaluation_front_first=(front_step < back_step if front_step is not None
+                                        and back_step is not None and front_step != back_step
+                                        else None),
+            )
         if recorder is not None:
             success = (
                 success and cookies_in_source == expected_source and not info.get("safety_reason")
@@ -298,6 +386,7 @@ class EpisodeExecution:
         )
 
         phase = getattr(runner_policy, "phase_name", "")
+
         failure_reason = None
         if not success:
             if terminated:
@@ -309,9 +398,7 @@ class EpisodeExecution:
             ):
                 failure_reason = getattr(runner_policy.expert, "failure_reason", "expert_failed")
             else:
-                failure_reason = (
-                    f"only {cookies_in_target}/{self.required_cookies} cookies in target box"
-                )
+                failure_reason = self._describe_incomplete_fill(info)
 
         if should_close_env:
             env.close()

@@ -10,8 +10,42 @@ from a3_dual_arm_sim.workflows.benchmark import (
     CookieBatchBenchmark,
     EpisodeScore,
     ExpertPolicyAdapter,
+    make_cookie_benchmark,
     make_policy_adapter,
 )
+
+
+def test_incomplete_fill_reason_reports_source_disturbance():
+    benchmark = make_cookie_benchmark(task="2x5", max_steps=1)
+    reason = benchmark._describe_incomplete_fill(
+        {
+            "cookies_in_target": 10,
+            "cookies_in_source": 69,
+            "target_slot_occupancy": list(range(10)),
+            "target_touches_all_walls": True,
+            "count_fill": True,
+            "success_hold_count": 0,
+            "required_success_hold_steps": 5,
+        }
+    )
+    assert "69/70" in reason and "collateral" in reason
+
+
+def test_incomplete_fill_reason_reports_unmet_acceptance():
+    benchmark = make_cookie_benchmark(task="2x5", max_steps=1)
+    reason = benchmark._describe_incomplete_fill(
+        {
+            "cookies_in_target": 10,
+            "cookies_in_source": 70,
+            "target_slot_occupancy": [0, 1, 2, -1, 3, 4, 5, 6, 7, 8],
+            "target_touches_all_walls": False,
+            "success_hold_count": 2,
+            "required_success_hold_steps": 5,
+        }
+    )
+    assert "slots not one-to-one" in reason
+    assert "all walls" in reason
+    assert "held 2/5" in reason
 
 
 def test_benchmark_policy_protocol_conformance():

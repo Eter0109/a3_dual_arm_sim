@@ -126,6 +126,32 @@ def test_each_gripper_reports_touch_and_actuator_force(
         env.close()
 
 
+def _forward_copy(env: A3DualArmEnv) -> mujoco.MjData:
+    work = mujoco.MjData(env.model)
+    mujoco.mj_copyData(work, env.model, env.data)
+    mujoco.mj_forward(env.model, work)
+    return work
+
+
+def test_reset_and_step_export_derived_state_at_the_integrated_instant() -> None:
+    # mj_step integrates qpos/qvel last; anything the observation exports (sites,
+    # sensors, contacts) must be refreshed to that instant, not left one
+    # physics substep behind. See audits/control_20261013 probe measurements.
+    env = A3DualArmEnv(render_cameras=False)
+    try:
+        env.reset(seed=0)
+        np.testing.assert_allclose(env.data.site_xpos, _forward_copy(env).site_xpos)
+        command = env.last_applied_action.copy()
+        command[0] += 0.4
+        for _ in range(5):
+            env.step(command)
+            work = _forward_copy(env)
+            np.testing.assert_allclose(env.data.site_xpos, work.site_xpos, atol=1e-12)
+            np.testing.assert_allclose(env.data.sensordata, work.sensordata, atol=1e-12)
+    finally:
+        env.close()
+
+
 def test_emergency_stop_terminates_without_applying_requested_motion() -> None:
     env = A3DualArmEnv(render_cameras=False)
     try:

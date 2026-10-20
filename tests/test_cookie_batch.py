@@ -14,6 +14,24 @@ from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTra
 CONFIG = Path(__file__).resolve().parents[1] / "configs" / "cookie_batch.yaml"
 
 
+def test_preflight_tolerances_follow_instance_attributes():
+    # A3VariedColumnBatchExpert relaxes the vertical-IK probe for tilted multi-column
+    # grasps via instance attributes; the legacy expert keeps the hard-coded defaults.
+    env = A3CookieTransferEnv(CONFIG, render_cameras=False)
+    try:
+        env.reset(seed=0)
+        expert = A3CookieBatchExpert(env)
+        expert._target_preflight_position_tol = 0.0
+        expert._target_preflight_rotation_tol = 0.0
+        with pytest.raises(RuntimeError, match="unreachable with vertical grasp"):
+            expert._validate_target_workspace()
+        expert._target_preflight_position_tol = 0.5
+        expert._target_preflight_rotation_tol = 3.0
+        expert._validate_target_workspace()
+    finally:
+        env.close()
+
+
 def test_batch_layout_has_uniform_small_gaps_not_finger_lanes():
     config = load_config(CONFIG)
     positions = np.asarray(config.cookie_transfer.cookie_source_positions_m)

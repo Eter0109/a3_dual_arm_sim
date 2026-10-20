@@ -84,10 +84,9 @@ class SmolVLAPolicyPlugin:
         config.device = device
         config.use_amp = device == "cuda"
         self._action_dim = config.output_features["action"].shape[0]
-        if self._action_dim not in (8, 16) or list(
-            config.input_features["observation.state"].shape
-        ) != [self._action_dim]:
-            raise ValueError("Expected matching 8-D left-only or 16-D dual-arm state/actions")
+        self._state_dim = config.input_features["observation.state"].shape[0]
+        if (self._action_dim, self._state_dim) not in ((8, 8), (8, 11), (16, 16)):
+            raise ValueError("Expected 8/8 or 11/8 left-arm, or 16/16 dual-arm state/action")
         self._right_hold = None
         if n_action_steps is not None:
             validate_execution_horizon(n_action_steps, config.chunk_size)
@@ -118,8 +117,18 @@ class SmolVLAPolicyPlugin:
         """Predict in the checkpoint's action space, without deployment rules or arm padding."""
         policy_observation = {key: observation[key] for key in self._input_keys}
         dimension = getattr(self, "_action_dim", 16)
+        state_dimension = getattr(self, "_state_dim", dimension)
         state = np.asarray(policy_observation["observation.state"])
-        if dimension == 8:
+        if state_dimension == 11:
+            if state.shape == (16,):
+                pose = np.asarray(observation.get("observation.eef_pose"))
+                if pose.shape != (14,):
+                    raise ValueError("11-D inference requires the environment's 14-D EEF pose")
+                state = np.concatenate((state[:8], pose[:3]))
+            if state.shape != (11,) or not np.all(np.isfinite(state)):
+                raise ValueError("11-D inference requires left joints, gripper and world EEF xyz")
+            policy_observation["observation.state"] = state.copy()
+        elif dimension == 8:
             if state.shape not in ((8,), (16,)):
                 raise ValueError("Left-only inference requires 8-D or 16-D state")
             policy_observation["observation.state"] = state[:8].copy()

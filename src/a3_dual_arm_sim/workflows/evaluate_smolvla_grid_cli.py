@@ -2,7 +2,8 @@
 
 Run from the repository root:
     MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
-        --max-steps 500 --episodes 20 --output outputs/smolvla_grid_500
+        --max-steps 500 --max-steps-2x10 3200 --episodes 20 \
+        --output outputs/smolvla_grid_500_3200
 
 Each round evaluates the selected cells on the same seed. Prompt styles are
 explicit per task; 2x10 evaluation with a 2x5 checkpoint is transfer testing.
@@ -56,11 +57,9 @@ def summarize(rows, planned, profiles=PROFILES):
     result = []
     for task in TASKS:
         for profile in profiles:
-            counts = [
-                row["cookies_in_target"]
-                for row in rows
-                if row["benchmark"] == task and row["profile"] == profile
-            ]
+            cell = [row for row in rows if row["benchmark"] == task and row["profile"] == profile]
+            counts = [row["cookies_in_target"] for row in cell]
+            ordering = [row.get("randomization", {}).get("evaluation_front_first") for row in cell]
             capacity = 10 if task == "2x5" else 20
             result.append(
                 {
@@ -70,6 +69,9 @@ def summarize(rows, planned, profiles=PROFILES):
                     "planned": planned,
                     "mean_final_count": sum(counts) / len(counts) if counts else None,
                     "total_final_count": sum(counts),
+                    "complete_successes": sum(bool(row["success"]) for row in cell),
+                    "front_first_observed": sum(value is not None for value in ordering),
+                    "front_first_count": sum(value is True for value in ordering),
                     "total_capacity": capacity * len(counts),
                     "min_final_count": min(counts) if counts else None,
                     "max_final_count": max(counts) if counts else None,
@@ -91,10 +93,11 @@ def main():
     )
     parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--repo-id", default=None)
-    parser.add_argument("--output", type=Path, default=root / "outputs/smolvla_grid_500")
+    parser.add_argument("--output", type=Path, default=root / "outputs/smolvla_grid_500_3200")
     parser.add_argument("--episodes", type=int, default=20, help="Episodes per cell")
     parser.add_argument("--seed-start", type=int, default=13000)
-    parser.add_argument("--max-steps", type=int, default=500, help="Same budget for both tasks")
+    parser.add_argument("--max-steps", type=int, default=500, help="2x5 episode step limit")
+    parser.add_argument("--max-steps-2x10", type=int, default=3200, help="2x10 episode step limit")
     parser.add_argument("--n-action-steps", type=int, default=8)
     parser.add_argument("--num-steps", type=int, default=25, help="Flow inference steps")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
@@ -106,15 +109,21 @@ def main():
         "--prompt-style-2x10", choices=("training", "task", "short"), default="task"
     )
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--strict-policy-completion", action="store_true",
+                        help="Require released cookies and 20 stable steps without expert DONE")
     parser.add_argument(
         "--dry-run", action="store_true", help="Print experiment settings without loading a policy"
     )
     args = parser.parse_args()
-    if min(args.episodes, args.max_steps, args.n_action_steps, args.num_steps) < 1:
+    if min(
+        args.episodes, args.max_steps, args.max_steps_2x10,
+        args.n_action_steps, args.num_steps,
+    ) < 1:
         parser.error("episode and step counts must be positive")
     if len(set(args.profiles)) != len(args.profiles):
         parser.error("profiles must not contain duplicates")
     prompt_styles = {"2x5": args.prompt_style_2x5, "2x10": args.prompt_style_2x10}
+    max_steps_by_task = {"2x5": args.max_steps, "2x10": args.max_steps_2x10}
     checkpoint, dataset, output = (
         args.checkpoint.resolve(),
         args.dataset_root.resolve() if args.dataset_root else None,
@@ -133,14 +142,16 @@ def main():
         "episodes_per_cell": args.episodes,
         "seed_start": args.seed_start,
         "max_steps": args.max_steps,
+        "max_steps_by_task": max_steps_by_task,
         "source_column": "1",
         "first_grasp_2x10": first_grasp,
         "n_action_steps": args.n_action_steps,
         "num_steps": args.num_steps,
+        "strict_policy_completion": args.strict_policy_completion,
         "device": args.device,
         "profiles": args.profiles,
         "prompt_styles": prompt_styles,
-        "metric": "final cookies_in_target, mean and total; not peak count or success rate",
+        "metric": "complete task successes and final cookies_in_target (stable/released when strict mode is enabled)",
         "prompt_2x5": (
             "transfer 10 cookies into target box"
             if prompt_styles["2x5"] in ("training", "short")
@@ -212,19 +223,19 @@ def main():
         results = summarize(rows, args.episodes, args.profiles)
         atomic_json(
             output / "summary.json",
-            {"status": status, "max_steps": args.max_steps, "results": results},
+            {"status": status, "max_steps_by_task": max_steps_by_task, "results": results},
         )
         lines = [
-            f"Status: {status}; max_steps={args.max_steps}",
+            f"Status: {status}; max_steps: 2x5={args.max_steps}, 2x10={args.max_steps_2x10}",
             "",
-            "| Task | Profile | N | Mean final count | Total |",
-            "|---|---|---:|---:|---:|",
+            "| Task | Profile | N | Successes | Mean final count | Total |",
+            "|---|---|---:|---:|---:|---:|",
         ]
         for item in results:
             mean = item["mean_final_count"]
             mean_text = f"{mean:.2f}" if mean is not None else "pending"
             lines.append(
-                f"| {item['benchmark']} | {item['profile']} | {item['completed']}/{args.episodes} | {mean_text} | {item['total_final_count']}/{item['total_capacity']} |"
+                f"| {item['benchmark']} | {item['profile']} | {item['completed']}/{args.episodes} | {item['complete_successes']} | {mean_text} | {item['total_final_count']}/{item['total_capacity']} |"
             )
         (output / "summary.md").write_text("\n".join(lines) + "\n")
 
@@ -254,7 +265,9 @@ def main():
                     profile=profile,
                     source_column="1",
                     randomization_settings=settings,
-                    max_steps=args.max_steps,
+                    max_steps=max_steps_by_task[task],
+                    strict_policy_completion=args.strict_policy_completion,
+                    success_hold_steps=20 if args.strict_policy_completion else 5,
                     **extra,
                 )
         for episode, seed in enumerate(range(args.seed_start, args.seed_start + args.episodes), 1):
@@ -262,7 +275,9 @@ def main():
                 if (task, profile, seed) in done:
                     continue
                 atomic_json(
-                    output / "current.json", {"benchmark": task, "profile": profile, "seed": seed}
+                    output / "current.json",
+                    {"benchmark": task, "profile": profile, "seed": seed,
+                     "max_steps": max_steps_by_task[task]},
                 )
                 print(f"START {task} {profile} seed={seed}", flush=True)
                 policy.plugin.inference_seed = seed
@@ -275,6 +290,7 @@ def main():
                     **asdict(score),
                     "benchmark": task,
                     "profile": profile,
+                    "max_steps": max_steps_by_task[task],
                     "prompt_style": prompt_styles[task],
                     "task_instruction": benchmark._episode_task(1, seed),
                 }

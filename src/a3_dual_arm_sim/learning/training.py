@@ -50,6 +50,15 @@ def _local_hub_snapshot(repo_id: str) -> Path | None:
     return snapshot if (snapshot / "config.json").is_file() else None
 
 
+def tokenizer_max_length_for(collection: dict) -> int | None:
+    """128 tokens whenever the data carries the four-grasp plan prompt.
+
+    The plan prompt exceeds the base checkpoint's 48-token limit and appears in
+    2x10 datasets as well as in merged multi-task datasets.
+    """
+    return 128 if collection.get("target_layout") in ("2x10", "multi") else None
+
+
 def prepare_a3_smolvla_source(
     base_model: Path,
     runtime_dir: Path,
@@ -61,6 +70,7 @@ def prepare_a3_smolvla_source(
     decay_steps: int = 20000,
     num_steps: int = 25,
     action_dim: int = 16,
+    state_dim: int | None = None,
     tokenizer_max_length: int | None = None,
 ) -> Path:
     """Create a lightweight adapted checkpoint view without copying the 1.2 GB weights."""
@@ -76,10 +86,13 @@ def prepare_a3_smolvla_source(
         raise ValueError(f"Expected a SmolVLA checkpoint, got {config.get('type')!r}")
     if action_dim not in (8, 16):
         raise ValueError("action_dim must be 8 or 16")
+    state_dim = action_dim if state_dim is None else state_dim
+    if state_dim not in (8, 11, 16):
+        raise ValueError("state_dim must be 8, 11 or 16")
     if tokenizer_max_length is not None and tokenizer_max_length <= 0:
         raise ValueError("tokenizer_max_length must be positive")
     if (
-        int(config.get("max_state_dim", 0)) < action_dim
+        int(config.get("max_state_dim", 0)) < state_dim
         or int(config.get("max_action_dim", 0)) < action_dim
     ):
         raise ValueError("The base checkpoint cannot represent the A3 16D state/action contract")
@@ -87,7 +100,7 @@ def prepare_a3_smolvla_source(
     visual = {"type": "VISUAL", "shape": [3, 256, 256]}
     config["input_features"] = {
         **{key: visual.copy() for key in CAMERA_KEYS},
-        "observation.state": {"type": "STATE", "shape": [action_dim]},
+        "observation.state": {"type": "STATE", "shape": [state_dim]},
     }
     config["output_features"] = {"action": {"type": "ACTION", "shape": [action_dim]}}
     config["device"] = device
@@ -126,6 +139,11 @@ def prepare_a3_smolvla_source(
             continue
         if source.is_file():
             shutil.copy2(source, runtime_dir / source.name)
+        elif source.is_dir():
+            destination = runtime_dir / source.name
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(source, destination)
     preprocessor_path = runtime_dir / "policy_preprocessor.json"
     if preprocessor_path.is_file():
         preprocessor = json.loads(preprocessor_path.read_text(encoding="utf-8"))
@@ -154,6 +172,22 @@ def prepare_a3_smolvla_source(
     return runtime_dir
 
 
+def _eval_disable_flag() -> str:
+    """Pick the eval-disable flag of the installed LeRobot trainer.
+
+    The pinned public 0.5.1 accepts ``--eval_freq``; the development 0.5.2
+    renamed it to ``--env_eval_freq`` (see docs/limitations.md).
+    """
+    from lerobot.configs.train import TrainPipelineConfig
+
+    fields = TrainPipelineConfig.__dataclass_fields__
+    if "eval_freq" in fields:
+        return "--eval_freq=0"
+    if "env_eval_freq" in fields:
+        return "--env_eval_freq=0"
+    raise ValueError("installed LeRobot exposes neither eval_freq nor env_eval_freq")
+
+
 def build_train_command(
     *,
     dataset_root: Path,
@@ -173,7 +207,13 @@ def build_train_command(
     cmd = [
         sys.executable,
         "-m",
-        "lerobot.scripts.lerobot_train",
+        (
+            # Route through the SDPA shim when enabled so memory-limited GPUs can
+            # train without the development checkout's eager attention blow-up.
+            "a3_dual_arm_sim.learning.smolvla_attention"
+            if os.environ.get("A3_SMOLVLA_SDPA") == "1"
+            else "lerobot.scripts.lerobot_train"
+        ),
         f"--dataset.repo_id={repo_id}",
         f"--dataset.root={dataset_root.expanduser().resolve()}",
         "--dataset.video_backend=pyav",
@@ -184,7 +224,7 @@ def build_train_command(
         f"--num_workers={num_workers}",
         f"--batch_size={batch_size}",
         f"--steps={steps}",
-        "--eval_freq=0",
+        _eval_disable_flag(),
         f"--log_freq={min(20, steps)}",
         "--save_checkpoint=true",
         f"--save_freq={save_freq}",
@@ -215,6 +255,7 @@ def train_smolvla(
     use_ema: bool = False,
     ema_decay: float = 0.99,
     dry_run: bool = False,
+    episode_indices: list[int] | None = None,
     model_revision: str | None = None,
     offline: bool = False,
 ) -> dict[str, Any]:
@@ -243,8 +284,9 @@ def train_smolvla(
         warmup_steps=min(warmup_steps, max(1, steps - 1)),
         decay_steps=steps,
         action_dim=audit["action_dim"],
+        state_dim=audit["state_dim"],
         # The four-grasp prompt exceeds the base checkpoint's 48-token limit.
-        tokenizer_max_length=128 if collection.get("target_layout") == "2x10" else None,
+        tokenizer_max_length=tokenizer_max_length_for(collection),
     )
     command = build_train_command(
         dataset_root=dataset_root,
@@ -259,6 +301,12 @@ def train_smolvla(
         ema_decay=ema_decay,
         save_freq=save_freq,
     )
+    if episode_indices is not None:
+        if not episode_indices or len(set(episode_indices)) != len(episode_indices):
+            raise ValueError("Training episode indices must be nonempty and unique")
+        if min(episode_indices) < 0 or max(episode_indices) >= audit["episodes"]:
+            raise ValueError("Training episode index outside the dataset")
+        command.append("--dataset.episodes=" + json.dumps(episode_indices))
     result = {
         **audit,
         "repo_id": repo_id,

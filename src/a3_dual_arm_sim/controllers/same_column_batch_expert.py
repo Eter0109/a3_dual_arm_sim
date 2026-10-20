@@ -542,7 +542,8 @@ class A3VariedColumnBatchExpert(A3SameColumnBatchExpert):
 
     def _place_pose(self, clearance=0.0, column_index=None):
         position, rotation = super()._place_pose(clearance, column_index)
-        target_column = self.batch_index if column_index is None else column_index
+        from .placement_order import ordered_column
+        target_column = ordered_column(self.env, self.batch_index) if column_index is None else column_index
         box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
         if (
             column_index is None
@@ -598,6 +599,6 @@ class A3VariedColumnBatchExpert(A3SameColumnBatchExpert):
         self.selected_source_column_index = selected
         self._max_lift_speed = 0.0022 if selected == len(columns) - 1 else 0.0035
         self._transport_speed = (
-            0.0030 if selected == len(columns) - 1 else 0.0035 if selected == 1 else 0.0050
+            0.0042 if selected == len(columns) - 1 else 0.0045 if selected == 1 else 0.0050
         )
         self._column_order = [columns[selected]]

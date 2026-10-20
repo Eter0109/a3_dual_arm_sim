@@ -156,7 +156,8 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
         super()._select_batch()
 
     def _place_pose(self, clearance=0.0, column_index=None):
-        column = self.batch_index // 2 if column_index is None else column_index
+        from .placement_order import ordered_column
+        column = ordered_column(self.env, self.batch_index // 2) if column_index is None else column_index
         box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
         slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
         column_x = np.unique(slots[:, 0])[column]

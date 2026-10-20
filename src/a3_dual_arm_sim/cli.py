@@ -137,6 +137,8 @@ def parser() -> argparse.ArgumentParser:
     train.add_argument("--seed", type=int, default=1000)
     train.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     train.add_argument("--dry-run", action="store_true")
+    train.add_argument("--train-episodes-json", type=Path, default=None,
+                       help="JSON file containing a train_episodes list")
     train.set_defaults(function=_train_smolvla)
     from a3_dual_arm_sim.learning.act_training import main as act_main
 

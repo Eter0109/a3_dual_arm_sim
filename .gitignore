@@ -6,6 +6,7 @@ __pycache__/
 .runtime/
 outputs/
 datasets/
+src/a3_dual_arm_sim/audits/
 MUJOCO_LOG.TXT
 artifacts/batch_snapshots/
 artifacts/batch_snapshots_*/

@@ -29,7 +29,7 @@ class EpisodeDiagnostic:
         self.max_hold_count = 0
         self.final_conditions = None
 
-    def add_frame(self, observation, action, info, *, raw_action=None, phase=""):
+    def add_frame(self, observation, action, info, *, raw_action=None, phase="", env=None, policy_seconds=None):
         for key, frame in observation.items():
             if not key.startswith("observation.images."):
                 continue
@@ -71,6 +71,23 @@ class EpisodeDiagnostic:
                 )
             },
         }
+        record["policy_call_seconds"] = policy_seconds
+        if env is not None:
+            import mujoco
+            record["after"].update(
+                cookie_quaternions=env.data.xquat[list(env._cookie_bodies)].copy(),
+                eef_positions=env.data.site_xpos[list(env._eef_sites)].copy(),
+                eef_rotation_matrices=env.data.site_xmat[list(env._eef_sites)].copy(),
+                target_position=env.data.xpos[env._target_bin_body].copy(),
+                target_quaternion=env.data.xquat[env._target_bin_body].copy(),
+                contacts=[{
+                    "geom1": mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, int(c.geom1)),
+                    "geom2": mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, int(c.geom2)),
+                    "position": c.pos.copy(), "distance": float(c.dist),
+                } for c in env.data.contact[:env.data.ncon]
+                   if "cookie" in (mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, int(c.geom1)) or "")
+                   or "cookie" in (mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, int(c.geom2)) or "")],
+            )
         after = record["after"]
         unmet = []
         if after["count_fill"] is False:

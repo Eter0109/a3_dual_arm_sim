@@ -34,7 +34,9 @@ class CookieBatchBenchmark(EpisodeExecution):
     """Benchmark runner for single-box batch transfer tasks."""
 
     task = "2x5"
-    prompt_style = "task"
+    # 2x5 training data and every evaluation CLI default to the original short
+    # instruction; the per-column "task" prompt is opt-in via --prompt-style task.
+    prompt_style = "training"
     diagnostic_dir = None
 
     def _episode_task(self, column, seed):
@@ -229,6 +231,9 @@ class Cookie2x10Benchmark(Cookie2x10EpisodeExecution, CookieBatchBenchmark):
     """The 20-cookie task with the same evaluate/policy interface as 2x5."""
 
     task = "2x10"
+    # The 2x10 default stays the native four-grasp plan prompt; only the 2x5
+    # default converges on the short training instruction.
+    prompt_style = "task"
 
     def _episode_task(self, column, seed):
         if self.prompt_style == "short":
@@ -236,10 +241,14 @@ class Cookie2x10Benchmark(Cookie2x10EpisodeExecution, CookieBatchBenchmark):
         return super()._episode_task(column, seed)
 
 
-def make_cookie_benchmark(task="2x5", *, prompt_style="task", first_grasp=None, **kwargs):
+def make_cookie_benchmark(task="2x5", *, prompt_style=None, first_grasp=None, **kwargs):
     """Shared construction for the benchmark CLI and grid evaluations."""
     if task not in ("2x5", "2x10"):
         raise ValueError("task must be 2x5 or 2x10")
+    if prompt_style is None:
+        # Match the per-task CLI defaults: 2x5 evaluation and collection use the
+        # short training instruction, 2x10 keeps its native plan prompt.
+        prompt_style = "task" if task == "2x10" else "training"
     if prompt_style not in ("task", "training", "short"):
         raise ValueError("prompt_style must be task, training or short")
     if task == "2x10":
@@ -255,7 +264,7 @@ def make_cookie_benchmark(task="2x5", *, prompt_style="task", first_grasp=None, 
 def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
     benchmark = make_cookie_benchmark(
         task=args.get("task", "2x5"),
-        prompt_style=args.get("prompt_style", "task"),
+        prompt_style=args.get("prompt_style"),
         first_grasp=args.get("first_grasp"),
         success_hold_steps=args.get("success_hold_steps", 5),
         slot_tolerance_m=args.get("slot_tolerance_m", (0.015, 0.005)),

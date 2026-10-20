@@ -11,6 +11,49 @@ CAMERA_KEYS = (
 )
 
 
+def _check_cookie_2x5_instruction(episode: dict, collection_summary: dict) -> None:
+    """Require the recorded instruction to equal the summary's declared one.
+
+    A model trained on per-column prompts evaluated with the short default (or
+    vice versa) sees a language distribution it never learned.
+    """
+    expected_instruction = collection_summary.get("task_instruction")
+    if episode.get("task") != expected_instruction:
+        raise ValueError(
+            "2x5 episode task instruction disagrees with the collection summary "
+            f"({episode.get('task')!r} != {expected_instruction!r}); "
+            "prompt-style mismatch between collection and evaluation"
+        )
+
+
+def _check_cookie_2x10_episode(episode: dict, collection_summary: dict) -> None:
+    from a3_dual_arm_sim.tasks.cookie_2x10_plan import Cookie2x10Plan
+
+    metadata = episode.get("randomization", {})
+    plan = Cookie2x10Plan.from_seed(collection_summary["first_grasp_mode"], episode["seed"])
+    if (
+        metadata.get("grasp_counts") != list(plan.batch_sizes)
+        or metadata.get("first_grasp_count") != plan.first_grasp
+        or metadata.get("cookies_in_target") != 20
+        or metadata.get("cookies_in_source") != 60
+        or metadata.get("target_column_counts") != [10, 10]
+        or episode.get("task") != plan.prompt(metadata.get("source_column"))
+    ):
+        raise ValueError("2x10 episode counts or task instruction disagree with its plan")
+    reports = metadata.get("grasp_reports", [])
+    if len(reports) != 4 or any(
+        report.get("planned_count") != planned
+        or report.get("lifted") != planned
+        or len(report.get("cookies", [])) != planned
+        or not report.get("released")
+        for report, planned in zip(reports, plan.batch_sizes, strict=True)
+    ):
+        raise ValueError("2x10 dataset requires four confirmed grasp reports, including zero skips")
+    transferred = [cookie for report in reports for cookie in report["cookies"]]
+    if len(set(transferred)) != 20:
+        raise ValueError("2x10 grasp reports must describe twenty distinct cookies")
+
+
 def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     """Fail fast on the parts of the LeRobot v3 contract used by A3 learned policies."""
     root = root.expanduser().resolve()
@@ -47,9 +90,15 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     if arm_mode == "left" and collection_summary.get("task") != "cookie_transfer":
         raise ValueError("Left-only training is restricted to cookie_transfer")
     action_dim = 8 if arm_mode == "left" else 16
+    state_contract = collection_summary.get("training_state_contract")
+    if state_contract not in (None, "left_joint7_gripper1_eef_world_xyz_m3"):
+        raise ValueError(f"Unsupported training_state_contract: {state_contract}")
+    if state_contract and arm_mode != "left":
+        raise ValueError("Left EEF position requires left-arm training mode")
+    state_dim = 11 if state_contract else action_dim
     expected_shapes = {
         **{key: [256, 256, 3] for key in CAMERA_KEYS},
-        "observation.state": [action_dim],
+        "observation.state": [state_dim],
         "action": [action_dim],
     }
     for key, shape in expected_shapes.items():
@@ -83,35 +132,59 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     if info.get("total_episodes") != len(episodes):
         raise ValueError("LeRobot and A3 episode metadata counts do not match")
 
-    if collection_summary.get("target_layout") == "2x10":
-        from a3_dual_arm_sim.tasks.cookie_2x10_plan import Cookie2x10Plan
+    # Sidecar rows can survive a writer interruption even when their buffered
+    # Parquet episodes do not. Check the persisted training data, not just the
+    # recorder's success ledger.
+    import pyarrow.parquet as pq
 
+    episode_lengths = {}
+    for path in sorted((root / "meta/episodes").rglob("*.parquet")):
+        for row in pq.read_table(path, columns=["episode_index", "length"]).to_pylist():
+            index = row["episode_index"]
+            if index in episode_lengths:
+                raise ValueError(f"Duplicate persisted episode {index}")
+            episode_lengths[index] = row["length"]
+    expected_episodes = set(range(len(episodes)))
+    if set(episode_lengths) != expected_episodes:
+        raise ValueError(
+            f"Persisted episode metadata differs from A3 ledger: "
+            f"missing={sorted(expected_episodes - set(episode_lengths))}"
+        )
+    data_lengths = {index: 0 for index in expected_episodes}
+    frame_count = 0
+    for path in sorted((root / "data").rglob("*.parquet")):
+        for index in pq.read_table(path, columns=["episode_index"])["episode_index"].to_pylist():
+            if index not in data_lengths:
+                raise ValueError(f"Unexpected persisted episode {index}")
+            data_lengths[index] += 1
+            frame_count += 1
+    if frame_count != info.get("total_frames") or any(
+        data_lengths[index] != episode_lengths[index] or data_lengths[index] != episodes[index]["frames"]
+        for index in expected_episodes
+    ):
+        raise ValueError("Persisted Parquet frame counts differ from episode metadata")
+
+    target_layout = collection_summary.get("target_layout")
+    if target_layout == "2x10":
         for episode in episodes:
-            metadata = episode.get("randomization", {})
-            plan = Cookie2x10Plan.from_seed(collection_summary["first_grasp_mode"], episode["seed"])
-            if (
-                metadata.get("grasp_counts") != list(plan.batch_sizes)
-                or metadata.get("first_grasp_count") != plan.first_grasp
-                or metadata.get("cookies_in_target") != 20
-                or metadata.get("cookies_in_source") != 60
-                or metadata.get("target_column_counts") != [10, 10]
-                or episode.get("task") != plan.prompt(metadata.get("source_column"))
-            ):
-                raise ValueError("2x10 episode counts or task instruction disagree with its plan")
-            reports = metadata.get("grasp_reports", [])
-            if len(reports) != 4 or any(
-                report.get("planned_count") != planned
-                or report.get("lifted") != planned
-                or len(report.get("cookies", [])) != planned
-                or not report.get("released")
-                for report, planned in zip(reports, plan.batch_sizes, strict=True)
-            ):
-                raise ValueError(
-                    "2x10 dataset requires four confirmed grasp reports, including zero skips"
-                )
-            transferred = [cookie for report in reports for cookie in report["cookies"]]
-            if len(set(transferred)) != 20:
-                raise ValueError("2x10 grasp reports must describe twenty distinct cookies")
+            _check_cookie_2x10_episode(episode, collection_summary)
+    elif target_layout == "multi":
+        components = {
+            component["repo_id"]: component["target_layout"]
+            for component in collection_summary.get("components", [])
+        }
+        for episode in episodes:
+            source = episode.get("source_dataset")
+            layout = components.get(source)
+            if layout == "2x10":
+                _check_cookie_2x10_episode(episode, collection_summary)
+            elif layout == "2x5":
+                _check_cookie_2x5_instruction(episode, collection_summary)
+            else:
+                raise ValueError(f"Unknown merged episode source {source!r}")
+    else:
+        for episode in episodes:
+            _check_cookie_2x5_instruction(episode, collection_summary)
 
     return {
         "root": str(root),
@@ -120,6 +193,6 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
         "frames": int(info["total_frames"]),
         "tasks": int(info["total_tasks"]),
         "camera_keys": list(CAMERA_KEYS),
-        "state_dim": action_dim,
+        "state_dim": state_dim,
         "action_dim": action_dim,
     }

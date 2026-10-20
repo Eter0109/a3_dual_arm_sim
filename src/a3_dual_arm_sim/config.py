@@ -128,6 +128,10 @@ class SimConfig:
     max_gripper_step: float = 0.08
     cartesian_translation_scale_m: float = 0.025
     cartesian_rotation_scale_rad: float = 0.10
+    # Legacy placeholders: sim/actions.py uses a fixed solver regularization (0.001)
+    # and iteration caps instead. Retained only so existing config hashes and
+    # collection summaries keep serializing the same fields; changing them has no
+    # effect on the solver.
     ik_damping: float = 0.05
     ik_iterations: int = 8
     joint_damping: float = 0.8

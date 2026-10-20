@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import signal
 import subprocess
@@ -42,6 +43,8 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--complete-demonstrations", action="store_true", help="Front-camera bottom-first; require release, retreat and expert completion")
+    parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--max-attempts", type=int, default=None)
     parser.add_argument(
@@ -66,6 +69,12 @@ def main() -> int:
         parser.error("--max-attempts must be positive")
 
     root = _from_project(args.root)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    writer_lock = (root.parent / f".{root.name}.collection.lock").open("a+")
+    try:
+        fcntl.flock(writer_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise RuntimeError("Collection directory already has an active writer") from None
     config_path = _from_project(args.config)
     settings = load_randomization_config(
         _from_project(args.randomization_config) if args.randomization_config else None
@@ -75,15 +84,26 @@ def main() -> int:
     benchmark = CookieBatchBenchmark(
         config_path,
         max_steps=1600,
+        complete_demonstrations=args.complete_demonstrations,
+        success_hold_steps=20 if args.complete_demonstrations else 5,
         profile=profile,
         source_column=source_column,
         randomization_settings=settings,
     )
+    # Record the same short instruction the summary and the evaluation CLIs declare;
+    # the per-column "task" variant stays opt-in for explicit experiments.
+    benchmark.prompt_style = "training"
+    if args.diagnostic_dir:
+        benchmark.diagnostic_dir = _from_project(args.diagnostic_dir)
+        benchmark.diagnostic_dir.mkdir(parents=True, exist_ok=args.resume)
     summary_path = root / "collection_summary.json"
     summary = {
         "schema_version": 2,
+        "complete_demonstrations": args.complete_demonstrations,
+        "placement_order": "front_camera_bottom_first" if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
         "task_instruction": TASK,
+        "prompt_style": "training",
         "policy": "same_column",
         "source_action_mode": "cartesian_delta",
         "stored_action_mode": "joint_position",
@@ -101,6 +121,10 @@ def main() -> int:
         if not summary_path.is_file():
             raise FileNotFoundError(f"cannot resume without {summary_path}")
         previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        if previous.get("complete_demonstrations", False) != args.complete_demonstrations:
+            raise RuntimeError("completion contract changed; use a new dataset")
+        if previous.get("placement_order", "legacy") != summary["placement_order"]:
+            raise RuntimeError("placement order changed; use a new dataset")
         if previous.get("seed_start", 0) != args.seed_start:
             raise RuntimeError("seed_start changed since the initial run")
         for key in (

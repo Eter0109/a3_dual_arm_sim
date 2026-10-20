@@ -30,9 +30,9 @@ class ACTPolicyPlugin:
         from lerobot.configs.policies import PreTrainedConfig
         from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
         from lerobot.policies.act.modeling_act import ACTPolicy
-        from lerobot.policies.factory import make_pre_post_processors
         from lerobot.policies.utils import prepare_observation_for_inference
 
+        from a3_dual_arm_sim.learning.checkpoint_bundle import load_processors, processor_files
         from a3_dual_arm_sim.workflows.policy_adapters import resolve_policy_checkpoint
 
         checkpoint = resolve_policy_checkpoint(checkpoint)
@@ -59,18 +59,19 @@ class ACTPolicyPlugin:
         self._prepare_observation = prepare_observation_for_inference
         self._input_keys = tuple(config.input_features)
         self.inference_seed = inference_seed
-        metadata = LeRobotDatasetMetadata(repo_id, root=dataset_root.expanduser().resolve())
-        if list(metadata.features["action"]["shape"]) != [self._action_dim]:
-            raise ValueError("Dataset action dimension differs from ACT checkpoint")
+        try:
+            processor_files(checkpoint)
+        except FileNotFoundError:
+            # Legacy checkpoint without saved processors: fall back to the training
+            # dataset statistics, with the action-dimension cross-check.
+            metadata = LeRobotDatasetMetadata(repo_id, root=dataset_root.expanduser().resolve())
+            if list(metadata.features["action"]["shape"]) != [self._action_dim]:
+                raise ValueError("Dataset action dimension differs from ACT checkpoint")
         self._policy = (
             ACTPolicy.from_pretrained(checkpoint, config=config, strict=True).to(device).eval()
         )
-        self._preprocessor, self._postprocessor = make_pre_post_processors(
-            policy_cfg=config,
-            pretrained_path=str(checkpoint),
-            dataset_stats=metadata.stats,
-            preprocessor_overrides={"device_processor": {"device": device}},
-            postprocessor_overrides={"device_processor": {"device": "cpu"}},
+        self._preprocessor, self._postprocessor = load_processors(
+            config, checkpoint, dataset_root, device
         )
         self._right_hold = None
         self.last_raw_action = None

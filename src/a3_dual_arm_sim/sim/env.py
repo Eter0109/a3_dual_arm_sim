@@ -192,6 +192,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._apply_controls(home_action)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
+        # mj_step leaves derived kinematics (sites, sensors, camera bodies) one
+        # physics substep behind the integrated qpos/qvel; refresh so the exported
+        # observation reads a single consistent instant.
+        mujoco.mj_forward(self.model, self.data)
         self.data.time = 0.0
         self._max_recorded_gripper_force = 0.0
         self._last_applied_action = np.asarray(home_action, dtype=np.float64)
@@ -267,6 +271,10 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 if np.max(np.abs(self.data.qvel)) > 1000.0:
                     self.emergency_stop("simulator instability: object velocity exceeded threshold")
                     break
+            # mj_step integrates qpos/qvel but leaves derived state (sites, contacts,
+            # sensors, camera poses) one physics substep behind; refresh it so the
+            # exported observation and task scoring read a single consistent instant.
+            mujoco.mj_forward(self.model, self.data)
         self._last_applied_action = applied.copy()
         self._step_count += 1
         terminated = self._safety_stop

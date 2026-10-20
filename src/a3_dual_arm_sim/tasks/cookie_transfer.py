@@ -277,6 +277,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.set_cookie_pose(index, position, quaternion)
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
+        # The settle loop leaves xpos/xquat/site poses one substep behind qpos; refresh
+        # before the initial source mask, fill checks and randomization_metadata below,
+        # so scene provenance and the first observation share the integrated state.
+        mujoco.mj_forward(self.model, self.data)
         self.data.time = 0.0
         self._success_hold_count = 0
         source_center = (

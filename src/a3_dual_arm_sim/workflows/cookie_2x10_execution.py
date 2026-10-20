@@ -40,7 +40,7 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
                 cookie_count=len(self.config.cookie_transfer.cookie_source_positions_m),
                 position_noise_m=self.cookie_noise_m,
                 yaw_noise_rad=self.cookie_yaw_noise_rad,
-                terminate_on_success=False,
+                terminate_on_success=self.strict_policy_completion and not self.complete_demonstrations,
                 success_hold_steps=self.success_hold_steps,
                 wall_contact_tolerance_m=self.wall_contact_tolerance_m,
             ),
@@ -76,6 +76,7 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
     def _completed_episode_metadata(self, runner_policy, info):
         expert = getattr(runner_policy, "expert", None)
         return {
+            **super()._completed_episode_metadata(runner_policy, info),
             "target_column_counts": list(info.get("target_column_counts", (0, 0))),
             "cookies_in_target": int(info.get("cookies_in_target", 0)),
             "cookies_in_source": int(info.get("cookies_in_source", 0)),

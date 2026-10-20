@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import signal
 import subprocess
@@ -18,7 +19,7 @@ from a3_dual_arm_sim.sim.randomization import (
 )
 from a3_dual_arm_sim.tasks.cookie_2x10_plan import Cookie2x10Plan, parse_first_grasp
 from a3_dual_arm_sim.tasks.cookie_2x10_settings import load_cookie_2x10_settings
-from a3_dual_arm_sim.workflows.cookie_2x10_execution import Cookie2x10EpisodeExecution
+from a3_dual_arm_sim.workflows.benchmark import Cookie2x10Benchmark
 
 TASK = "Transfer 20 cookies into the 2x10 target box, ten per column."
 DEFAULT_ROOT = Path("datasets/a3_cookie_2x10")
@@ -43,6 +44,8 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--complete-demonstrations", action="store_true")
+    parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument(
         "--first-grasp",
         type=parse_first_grasp,
@@ -89,17 +92,24 @@ def main() -> int:
         first_grasp = args.first_grasp
     profile = settings["profile"]
     source_column = settings["source_column"]
-    benchmark = Cookie2x10EpisodeExecution(
+    benchmark = Cookie2x10Benchmark(
         config_path,
         max_steps=args.max_steps,
+        complete_demonstrations=args.complete_demonstrations,
+        success_hold_steps=20 if args.complete_demonstrations else 5,
         first_grasp=first_grasp,
         profile=profile,
         source_column=source_column,
         randomization_settings=settings,
     )
+    if args.diagnostic_dir and not args.dry_run:
+        benchmark.diagnostic_dir = _from_project(args.diagnostic_dir)
+        benchmark.diagnostic_dir.mkdir(parents=True, exist_ok=args.resume)
     summary_path = root / "collection_summary.json"
     summary = {
         "schema_version": 2,
+        "complete_demonstrations": args.complete_demonstrations,
+        "placement_order": "front_camera_bottom_first" if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
         "task_instruction": TASK,
         "repo_id": args.repo_id,
@@ -138,10 +148,20 @@ def main() -> int:
             )
         print(json.dumps({"collection": summary, "preview": previews}, indent=2))
         return 0
+    root.parent.mkdir(parents=True, exist_ok=True)
+    writer_lock = (root.parent / f".{root.name}.collection.lock").open("a+")
+    try:
+        fcntl.flock(writer_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise RuntimeError("Collection directory already has an active writer") from None
     if args.resume:
         if not summary_path.is_file():
             raise FileNotFoundError(f"cannot resume without {summary_path}")
         previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        if previous.get("complete_demonstrations", False) != args.complete_demonstrations:
+            raise RuntimeError("completion contract changed; use a new dataset")
+        if previous.get("placement_order", "legacy") != summary["placement_order"]:
+            raise RuntimeError("placement order changed; use a new dataset")
         if previous.get("seed_start", 0) != args.seed_start:
             raise RuntimeError("seed_start changed since the initial run")
         for key in (
