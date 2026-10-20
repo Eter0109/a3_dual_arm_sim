@@ -127,15 +127,25 @@ def annotate_visual_goal(observation,calibrations,goal):
     return result
 
 
-def visual_region_complete(scene,goal,*,xy_tolerance=.004,z_tolerance=.0025):
-    """Conservative visible upright-footprint gate, not native benchmark success."""
-    if len(scene.target_cookies)<5:return False
+def visual_region_diagnostics(scene,goal,*,xy_tolerance=.004,z_tolerance=.0025):
+    """Measured goal agreement, separately from instance detection/native score."""
+    result=dict(complete=False,matched=0,xy_tolerance_m=xy_tolerance,z_tolerance_m=z_tolerance)
+    if not scene.target_cookies:return result
     actual=(np.asarray([c.position for c in scene.target_cookies])-scene.target_box.position)@scene.target_box.rotation
     desired=goal.target_positions_box
     distance=np.linalg.norm(actual[:,None,:2]-desired[None,:,:2],axis=2)
     rows,cols=linear_sum_assignment(distance)
-    return (len(cols)==5 and bool(np.all(distance[rows,cols]<xy_tolerance))
-            and bool(np.all(abs(actual[rows,2]-desired[cols,2])<z_tolerance)))
+    xy=distance[rows,cols];z=abs(actual[rows,2]-desired[cols,2])
+    result.update(matched=len(cols),max_xy_error_m=float(xy.max()),max_z_error_m=float(z.max()),
+        mean_offset_box_m=(actual[rows]-desired[cols]).mean(0).tolist(),
+        complete=bool(len(cols)==5 and np.all(xy<xy_tolerance) and np.all(z<z_tolerance)))
+    return result
+
+
+def visual_region_complete(scene,goal,*,xy_tolerance=.004,z_tolerance=.0025):
+    """Conservative visible upright-footprint gate, not native benchmark success."""
+    return visual_region_diagnostics(scene,goal,xy_tolerance=xy_tolerance,
+                                     z_tolerance=z_tolerance)["complete"]
 
 
 class VisualGoalPolicy:

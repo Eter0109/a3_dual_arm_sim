@@ -44,6 +44,47 @@ class RGBDTests(unittest.TestCase):
     def test_legacy_misnamed_geometry_is_rejected(self):
         with self.assertRaises(ValueError):RGBDLocalizer({"cookie_half_size":[.025,.003,.0125]})
 
+    def target_detector(self,offset=(0.,0.),angle=0.,length=.050,height=.031):
+        # Five physical top ridges, deliberately unaligned with the slot x's.
+        x,y=np.meshgrid(np.linspace(-length/2,length/2,85),np.linspace(-.0014,.0014,9))
+        base=np.c_[x.ravel(),y.ravel()]
+        positions=np.array([[offset[0],offset[1]+i*.006333] for i in range(-2,3)])
+        q=np.concatenate([np.c_[base@rotation_z(angle)[:2,:2].T+p,np.full(len(base),height)] for p in positions])
+        box=BoxEstimate(np.zeros(3),np.eye(3),np.array([.057,.045]),.026,4,0.)
+        spec=dict(schema='a3_rgbd_geometry_v2',cookie_half_size=[.025,.0031665,.0125],
+                  wall_thickness_m=.006,floor_offset_m=.006)
+        localizer=RGBDLocalizer(spec)
+        # Test the same RGB/height filter used on real packets, not just PCA.
+        colors=np.tile(np.array([210,140,25],dtype=np.uint8),(1,len(q),1))
+        class Packet:rgb=colors
+        result=localizer._cookies(Packet(),q[None],box,source=False)
+        return result,positions
+
+    def test_target_detection_does_not_require_slot_alignment(self):
+        for angle in (0.,.15):
+            result,positions=self.target_detector(offset=(-.008,.009),angle=angle)
+            self.assertEqual(len(result),5)
+            actual=np.array([c.position[:2] for c in result])
+            np.testing.assert_allclose(actual,positions,atol=.0007)
+
+    def test_partial_and_stacked_ridges_do_not_count_as_placed_cookies(self):
+        self.assertEqual(len(self.target_detector(length=.025)[0]),0)
+        self.assertEqual(len(self.target_detector(height=.056)[0]),0)
+
+    def test_sparse_disconnected_target_surfaces_are_measured_without_slot_seeds(self):
+        spec=dict(schema='a3_rgbd_geometry_v2',cookie_half_size=[.025,.0031665,.0125],wall_thickness_m=.006)
+        loc=RGBDLocalizer(spec)
+        box=BoxEstimate(np.zeros(3),np.eye(3),np.array([.057,.045]),.026,4,0.)
+        # Alternating sampling rows split a surface into short components.
+        patches=[]
+        for y in np.arange(-2,3)*.006333:
+            for j,x in enumerate(np.linspace(-.025,.025,65)):
+                ys=np.linspace(-.002,.002,7)+(j%2)*.00025
+                patches.append(np.c_[np.full(7,x-.008),ys+y+.009,np.full(7,.031)])
+        result=loc._free_targets(np.concatenate(patches),box)
+        self.assertEqual(len(result),5)
+        np.testing.assert_allclose([c.position[0] for c in result],-.008,atol=.001)
+
     def test_rotated_rectangle_recovers_camera_independent_coordinates(self):
         rot=rotation_z(.17)[:2,:2]
         xy=np.array([[-.06,-.03],[-.06,.03],[.06,.03],[.06,-.03]])@rot.T+[.1,.2]

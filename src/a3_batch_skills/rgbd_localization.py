@@ -12,6 +12,7 @@ from scipy.spatial import ConvexHull
 from .rgbd import unproject,RGBDViews
 
 LOCALIZER_VERSION = "rgbd_packing_geometry_v1"
+TARGET_DETECTOR_VERSION = "rgbd_free_target_ridges_v2"
 
 
 class LocalizationFailure(RuntimeError):
@@ -141,6 +142,70 @@ class RGBDLocalizer:
             result[kind]=min(ranked,key=lambda row:row[0])[1]
         return result["source"],result["target"]
 
+    def _free_targets(self,q,box):
+        """Fit visible upright top ridges anywhere in the box, not at slot seeds.
+
+        A misplaced object must still be detected. Slot agreement is evaluated
+        separately by the controller and must never be a detector prerequisite.
+        """
+        if not len(q):return ()
+        resolution=.0005
+        lower=-box.inner_half_size
+        shape=np.ceil(2*box.inner_half_size/resolution).astype(int)+1
+        index=np.floor((q[:,:2]-lower)/resolution).astype(int)
+        valid=(index>=0).all(1)&(index<shape).all(1)
+        q,index=q[valid],index[valid]
+        grid=np.zeros(tuple(shape[::-1]),dtype=bool)
+        grid[index[:,1],index[:,0]]=True
+        # Components support rotated ridges. Raster samples can be disconnected
+        # in a sparse oblique view, so independent measured row/length support
+        # below also proposes patches; neither proposal uses nominal slot x's.
+        filled=ndimage.binary_closing(grid,structure=np.ones((1,3)))
+        labels,count=ndimage.label(filled,structure=np.ones((3,3)))
+        identifiers=labels[index[:,1],index[:,0]]
+        patches=[q[identifiers==identifier] for identifier in range(1,count+1)]
+        yedges=np.arange(-box.inner_half_size[1],box.inner_half_size[1]+.0004,.0004)
+        density=ndimage.gaussian_filter1d(np.histogram(q[:,1],yedges)[0].astype(float),1.3)
+        rows=ndimage.binary_closing(density>max(3,float(density.max())*.15),structure=np.ones(2))
+        row_labels,_=ndimage.label(rows)
+        for region in ndimage.find_objects(row_labels):
+            segment=region[0]
+            width=(segment.stop-segment.start)*.0004
+            if not .0035<width<.0085:continue
+            row=q[(q[:,1]>yedges[segment.start]-.0002)&(q[:,1]<yedges[segment.stop]+.0002)]
+            xedges=np.arange(-box.inner_half_size[0],box.inner_half_size[0]+.001,.001)
+            density=ndimage.gaussian_filter1d(np.histogram(row[:,0],xedges)[0].astype(float),.65)
+            spans=ndimage.binary_closing(density>max(.5,float(density.max())*.08),structure=np.ones(2))
+            span_labels,_=ndimage.label(spans)
+            for span in ndimage.find_objects(span_labels):
+                s=span[0]
+                patches.append(row[(row[:,0]>xedges[s.start]-.0005)&(row[:,0]<xedges[s.stop]+.0005)])
+        estimates=[]
+        for patch in sorted(patches,key=len,reverse=True):
+            if len(patch)<25:continue
+            values,vectors=np.linalg.eigh(np.cov(patch[:,:2].T))
+            axis=vectors[:,-1]
+            if axis[0]<0:axis=-axis
+            perpendicular=np.array([-axis[1],axis[0]])
+            basis=np.column_stack((axis,perpendicular))
+            planar=patch[:,:2]@basis
+            bounds=np.quantile(planar,[.01,.99],axis=0)
+            extent=bounds[1]-bounds[0]
+            if not 1.80*self.half[0]<extent[0]<2.15*self.half[0]:continue
+            if not .0005<extent[1]<2.5*self.half[1]:continue
+            bins=np.linspace(bounds[0,0],bounds[1,0],25)
+            coverage=float(np.mean(np.histogram(planar[:,0],bins)[0]>=2))
+            if coverage<self.min_coverage:continue
+            center=(bounds[0]+bounds[1])/2@basis.T
+            z=float(np.quantile(patch[:,2],.9)-self.half[2])
+            residual=float(np.std(patch[:,2]))
+            if residual>.0015:continue
+            rotation=box.rotation@rotation_z(float(np.arctan2(axis[1],axis[0])))
+            position=box.position+box.rotation@np.r_[center,z]
+            if not any(np.linalg.norm(position-c.position)<.0035 for c in estimates):
+                estimates.append(CookieEstimate(position,rotation,None,coverage,residual,TARGET_DETECTOR_VERSION))
+        return tuple(sorted(estimates,key=lambda c:float((c.position-box.position)@box.rotation[:,1])))
+
     def _cookies(self, frame, points, box, *, source):
         r,g,b=frame.rgb.astype(float).transpose(2,0,1)
         local=(points-box.position)@box.rotation
@@ -156,15 +221,13 @@ class RGBDLocalizer:
         mask=orange&inside&(abs(local[:,:,2]-expected_top)<(.004 if source else .001))
         q=local[mask]
         if not len(q):return ()
-        if source:
-            xs=(np.arange(self.source_columns)-(self.source_columns-1)/2)*2*self.half[0]
-        else:
-            xs=np.unique(np.asarray(self.spec["target_slots_local"])[:,0])
+        if not source:return self._free_targets(q,box)
+        xs=(np.arange(self.source_columns)-(self.source_columns-1)/2)*2*self.half[0]
         estimates=[]
         for column,x in enumerate(xs):
             # A known packing prior proposes cells; RGB-D must visibly support
             # every returned object. No SOURCE_POSITIONS or object IDs enter.
-            strip=q[abs(q[:,0]-x)<self.half[0]+(-.001 if source else .003)]
+            strip=q[abs(q[:,0]-x)<self.half[0]-.001]
             if len(strip)<30:continue
             step=.0004
             edges=np.arange(-box.inner_half_size[1],box.inner_half_size[1]+step,step)
@@ -176,7 +239,7 @@ class RGBDLocalizer:
             for row_slice in ndimage.find_objects(row_labels):
                 segment=row_slice[0]
                 width=(segment.stop-segment.start)*step
-                if not (.0035 if source else .0008)<width<.0085:continue
+                if not .0035<width<.0085:continue
                 lower,upper=edges[segment.start]-.0002,edges[segment.stop]+.0002
                 patch=strip[(strip[:,1]>lower)&(strip[:,1]<upper)]
                 if len(patch)<25:continue
@@ -190,18 +253,12 @@ class RGBDLocalizer:
                 # separate roughness diagnostic for independent audit.
                 yl,yh=np.quantile(patch[:,1],[.02,.98])
                 y=float((yl+yh)/2)
-                measured_x=x
-                if not source:
-                    xl,xh=np.quantile(patch[:,0],[.01,.99])
-                    if not 1.80*self.half[0]<xh-xl<2.15*self.half[0]:continue
-                    measured_x=float((xl+xh)/2)
                 z=float(np.quantile(patch[:,2],.9)-self.half[2])
                 top=patch[patch[:,2]>np.quantile(patch[:,2],.65)]
                 residual=float(np.std(top[:,2]))
                 if residual>.0015:continue
-                estimates.append(CookieEstimate(box.position+box.rotation@np.array([measured_x,y,z]),
-                    box.rotation.copy(),column+1 if source else None,coverage,residual,
-                    "packing_x_rgbd_yz" if source else "rgbd_rectangle_xyz"))
+                estimates.append(CookieEstimate(box.position+box.rotation@np.array([x,y,z]),
+                    box.rotation.copy(),column+1,coverage,residual,"packing_x_rgbd_yz"))
         return tuple(sorted(estimates,key=lambda c:(c.column or 0,float((c.position-box.position)@box.rotation[:,1]))))
 
     def observe(self, frame):
@@ -217,9 +274,10 @@ class RGBDLocalizer:
                 result=list(getattr(base,name))
                 for scene in scenes[1:]:
                     for cookie in getattr(scene,name):
-                        same=[c for c in result if c.column==cookie.column
-                              and abs(c.position[0]-cookie.position[0])<.018
-                              and abs(c.position[1]-cookie.position[1])<.0045]
+                        same=[c for c in result if c.column==cookie.column and
+                              ((abs(c.position[0]-cookie.position[0])<.018
+                                and abs(c.position[1]-cookie.position[1])<.0045)
+                               if name=="source_cookies" else np.linalg.norm(c.position-cookie.position)<.0035)]
                         if not same:result.append(cookie)
                 return tuple(sorted(result,key=lambda c:(c.column or 0,float(c.position[1]))))
             return VisualScene(base.source_box,base.target_box,merge("source_cookies"),merge("target_cookies"),

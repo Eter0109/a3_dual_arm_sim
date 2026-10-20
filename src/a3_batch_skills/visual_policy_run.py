@@ -15,7 +15,8 @@ from .cameras import apply_camera_reference
 from .motion import LeftArmServo
 from .rgbd import MujocoRGBDViews,geometry_spec_from_env
 from .visual_goals import VisualGoalPolicy,camera_calibrations_from_fk,VISUAL_MARKER_VERSION
-from .visual_controller import VisualBatchController
+from .visual_controller import VisualBatchController,SUPERVISOR_VERSION
+from .rgbd_localization import TARGET_DETECTOR_VERSION
 
 
 def main():
@@ -89,7 +90,8 @@ def main():
             if video and step%2==0:video.add(obs["observation.images.front"])
             if (step+1)%50==0:
                 status=dict(step=step+1,phase=controller.phase,completed_batches=len(controller.completed),
-                    native_count_evaluation_only=int(info.get("cookies_in_target",0)))
+                    native_count_evaluation_only=int(info.get("cookies_in_target",0)),
+                    visual_diagnostics=controller.diagnostics)
                 (a.output/"status.json").write_text(json.dumps(status));print(json.dumps(status),flush=True)
             if controller.finished or terminated or truncated:break
         result=dict(task=a.task,seed=a.seed,phase=controller.phase,completed_batches=len(controller.completed),
@@ -97,6 +99,8 @@ def main():
             native_success_evaluation_only=bool(info.get("success",False)),
             native_count_evaluation_only=int(info.get("cookies_in_target",0)),
             localization=descriptor["localization"],goal_conditioning=VISUAL_MARKER_VERSION,
+            target_detector=TARGET_DETECTOR_VERSION,supervisor=SUPERVISOR_VERSION,
+            visual_diagnostics=controller.diagnostics,
             action_source="single_adapted_left8_vla",geometric_takeover=False,
             object_truth_used_for_decisions=False,physics_resets_between_batches=0,
             right_target_max_error=right_error,sensor=sensor.protocol,n_action_steps=policy.config.n_action_steps,
