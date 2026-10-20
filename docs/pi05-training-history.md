@@ -1177,3 +1177,42 @@ The dataset pinned the box (only a 0.005 rad yaw draw), so the policy never saw 
 of that size during training and has no reason to be robust to one.  Small box jitter in
 collection -- ±0.5 mm, which is the scale that matters -- is the change most likely to remove the
 knife-edge, and it is worth more than any further alignment of the two simulators.
+
+### 9.20 What the last 1000 episodes actually varied (10-20)
+
+From the collection's own log (`/tmp/collect_v2.log`), the launcher's `extra` line was:
+
+```
+--main-aligned /tmp/main_scene_full.json --position-noise 0 --align-pose-noise 0 --align-bin-yaw-noise 0.005
+```
+
+so the per-episode variation is exactly one degree of freedom:
+
+| input | variation across the 1000 episodes |
+|---|---|
+| target bin **yaw** | Gaussian, sigma = 0.005 rad = 0.286 deg (from the episode seed) |
+| target bin / source bin **translation** | **none** (`--position-noise 0`) |
+| arm home pose | **none** (`--align-pose-noise 0`) |
+| 80 Cookie positions | **none** (no jitter; `cookies_jittered: false`) |
+| 80 Cookie orientations | **none** (identical to main's reset; that is the point of rev-2) |
+| cameras | **none** |
+| second-batch mode | `full` / `prefill` / `perturb` / `prefill_perturb`, by `seed % 4` (250 each) |
+| in `prefill`, the first batch's imperfections | fixed by the mode: one coherent lean in [0, 4] deg ([0, 6] for `prefill_perturb`), yaw +-1 (+-1.5) deg, per-Cookie jitter +-0.2 (+-0.3) mm |
+| physics seed, sampler | not in the data; the expert is deterministic |
+
+**Why this matters after 9.19.**  sigma = 0.005 rad of yaw is 0.565 mm of displacement at the
+box's corner (half-diagonal 0.113 m) -- but the box's **centre does not move at all**, and it is
+the centre that the second-batch insertion is aimed at.  So the collection exercised rotation and
+never exercised translation, while 9.19 shows that a translation of 0.454 mm is what flips eleven
+of twenty seeds' outcomes.  The policy was trained on a scene whose insertion target sat at
+exactly one place, and it fails by less than half a millimetre whenever it does not.
+
+That is the change worth making in the next collection: keep everything above and add
+`--position-noise 5e-4` (0.5 mm, Gaussian, both bins) so the placement error that decides the
+outcome is inside the training distribution instead of outside it.
+
+**A reporting gap to close.**  `collection_summary.json` records `yaw_noise_rad: 0.0` and
+`position_noise_m: 0.0`, which are the *scene config's* randomisation fields (zeroed by the two
+`*_noise 0` flags).  The align-flag sigma of 0.005 rad is not in the sidecar at all -- the only
+record of it is the launcher log.  Anyone reading the dataset's metadata alone would conclude the
+layout was completely frozen.  The card states it correctly, but the sidecar should too.
