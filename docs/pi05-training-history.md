@@ -1361,16 +1361,23 @@ An extra detail worth recording: two of arm 4's 2000-step episodes score 10 whil
 False -- every Cookie geometrically inside the box, none upright in a slot.  The judge's count and
 the success contract separate at this granularity, exactly as 9.21 describes.
 
-**What was launched instead.**  10 000 steps from the same 20k incumbent on the same dataset, with
-the peak LR lowered from 5e-06 to **2e-06** and the floor unchanged at 2.5e-07 (cosine over the
-10 000 steps, warmup 333, batch 6, save every 5000).  The reason is item 2: the same peak stretched
-over 10 000 steps keeps the model in the high-LR regime about 2.5x longer than the 4000-step
-schedule did, and the 4000-step run was already losing ground by 3000.  Everything else -- base,
-data, un-freeze depth, seeds -- is held fixed, so if this run reads above 4.05 the layout-matched
-data does help and the earlier arms were simply starved of steps; if it reads the same or lower,
-the conclusion is that wider layouts need either far more data or a different objective, and not
-a different sigma.
+**What was launched instead.**  A from-scratch fine-tune of `lerobot/pi05_base` -- the same
+checkpoint the 20k incumbent itself started from -- for **20 000 steps** on the same
+layout-randomised data.  The earlier instinct was to add 10 000 steps on top of the incumbent at a
+lower peak LR, and that was the wrong reading of item 3: 4000 steps on top of a 20k model is 24 000
+samples of a 425 501-frame epoch, so "starved of steps" is true, but continuing a converged model
+cannot fix it.  The run that has the same budget as the incumbent is the one that answers whether
+the layout-matched distribution is *learnable* at 1000 episodes.
 
-The run writes checkpoints at 5000 and 10 000 (i.e. 25 000 and 30 000 steps of total training) and
-then scores both on main's shipped benchmark automatically, writing one line per checkpoint into
-`/tmp/overnight_summary.txt`.
+Recipe otherwise exactly the incumbent's: partial un-freeze (18 LLM layers, vision tower, state
+projector), batch 6, seed 1000, cosine 5e-06 -> 2.5e-07 over the 20 000 steps, warmup 666,
+`--dataset.video_backend=pyav`.  At 120 000 samples that is 28 % of an epoch rather than 5.6 %.
+
+Step-20 loss is **0.190**, against 0.089 for the arms that start from the 20k incumbent -- the
+base does not know the task, which is the expected difference and a useful check that this run is
+not secretly continuing the old weights.
+
+Checkpoints every 5000 steps (5k / 10k / 15k / 20k), each scored on main's shipped randomised
+benchmark as soon as training ends, one line per checkpoint into `/tmp/overnight_summary.txt`.
+This run is also the only arm whose intermediate points can say whether the degradation in arm 4
+was the schedule (it should now be monotone) or the data (it will not be).
