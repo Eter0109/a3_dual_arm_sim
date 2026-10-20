@@ -1326,3 +1326,51 @@ magnitude in 3D.  The vertical axis was the whole effect.
 
 `collection_summary.json` now also records a `post_reset` block with every sigma the hook applied,
 because this is the fourth dataset whose real distribution lived only in a launcher command line.
+
+### 9.23 Matching the benchmark's own distribution made the model worse, not better (10-21)
+
+9.22 produced the first dataset whose layout noise is main's `basic` term for term: 1000 episodes,
+1107 attempts, 90.3 % expert acceptance, bins `uniform(+-10 mm)` horizontal, target yaw
+`uniform(+-0.03)`, Cookies 0.3 mm / 0.9 deg, arm pose pinned.  Arm 4 trained on it from the 20k
+incumbent with arm 3's recipe, and was scored on main's shipped randomised benchmark, same 20
+episodes as every other row:
+
+| checkpoint | steps | mean | distribution | strict successes |
+|---|---|---|---|---|
+| arm 4 | 2000 | 3.45 (SE 0.78) | {0:9, 5:8, 9:1, 10:2} | 0 / 20 |
+| arm 4 | 3000 | 3.30 (SE 0.54) | {0:7, 5:12, 6:1} | 0 / 20 |
+| arm 4 | **4000** | **1.75** (SE 0.53) | {0:13, 5:7} | 0 / 20 |
+| arm 3 (no layout noise) | 4000 | 4.05 (SE 0.66) | {0:5, 1:1, 4:1, 5:10, 6:1, 10:2} | 2 / 20 |
+| arm 1 | 4000 | 3.75 (SE 0.58) | {0:6, 5:12, 6:1, 9:1} | 0 / 20 |
+| 20k incumbent | -- | 0.00 | {0:20} | 0 / 20 |
+
+Three things are visible and they pull in different directions.
+
+1. **The data works for the expert and not for the policy.**  The expert accepted 90 % of the
+   episodes it was asked to solve at this noise level, so the noise is inside the task's
+   solvable set.  The policy, trained on it, ends up worse than one trained on the pinned
+   layout.
+2. **It degrades with training, monotonically.**  3.45 -> 3.30 -> 1.75, and the zero-score
+   episodes climb 9 -> 7 -> 13.  That is the arm-2 shape again, on different data, which is why
+   the first suspect is the schedule rather than the distribution.
+3. **The run has seen 5.6 % of one epoch.**  `ep:56 epch:0.06` at 4000 steps with batch 6 over
+   425 501 frames.  Loss fell 0.089 -> 0.001-0.003, so the model fit what it saw; it did not
+   learn the layout *distribution* from 24 000 samples of it.
+
+An extra detail worth recording: two of arm 4's 2000-step episodes score 10 while `success` is
+False -- every Cookie geometrically inside the box, none upright in a slot.  The judge's count and
+the success contract separate at this granularity, exactly as 9.21 describes.
+
+**What was launched instead.**  10 000 steps from the same 20k incumbent on the same dataset, with
+the peak LR lowered from 5e-06 to **2e-06** and the floor unchanged at 2.5e-07 (cosine over the
+10 000 steps, warmup 333, batch 6, save every 5000).  The reason is item 2: the same peak stretched
+over 10 000 steps keeps the model in the high-LR regime about 2.5x longer than the 4000-step
+schedule did, and the 4000-step run was already losing ground by 3000.  Everything else -- base,
+data, un-freeze depth, seeds -- is held fixed, so if this run reads above 4.05 the layout-matched
+data does help and the earlier arms were simply starved of steps; if it reads the same or lower,
+the conclusion is that wider layouts need either far more data or a different objective, and not
+a different sigma.
+
+The run writes checkpoints at 5000 and 10 000 (i.e. 25 000 and 30 000 steps of total training) and
+then scores both on main's shipped benchmark automatically, writing one line per checkpoint into
+`/tmp/overnight_summary.txt`.
