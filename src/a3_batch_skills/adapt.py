@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sys
 from .markers import MARKER_VERSION
+from .visual_goals import VISUAL_MARKER_VERSION
 from .training import install_pi05_skill_loss
 
 
@@ -35,7 +36,7 @@ def main():
     root = a.dataset.resolve()
     descriptor = json.loads((root/"goal_conditioning.json").read_text())
     info = json.loads((root/"meta/info.json").read_text())
-    if descriptor.get("goal_conditioning") != MARKER_VERSION:
+    if descriptor.get("goal_conditioning") not in (MARKER_VERSION,VISUAL_MARKER_VERSION):
         p.error("Expected the explicit projected-goal skill dataset")
     for key in ("action","observation.state"):
         if info["features"][key]["shape"] != [8]:

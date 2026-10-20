@@ -79,6 +79,10 @@ def main():
                         help="Record each grounded batch as a separate lossless RGB/left8 training clip")
     parser.add_argument("--unmarked-skills", action="store_true",
                         help="Record raw views instead of explicit projected goal cues")
+    parser.add_argument("--rgbd-goals",action="store_true",
+        help="Record independently measured, latched RGB-D goal cues; teacher still uses truth for actions")
+    parser.add_argument("--rgbd-elevation",type=float,default=-65.)
+    parser.add_argument("--rgbd-azimuth",type=float,default=180.)
     parser.add_argument("--video", action="store_true")
     args = parser.parse_args()
     if args.max_steps is not None and args.max_steps < 1:
@@ -89,6 +93,8 @@ def main():
         parser.error("Output already exists; use a distinct experiment directory")
     if args.record_skills and args.executor != "grounded":
         parser.error("Skill demonstrations currently require the goal-bound grounded executor")
+    if args.rgbd_goals and (not args.record_skills or args.unmarked_skills):
+        parser.error("--rgbd-goals requires --record-skills and marked images")
     if args.goal_conditioned and args.executor != "pi05":
         parser.error("--goal-conditioned applies to an adapted pi05 checkpoint")
     if args.executor == "pi05" and not all((args.job, args.checkpoint, args.camera_reference,
@@ -106,7 +112,7 @@ def main():
     if args.camera_reference:
         apply_camera_reference(benchmark, args.camera_reference)
     env = benchmark.create_env(render_cameras=args.executor == "pi05" or args.record_skills)
-    policy, video, recorder = None, None, None
+    policy, video, recorder, visual_sensor = None, None, None, None
     selected_success = False
     args.output.mkdir(parents=True)
     started = time.monotonic()
@@ -128,7 +134,7 @@ def main():
             align_policy_entry=args.prealign,
             max_adjustments=args.max_adjustments, max_batch_steps=args.batch_steps,
             source_column="auto" if args.source_column == "auto" else int(args.source_column),
-            policy_scope=args.policy_scope)
+            policy_scope=args.policy_scope,retreat_clearance_m=.160 if args.rgbd_goals else .060)
         servo = LeftArmServo(env)
         provider = SimulatorSceneProvider(env)
         if args.executor == "grounded":
@@ -161,8 +167,14 @@ def main():
             config=config, exercise_adjustment=args.exercise_adjustment)
         if args.record_skills:
             from .recording import SkillClipRecorder
+            visual_spec=None
+            if args.rgbd_goals:
+                from .rgbd import MujocoRGBDViews,geometry_spec_from_env
+                visual_sensor=MujocoRGBDViews(env,views=((args.rgbd_elevation,args.rgbd_azimuth),(-90.,90.),(-65.,90.)))
+                visual_spec=geometry_spec_from_env(env)
             recorder = SkillClipRecorder(args.output/"skill_clips", env, seed=args.seed,
-                marked=not args.unmarked_skills, provenance=dict(task=args.task,profile=args.profile,
+                marked=not args.unmarked_skills,visual_sensor=visual_sensor,visual_spec=visual_spec,
+                source_column=config.source_column,provenance=dict(task=args.task,profile=args.profile,
                     source_column=args.source_column,executor=executor.name,
                     camera_sha256=hashlib.sha256(args.camera_reference.read_bytes()).hexdigest() if args.camera_reference else None,
                     render_protocol=args.render_protocol,placement_mode=args.placement_mode))
@@ -259,6 +271,8 @@ def main():
             video.close()
         if policy:
             policy.close()
+        if visual_sensor:
+            visual_sensor.close()
         env.close()
 
 

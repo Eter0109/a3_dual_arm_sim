@@ -27,7 +27,8 @@ class LosslessRGBVideo:
 
 
 class SkillClipRecorder:
-    def __init__(self, root, env, *, seed, marked=True, video_factory=LosslessRGBVideo, provenance=None):
+    def __init__(self, root, env, *, seed, marked=True, video_factory=LosslessRGBVideo, provenance=None,
+                 visual_sensor=None,visual_spec=None,source_column="auto"):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=False)
         self.env, self.seed, self.marked = env, seed, marked
@@ -36,6 +37,13 @@ class SkillClipRecorder:
         self.active = None
         self.pending = None
         self.clips = []
+        self.visual_sensor,self.visual_spec=visual_sensor,visual_spec
+        self.source_column=source_column
+        self.visual_completed=[]
+        if visual_sensor is not None:
+            from .rgbd_localization import RGBDLocalizer
+            self.visual_localizer=RGBDLocalizer(visual_spec)
+            if not marked:raise ValueError("RGB-D goal recording requires the same marked images used at inference")
 
     def prepare(self, observation, goal, scene, global_step, phase):
         if self.pending is not None:
@@ -44,9 +52,30 @@ class SkillClipRecorder:
             path = self.root/f"batch_{goal.index:02d}"
             path.mkdir(exist_ok=False)
             self.active = dict(path=path, goal=goal, rows=[], videos={}, first_global_step=global_step)
+            if self.visual_sensor is not None:
+                from .visual_goals import make_visual_goal
+                frame=self.visual_sensor.capture()
+                from .rgbd import save_rgbd_packet
+                save_rgbd_packet(path/"rgbd_entry.npz",frame)
+                visual_scene=self.visual_localizer.observe(frame)
+                visual=make_visual_goal(frame,visual_scene,self.visual_spec,goal.index,column=self.source_column)
+                # The teacher may use truth to generate actions. Check its goal
+                # agrees AFTER independent visual selection; do not generate
+                # neural inputs by copying the teacher's object positions.
+                from scipy.optimize import linear_sum_assignment
+                actual=np.asarray([scene.cookies[i].position for i in goal.cookie_ids])
+                distance=np.linalg.norm(visual.source_positions[:,None]-actual[None],axis=2)
+                a,b=linear_sum_assignment(distance)
+                if np.max(distance[a,b])>.003:
+                    raise RuntimeError("Independent RGB-D goal differs from the teacher's selected five")
+                self.active.update(visual_goal=visual,teacher_goal_match_max_m=float(distance[a,b].max()))
         if self.active["goal"].index != goal.index:
             raise RuntimeError("A batch clip was not finalized at its boundary")
-        obs = annotate_goals(observation, self.env, scene, goal) if self.marked else observation
+        if self.visual_sensor is not None:
+            from .visual_goals import annotate_visual_goal,camera_calibrations_from_fk
+            obs=annotate_visual_goal(observation,camera_calibrations_from_fk(self.env),self.active["visual_goal"])
+        else:
+            obs = annotate_goals(observation, self.env, scene, goal) if self.marked else observation
         center, rotation, _ = group_frame(scene, goal.cookie_ids)
         state = np.asarray(observation["observation.state"][:8], dtype=np.float32).copy()
         if state.shape != (8,) or not np.isfinite(state).all():
@@ -82,6 +111,23 @@ class SkillClipRecorder:
         if self.pending is not None:
             raise RuntimeError("Cannot finalize a clip before applying its pending action")
         active = self.active
+        visual_verified=False
+        if self.visual_sensor is not None and success:
+            from .visual_goals import visual_region_complete
+            from .rgbd_localization import LocalizationFailure
+            try:
+                frame=self.visual_sensor.capture()
+                from .rgbd import save_rgbd_packet
+                save_rgbd_packet(active["path"]/"rgbd_boundary.npz",frame)
+                scene=self.visual_localizer.observe(frame)
+                visual_verified=all(visual_region_complete(scene,g)
+                    for g in [*self.visual_completed,active["visual_goal"]])
+                active["visual_target_count"]=len(scene.target_cookies)
+            except LocalizationFailure as exc:
+                reason="RGB-D boundary not observable: "+str(exc)
+            success=bool(visual_verified)
+            if success:self.visual_completed.append(active["visual_goal"])
+            elif reason is None:reason="RGB-D could not verify the placed batch and previous progress"
         for video in active["videos"].values():
             video.close()
         rows = active["rows"]
@@ -104,6 +150,20 @@ class SkillClipRecorder:
                 timing="observation_before_step -> applied_joint_target_at_that_step",
                 physics_resets_between_batches=0, rgb_codec="lossless_libx264rgb")
             meta["provenance"] = self.provenance
+            if self.visual_sensor is not None:
+                from .visual_goals import VISUAL_MARKER_VERSION
+                from .rgbd_localization import LOCALIZER_VERSION
+                from dataclasses import asdict
+                from .rgbd_audit import json_value
+                meta.update(goal_conditioning=VISUAL_MARKER_VERSION,localization=LOCALIZER_VERSION,
+                    camera_annotations="calibrated_projection_of_latched_rgbd_goal",
+                    visual_boundary_verified=visual_verified,
+                    visual_target_count=active.get("visual_target_count"),
+                    teacher="privileged_contact_expert_actions_only",
+                    teacher_goal_match_max_m=active["teacher_goal_match_max_m"],
+                    visual_goal=json.loads(json.dumps(asdict(active["visual_goal"]),default=json_value)),
+                    rgbd_sensor=self.visual_sensor.protocol,geometry_spec=self.visual_spec,
+                    auxiliary_pose_fields="teacher_diagnostics_not_policy_inputs")
             (active["path"]/"metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
             self.clips.append(meta)
         self.active = None

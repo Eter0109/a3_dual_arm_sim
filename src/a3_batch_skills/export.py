@@ -36,10 +36,10 @@ def export_clips(inputs, output, repo_id):
         raise ValueError("No verified successful clips; failures are not imitation labels")
     if len({p.resolve() for p, _ in clips}) != len(clips):
         raise ValueError("Duplicate source clips")
-    signatures = {(m["fps"],m["goal_conditioning"],m["state_dim"],m["action_dim"]) for _,m in clips}
-    if len(signatures) != 1 or next(iter(signatures))[2:] != (8,8):
+    signatures = {(m["fps"],m["goal_conditioning"],m["state_dim"],m["action_dim"],m["localization"]) for _,m in clips}
+    if len(signatures) != 1 or next(iter(signatures))[2:4] != (8,8):
         raise ValueError("Mixed conditioning, frame rate, or non-left8 clips")
-    fps, conditioning, _, _ = next(iter(signatures))
+    fps, conditioning, _, _, localization = next(iter(signatures))
     first = next(rgb_frames(clips[0][0]/"front.mkv"))
     h, w = first.shape[:2]
     features = {"observation.state":dict(dtype="float32", shape=(8,), names=[f"left_{i}" for i in range(8)]),
@@ -82,7 +82,7 @@ def export_clips(inputs, output, repo_id):
         dataset.finalize()
     (output/"a3_skill_metadata.json").write_text(json.dumps(provenance,indent=2),encoding="utf-8")
     (output/"goal_conditioning.json").write_text(json.dumps(dict(goal_conditioning=conditioning,
-        state_dim=8,action_dim=8,localization="simulator_truth",training_episodes="one verified batch per episode",
+        state_dim=8,action_dim=8,localization=localization,training_episodes="one verified batch per episode",
         note="Copy this descriptor only alongside weights actually trained on these goal-conditioned images."),indent=2),encoding="utf-8")
     report = dict(episodes=len(provenance),frames=sum(m["frames"] for m in provenance),
                   entry_kinds=sorted({m["entry_kind"] for m in provenance}), goal_conditioning=conditioning,

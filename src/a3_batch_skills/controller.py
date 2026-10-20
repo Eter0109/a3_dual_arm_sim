@@ -113,7 +113,7 @@ class BatchSkillController:
                         # batch handoff is seen. Verify and retreat; do not keep
                         # calling it indefinitely or re-grasp an empty tool.
                         self.executor.pause()
-                        self.retreat_position = scene.tool_position + np.array([0., 0., .060])
+                        self.retreat_position = scene.tool_position + np.array([0., 0., self.config.retreat_clearance_m])
                         self.retreat_rotation = scene.tool_rotation.copy()
                         self.phase = Phase.RETREAT
                         self._event("policy_released_batch", object_ids=list(self.goal.cookie_ids))

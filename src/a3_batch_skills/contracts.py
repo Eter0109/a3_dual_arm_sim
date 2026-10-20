@@ -34,6 +34,7 @@ class BatchConfig:
     max_pad_force_n: float = 12.0
     source_column: int | str = 1
     policy_scope: str = "transfer"
+    retreat_clearance_m: float = .060
 
     def __post_init__(self):
         if self.batch_size != 5 or not (self.source_column == "auto" or
@@ -53,6 +54,8 @@ class BatchConfig:
             raise ValueError("Tolerances and limits must be finite and positive")
         if not 0 < self.adjustment_max_tilt_deg < 90:
             raise ValueError("Invalid adjustment tilt limit")
+        if not .035<=self.retreat_clearance_m<=.25:
+            raise ValueError("Retreat clearance must be between 35 and 250 mm")
 
 
 @dataclass(frozen=True)

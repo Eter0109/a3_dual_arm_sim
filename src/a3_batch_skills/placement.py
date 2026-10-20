@@ -116,7 +116,7 @@ class PrecisePlacement:
             self.opening = min(self.release_opening, self.opening + .015)
             command, _ = self.servo.move(pos, rot, self.opening, speed=.0008)
             if self.opening >= self.release_opening and self.stage_steps >= 10:
-                self.retract_position = scene.tool_position + np.array([0., 0., .060])
+                self.retract_position = scene.tool_position + np.array([0., 0., self.config.retreat_clearance_m])
                 self.retract_rotation = scene.tool_rotation.copy()
                 self._transition("RETRACT")
             return command

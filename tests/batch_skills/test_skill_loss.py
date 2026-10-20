@@ -4,6 +4,18 @@ import unittest
 
 @unittest.skipUnless(importlib.util.find_spec("torch"),"PyTorch not installed in this lightweight environment")
 class LossMaskTests(unittest.TestCase):
+    def test_visual_batch_reset_does_not_restart_torch_noise(self):
+        import torch
+        from a3_batch_skills.visual_goals import VisualGoalPolicy,VISUAL_MARKER_VERSION
+        from a3_batch_skills.rgbd_localization import LOCALIZER_VERSION
+        class Legacy:
+            def reset(self,context):torch.manual_seed(123)
+        wrapper=VisualGoalPolicy(Legacy(),dict(goal_conditioning=VISUAL_MARKER_VERSION,
+            localization=LOCALIZER_VERSION,training_completed=True))
+        torch.manual_seed(89);before=torch.get_rng_state().clone()
+        wrapper.start(object());self.assertTrue(torch.equal(before,torch.get_rng_state()))
+        wrapper.pause();self.assertTrue(torch.equal(before,torch.get_rng_state()))
+
     def test_padding_and_inactive_dimensions_have_no_training_gradient(self):
         import torch
         from a3_batch_skills.training import masked_flow_loss
