@@ -8,7 +8,7 @@ import numpy as np
 from .rgbd_held import HeldBatchLocalizer
 from .rgbd_localization import LocalizationFailure
 
-PLACEMENT_VERSION="rgbd_pre_release_servo_v1"
+PLACEMENT_VERSION="rgbd_pre_release_servo_v2_confirmed_drift"
 
 
 @dataclass(frozen=True)
@@ -43,13 +43,16 @@ class MeasuredPlacementServo:
         self.clearance_z=max(held.center[2],target[2]+.060)
         self.lift_xy=held.center[:2].copy();self.lift_rotation=held.rotation.copy()
         self.events=[];self.realignments=0;self._descent_history=[]
+        self.drift_observations=0;self.diagnostics={}
 
     def transition(self,stage):
         self.events.append(dict(step=self.steps,from_stage=self.stage,to_stage=stage))
         self.stage=stage;self.stage_steps=self.stable=0;self._descent_history=[]
+        self.drift_observations=0
 
     def act(self,held,robot,target,rotation):
         self.steps+=1;self.stage_steps+=1
+        self.diagnostics=dict(stage=self.stage,decision="hold")
         if self.steps>350:self.failure="Visual placement exceeded its 350-step budget"
         if self.failure:return self.servo.hold(self.opening)
         if self.stage=="OPEN":
@@ -67,16 +70,26 @@ class MeasuredPlacementServo:
                and (self._last_timestamp is None or held.timestamp>self._last_timestamp+1e-6))
         if not fresh:
             self.missing+=1;self.stable=0
+            self.drift_observations=0;self._descent_history=[]
+            self.diagnostics['decision']='hold_missing_or_repeated_pose'
             if self.missing>=30:self.failure="No fresh supported held-object pose; release blocked"
             return self.servo.hold(self.opening)
         self.missing=0;self._last_timestamp=held.timestamp
         xy=float(np.linalg.norm(held.center[:2]-target[:2]))
         angle=float(np.arccos(np.clip((np.trace(rotation.T@held.rotation)-1)/2,-1,1)))
+        self.diagnostics.update(xy_error_m=xy,angle_error_deg=float(np.rad2deg(angle)),
+                                height_above_goal_m=float(held.center[2]-target[2]))
         if self.stage=="DESCEND" and (xy>.004 or angle>np.deg2rad(3)):
+            # A single noisy pose may stop descent but must not command a full
+            # retreat. Keep the gripper closed while confirming persistent drift.
+            self.drift_observations+=1;self.stable=0;self._descent_history=[]
+            self.diagnostics.update(decision='hold_recheck_drift',drift_observations=self.drift_observations)
+            if self.drift_observations<3:return self.servo.hold(self.opening)
             self.realignments+=1
             if self.realignments>2:
                 self.failure="Repeated drift during descent; release blocked";return self.servo.hold(self.opening)
             self.lift_xy=held.center[:2].copy();self.lift_rotation=held.rotation.copy();self.transition("LIFT")
+        elif self.stage=="DESCEND":self.drift_observations=0
         if self.stage=="LIFT":
             desired=np.r_[self.lift_xy,self.clearance_z];desired_rotation=self.lift_rotation
             if abs(held.center[2]-self.clearance_z)<.0025:
@@ -110,6 +123,7 @@ class MeasuredPlacementServo:
         tool_rotation=desired_rotation@relative.T
         offset=robot.tool_rotation.T@(held.center-robot.tool_position)
         tool_position=desired-tool_rotation@offset
+        self.diagnostics.update(decision='move',command_stage=self.stage)
         return self.servo.move(tool_position,tool_rotation,self.opening,
                                speed=.0008 if self.stage=="DESCEND" else .002)[0]
 
@@ -177,6 +191,7 @@ class RGBDPlacementPolicy:
         self.failure=self.placement.failure;self.counts['visual_servo']+=1
         self.trace.append(dict(timestamp=robot.timestamp,batch=self.goal.index,stage=self.placement.stage,
             measured_pose=pose is not None,perception_error=self.last_error,
+            servo_diagnostics=dict(self.placement.diagnostics),
             relative_geometry_18d=relative_goal_features(target,rotation,pose,robot).tolist() if pose is not None else None,
             state_left8=np.asarray(observation['observation.state'])[:8].tolist(),
             requested_left8=np.asarray(action)[:8].tolist(),target_world=target.tolist()))

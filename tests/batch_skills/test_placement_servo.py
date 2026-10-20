@@ -9,6 +9,7 @@ import numpy as np
 from a3_batch_skills.rgbd import RGBDFrame,MujocoRGBDViews
 from a3_batch_skills.visual_goals import VisualBatchGoal
 from a3_batch_skills.placement_observation import PlacementProbeRecorder
+from a3_batch_skills.placement_audit import PlacementTruthAudit
 from a3_batch_skills.rgbd_held import HeldBatchLocalizer
 from a3_batch_skills.rgbd_held import HeldBatchPose
 from a3_batch_skills.rgbd_localization import rotation_z,LocalizationFailure
@@ -17,6 +18,26 @@ from a3_batch_skills.rgbd_placement import (MeasuredPlacementServo,RGBDPlacement
 
 
 class PlacementProbeTests(unittest.TestCase):
+    def test_privileged_audit_keeps_identity_separate_from_later_noisy_measurements(self):
+        local=np.c_[np.zeros(5),np.arange(-2,3)*.006333,np.zeros(5)]
+        first=local+[0,0,.07];other=local+[.15,0,.07]
+        positions=np.r_[first,other,np.zeros((1,3))]
+        env=SimpleNamespace(_cookie_bodies=np.arange(10),_target_bin_body=10,
+            data=SimpleNamespace(xpos=positions,xmat=np.tile(np.eye(3).ravel(),(11,1))))
+        goal=SimpleNamespace(index=0,target_positions_box=local+[0,0,.0185])
+        pose=HeldBatchPose(first.mean(0),np.eye(3),first,0.,0.,5,0.)
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'audit.jsonl';audit=PlacementTruthAudit(path)
+            self.assertIsNone(audit.write_after_decision(env,goal,pose,0.))
+            positions[:5,0]+=.004
+            noisy=replace(pose,positions=other,center=other.mean(0),timestamp=.05)
+            audit.write_after_decision(env,goal,noisy,.05);audit.close()
+            rows=[json.loads(x) for x in path.read_text().splitlines()]
+            self.assertEqual(rows[0]['audit_cookie_ids'],rows[1]['audit_cookie_ids'])
+            self.assertAlmostEqual(rows[1]['true_xy_error_m'],.004)
+            self.assertGreater(rows[1]['visual_center_error_m'],.1)
+            self.assertTrue(all(not r['used_for_control'] for r in rows))
+
     def test_additional_sensor_views_are_reported_as_five(self):
         with patch('a3_batch_skills.rgbd.MujocoRGBDSensor',return_value=SimpleNamespace(protocol={})):
             sensor=MujocoRGBDViews(None,views=((-65,180),(-90,90),(-65,90),(-25,0),(-25,180)))
@@ -143,6 +164,29 @@ class PlacementControlTests(unittest.TestCase):
             for i in range(40):
                 wrapped.update(object(),replace(robot,timestamp=i*.05));wrapped.act({}, {})
         self.assertIsNotNone(wrapped.failure);self.assertEqual(wrapped.counts['vla'],0)
+        self.assertTrue(all(x==.25 for x in fake.openings))
+
+    def test_single_frame_drift_holds_without_resetting_descent(self):
+        fake=FakeServo();servo=MeasuredPlacementServo(fake)
+        target=np.array([0.,0.,.0185]);pose=self.pose((0,0,.07));robot=self.robot(pose)
+        servo.start(pose,robot,target,np.eye(3));servo.transition('DESCEND')
+        spike=self.pose((0,0,.07),rotation_z(np.deg2rad(3.6)),.05)
+        servo.act(spike,replace(robot,timestamp=.05),target,np.eye(3))
+        self.assertEqual(servo.stage,'DESCEND');self.assertEqual(servo.realignments,0)
+        self.assertEqual(servo.diagnostics['decision'],'hold_recheck_drift');self.assertIsNone(fake.position)
+        good=replace(pose,timestamp=.10)
+        servo.act(good,replace(robot,timestamp=.10),target,np.eye(3))
+        self.assertEqual(servo.stage,'DESCEND');self.assertEqual(servo.drift_observations,0)
+        self.assertIsNotNone(fake.position);self.assertTrue(all(x==.25 for x in fake.openings))
+
+    def test_persistent_drift_needs_three_fresh_observations_before_lifting(self):
+        fake=FakeServo();servo=MeasuredPlacementServo(fake);target=np.array([0.,0.,.0185])
+        pose=self.pose((.008,0,.07));robot=self.robot(pose)
+        servo.start(pose,robot,target,np.eye(3));servo.transition('DESCEND')
+        for i in range(1,4):
+            p=replace(pose,timestamp=i*.05);servo.act(p,replace(robot,timestamp=p.timestamp),target,np.eye(3))
+            if i<3:self.assertEqual(servo.stage,'DESCEND')
+        self.assertEqual(servo.stage,'LIFT');self.assertEqual(servo.realignments,1)
         self.assertTrue(all(x==.25 for x in fake.openings))
 
 

@@ -39,10 +39,14 @@ def main():
     p.add_argument("--video",action="store_true")
     p.add_argument("--record-placement-probes",action="store_true",
                    help="Save at most 32 RGB-D/proprioception packets; no physics snapshots")
+    p.add_argument("--audit-placement-truth",action="store_true",
+                   help="Log separate privileged labels AFTER decisions; never available to control")
     a=p.parse_args()
     if a.vision_interval is None:a.vision_interval=5
     if a.output.exists():p.error("Never overwrite an evaluation")
     if a.vision_interval<1:p.error("Invalid vision interval")
+    if a.audit_placement_truth and a.placement_control!='rgbd-servo':
+        p.error("Placement truth audit is only for the optional hybrid diagnostic")
     if a.placement_control=="rgbd-servo" and not a.extra_rgbd_view:
         a.extra_rgbd_view=[[-25.,0.],[-25.,180.]]
     descriptor=json.loads((a.checkpoint/"goal_conditioning.json").read_text())
@@ -65,7 +69,7 @@ def main():
     apply_camera_reference(benchmark,a.camera_reference)
     env=benchmark.create_env(render_cameras=True)
     a.output.mkdir(parents=True)
-    sensor=policy=video=None
+    sensor=policy=video=audit=None
     started=time.monotonic()
     try:
         env.task_config=replace(env.task_config,terminate_on_success=False)
@@ -89,6 +93,9 @@ def main():
             placement=RGBDPlacementPolicy(visual,servo,spec)
         controller=VisualBatchController(placement or visual,spec,column=column,context=context)
         if placement:placement.scene_provider=lambda:controller.last_scene
+        if a.audit_placement_truth:
+            from .placement_audit import PlacementTruthAudit
+            audit=PlacementTruthAudit(a.output/'placement_truth_audit.jsonl')
         recorder=None
         if a.record_placement_probes:
             from .placement_observation import PlacementProbeRecorder
@@ -119,6 +126,12 @@ def main():
                     tool_rotation=env.data.site_xmat[servo.site].reshape(3,3).copy(),
                     pad_midpoint=pads.mean(0),jaw_gap=float(gap),opening=float(env.last_applied_action[7]),
                     calibrations=calibrations)
+            # Control has already returned. Privileged labels are written only
+            # to a separate file, aligned with the same pre-action observation.
+            if audit:
+                pose=placement.last_pose
+                if pose is not None and abs(pose.timestamp-float(env.data.time))>1e-6:pose=None
+                audit.write_after_decision(env,placement.goal,pose,float(env.data.time))
             obs,_,terminated,truncated,info=env.step(servo.hold() if action is None else servo.canonical(action))
             if placement and len(placement.trace)>trace_count:
                 placement.trace[-1].update(global_step=step+1,applied_left8=env.last_applied_action[:8].tolist())
@@ -147,6 +160,7 @@ def main():
             checkpoint=str(a.checkpoint),camera_reference=str(a.camera_reference),wall_seconds=time.monotonic()-started)
         result["placement_probe_packets"]=recorder.count if recorder else 0
         result['placement_control']=a.placement_control
+        result['placement_truth_audit_after_decisions']=bool(audit)
         if placement:
             from .rgbd_placement import PLACEMENT_VERSION
             from .rgbd_held import HELD_POSE_VERSION
@@ -160,6 +174,7 @@ def main():
         (a.output/"result.json").write_text(json.dumps(result,indent=2))
         return 0 if controller.phase=="DONE" else 2
     finally:
+        if audit:audit.close()
         if video:video.close()
         if policy:policy.close()
         if sensor:sensor.close()
