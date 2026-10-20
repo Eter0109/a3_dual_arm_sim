@@ -136,7 +136,7 @@ def _forward_copy(env: A3DualArmEnv) -> mujoco.MjData:
 def test_reset_and_step_export_derived_state_at_the_integrated_instant() -> None:
     # mj_step integrates qpos/qvel last; anything the observation exports (sites,
     # sensors, contacts) must be refreshed to that instant, not left one
-    # physics substep behind. See audits/control_20261013 probe measurements.
+    # physics substep behind the integrated state.
     env = A3DualArmEnv(render_cameras=False)
     try:
         env.reset(seed=0)
