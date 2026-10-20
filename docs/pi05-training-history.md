@@ -1229,3 +1229,42 @@ and `--yaw-noise` is per-Cookie yaw.  Matching main's shipped `basic` profile th
 `*_noise 0` flags).  The align-flag sigma of 0.005 rad is not in the sidecar at all -- the only
 record of it is the launcher log.  Anyone reading the dataset's metadata alone would conclude the
 layout was completely frozen.  The card states it correctly, but the sidecar should too.
+
+### 9.21 The shipped benchmark is randomised, and on it the two data revisions separate (10-20)
+
+Every previous number on main's judge was taken with `--no-randomize`, i.e. on the frozen layout
+main ships as its `training_scene`.  But main's **default** benchmark is randomised: measured with
+the shipped defaults, `cookies_in_target` is computed on a scene whose bins and Cookies have been
+jittered.  That is the number a reader of the paper will see, so both aligned checkpoints were
+scored there too -- same driver, same 20 episodes, same 900-step cap, same judge constants, no
+shim, no `--no-randomize`:
+
+| checkpoint | training data | mean | distribution | strict successes |
+|---|---|---|---|---|
+| `a3_b2_aligned4000/004000` (arm 1) | rev 1, pinned layout | **3.75** | {0:6, 5:12, 6:1, 9:1} | 0 / 20 (0 %) |
+| `a3_b2_aligned_v3_4000/004000` (arm 3) | rev 2, main-aligned orientations | **4.05** | {0:5, 1:1, 4:1, 5:10, 6:1, 10:2} | **2 / 20 (10 %)** |
+
+Two things follow, and only two.
+
+1. **The orientation fix is worth something, but not much.**  +0.30 mean and the first genuine
+   strict successes (episodes 5 and 11, full upright-in-slot with the 5-step hold).  Under the
+   frozen layout both checkpoints had been indistinguishable at 5.00 {5:20}, so the frozen judge
+   was hiding the only difference the data revision produced -- it rewards getting the Cookies
+   *near* the box and does not care whether they end up in the slots.
+2. **The mode of the distribution is still "near but not in".**  Twelve of arm 1's twenty and ten
+   of arm 3's are exactly 5: Cookies moved, footprint inside the box, but not upright in a slot.
+   The remaining variance is the insertion itself, which is the same sub-millimetre quantity 9.19
+   measured as decisive.  A 10 % strict rate is not a task the policy has learned; it is a task it
+   sometimes gets away with.
+
+**The missing row.**  The 20k incumbent has still never been run on the randomised judge -- 9.17's
+3.65 / 4.45 / 3.70 were all `--no-randomize` on our layouts.  Until that row exists, "the aligned
+fine-tune gets off zero where the base does not" is not supported.  It is one 15-minute run and it
+should be taken before any further training.
+
+Reproduce:
+
+```
+/tmp/bench_main_rand.sh      # bridge per checkpoint, then bench_main_20k.py --episodes 20
+                             # --workers 20 --max-steps 900, no --no-randomize, no shim
+```
