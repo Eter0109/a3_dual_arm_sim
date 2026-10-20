@@ -3,12 +3,35 @@
 This is explicitly NOT a pure-VLA result. Only sensor geometry and robot FK
 drive the correction. Missing/stale geometry cannot authorize release.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
+from collections import deque
 import numpy as np
 from .rgbd_held import HeldBatchLocalizer
 from .rgbd_localization import LocalizationFailure
 
-PLACEMENT_VERSION="rgbd_pre_release_servo_v2_confirmed_drift"
+PLACEMENT_VERSION="rgbd_pre_release_servo_v3_filtered_grasp"
+
+
+class GraspPoseFilter:
+    """Short robust filter in tool coordinates, updated only with fresh RGB-D."""
+    def __init__(self):self.rows=deque(maxlen=5);self.timestamp=None
+
+    def update(self,pose,robot):
+        if self.timestamp is not None and pose.timestamp<=self.timestamp+1e-6:
+            raise ValueError('Repeated pose cannot update the grasp filter')
+        if self.timestamp is not None and pose.timestamp-self.timestamp>.15:self.rows.clear()
+        self.timestamp=pose.timestamp
+        offset=(pose.center-robot.tool_position)@robot.tool_rotation
+        relative=robot.tool_rotation.T@pose.rotation
+        self.rows.append((offset,relative))
+        offsets=np.array([x[0] for x in self.rows]);rotations=np.array([x[1] for x in self.rows])
+        distance=np.array([[np.arccos(np.clip((np.trace(a.T@b)-1)/2,-1,1)) for b in rotations] for a in rotations])
+        costs=distance.sum(1)
+        index=np.flatnonzero(costs<=costs.min()+1e-9)[-1]
+        rotation=robot.tool_rotation@rotations[index]
+        center=robot.tool_position+robot.tool_rotation@np.median(offsets,axis=0)
+        local=(pose.positions-pose.center)@pose.rotation
+        return replace(pose,center=center,rotation=rotation,positions=local@rotation.T+center)
 
 
 @dataclass(frozen=True)
@@ -37,13 +60,16 @@ class MeasuredPlacementServo:
     def __init__(self,servo,half_size=(.025,.0031666667,.0125)):
         self.servo=servo;self.half_size=np.asarray(half_size,dtype=float)
 
-    def start(self,held,robot,target,rotation):
+    def start(self,held,robot,target,rotation,remaining_steps=600):
         self.stage="LIFT";self.steps=self.stage_steps=self.stable=self.missing=0
         self.failure=None;self.opening=robot.opening;self._last_timestamp=None
         self.clearance_z=max(held.center[2],target[2]+.060)
         self.lift_xy=held.center[:2].copy();self.lift_rotation=held.rotation.copy()
         self.events=[];self.realignments=0;self._descent_history=[]
         self.drift_observations=0;self.diagnostics={}
+        self.pose_filter=GraspPoseFilter()
+        travel=np.linalg.norm(held.center[:2]-target[:2])/.0008+(self.clearance_z-target[2])/.0003
+        self.step_budget=max(1,min(int(remaining_steps),600,int(np.ceil(travel+180))))
 
     def transition(self,stage):
         self.events.append(dict(step=self.steps,from_stage=self.stage,to_stage=stage))
@@ -53,7 +79,7 @@ class MeasuredPlacementServo:
     def act(self,held,robot,target,rotation):
         self.steps+=1;self.stage_steps+=1
         self.diagnostics=dict(stage=self.stage,decision="hold")
-        if self.steps>350:self.failure="Visual placement exceeded its 350-step budget"
+        if self.steps>self.step_budget:self.failure=f"Visual placement exceeded its {self.step_budget}-step geometry budget"
         if self.failure:return self.servo.hold(self.opening)
         if self.stage=="OPEN":
             self.opening=min(self.release_opening,self.opening+.010)
@@ -75,11 +101,18 @@ class MeasuredPlacementServo:
             if self.missing>=30:self.failure="No fresh supported held-object pose; release blocked"
             return self.servo.hold(self.opening)
         self.missing=0;self._last_timestamp=held.timestamp
+        raw=held
+        raw_xy=float(np.linalg.norm(raw.center[:2]-target[:2]))
+        raw_angle=float(np.arccos(np.clip((np.trace(rotation.T@raw.rotation)-1)/2,-1,1)))
+        held=self.pose_filter.update(raw,robot)
         xy=float(np.linalg.norm(held.center[:2]-target[:2]))
         angle=float(np.arccos(np.clip((np.trace(rotation.T@held.rotation)-1)/2,-1,1)))
         self.diagnostics.update(xy_error_m=xy,angle_error_deg=float(np.rad2deg(angle)),
+                                orientation_support_deg=raw.orientation_support_deg,
+                                raw_xy_error_m=raw_xy,raw_angle_error_deg=float(np.rad2deg(raw_angle)),
+                                geometry_step_budget=self.step_budget,
                                 height_above_goal_m=float(held.center[2]-target[2]))
-        if self.stage=="DESCEND" and (xy>.004 or angle>np.deg2rad(3)):
+        if self.stage=="DESCEND" and (max(xy,raw_xy)>.004 or max(angle,raw_angle)>np.deg2rad(3)):
             # A single noisy pose may stop descent but must not command a full
             # retreat. Keep the gripper closed while confirming persistent drift.
             self.drift_observations+=1;self.stable=0;self._descent_history=[]
@@ -97,18 +130,20 @@ class MeasuredPlacementServo:
                 if self.stable>=2:self.transition("ALIGN")
         elif self.stage=="ALIGN":
             desired=np.r_[target[:2],self.clearance_z];desired_rotation=rotation
-            aligned=xy<.0025 and angle<np.deg2rad(2) and abs(held.center[2]-self.clearance_z)<.003
+            aligned=max(xy,raw_xy)<.0025 and max(angle,raw_angle)<np.deg2rad(2) and abs(held.center[2]-self.clearance_z)<.003
             self.stable=self.stable+1 if aligned else 0
             if self.stable>=3:self.transition("DESCEND")
         else:
-            desired=target.copy();desired[2]=max(target[2]+.0005,held.center[2]-.0008)
+            descent_step=.0012 if held.center[2]-target[2]>.020 else .0006
+            desired=target.copy();desired[2]=max(target[2]+.0005,held.center[2]-descent_step)
             desired_rotation=rotation
             self._descent_history.append(float(held.center[2]))
             if len(self._descent_history)>20:self._descent_history.pop(0)
             if (len(self._descent_history)==20 and held.center[2]-target[2]>.004
                     and self._descent_history[0]-self._descent_history[-1]<.001):
                 self.failure="Measured descent stalled; release blocked";return self.servo.hold(self.opening)
-            placed=xy<.0025 and angle<np.deg2rad(2) and abs(held.center[2]-target[2])<.0012
+            placed=(max(xy,raw_xy)<.0025 and max(angle,raw_angle)<np.deg2rad(2)
+                    and max(abs(held.center[2]-target[2]),abs(raw.center[2]-target[2]))<.0012)
             self.stable=self.stable+1 if placed else 0
             if self.stable>=3:
                 jaw=robot.tool_rotation[:,0]
@@ -125,7 +160,8 @@ class MeasuredPlacementServo:
         tool_position=desired-tool_rotation@offset
         self.diagnostics.update(decision='move',command_stage=self.stage)
         return self.servo.move(tool_position,tool_rotation,self.opening,
-                               speed=.0008 if self.stage=="DESCEND" else .002)[0]
+                               speed=(.0012 if held.center[2]-target[2]>.020 else .0006)
+                               if self.stage=="DESCEND" else .002)[0]
 
 
 class RGBDPlacementPolicy:
@@ -134,12 +170,19 @@ class RGBDPlacementPolicy:
         self.policy,self.servo,self.spec=policy,servo,spec
         self.localizer=HeldBatchLocalizer(spec)
         self.scene_provider=lambda:None
+        self.budget_provider=lambda:600
         self.goal=self.robot=self.frame=self.placement=None
         self.phase="INACTIVE";self.failure=None;self.wait=0
         self.counts=dict(vla=0,visual_servo=0,hold_for_measurement=0)
         self.events=[];self.trace=[];self.last_error=None;self.last_pose=None
 
     def update(self,frame,robot):self.frame,self.robot=frame,robot
+
+    @property
+    def boundary_ready(self):
+        # Finish the measured retreat before the supervisor pauses all motion.
+        # A momentarily visible box at 120 mm must not truncate the 160 mm lift.
+        return self.placement is not None and self.placement.stage=='WAIT_BOUNDARY'
 
     def start(self,goal,context=None):
         self.goal=goal;self.context=context;self.failure=None;self.wait=0;self.placement=None
@@ -182,7 +225,7 @@ class RGBDPlacementPolicy:
                 if self.wait>=40:self.failure="Cannot measure the held batch before placement: "+str(self.last_error)
                 return self.servo.hold(robot.opening)
             self.placement=MeasuredPlacementServo(self.servo,self.spec['cookie_half_size'])
-            self.placement.start(pose,robot,target,rotation);self.phase="VISUAL_SERVO"
+            self.placement.start(pose,robot,target,rotation,remaining_steps=self.budget_provider());self.phase="VISUAL_SERVO"
             self.events.append(dict(timestamp=robot.timestamp,event="measured_visual_servo_started",batch=self.goal.index,
                                     visible_cookies=pose.visible_count,formation_error_m=pose.formation_error_m))
         if not current and self.placement.stage not in ("OPEN","RETRACT","WAIT_BOUNDARY"):

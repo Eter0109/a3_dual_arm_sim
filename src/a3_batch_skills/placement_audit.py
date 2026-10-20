@@ -36,10 +36,12 @@ class PlacementTruthAudit:
             desired=box_position+box_rotation@goal.target_positions_box.mean(0)
             offset=(actual.mean(0)-desired)@box_rotation
             row.update(audit_cookie_ids=self.ids.tolist(),true_center=actual.mean(0).tolist(),
+                true_rotation=actual_rotation.tolist(),box_rotation=box_rotation.tolist(),
                 true_xy_error_m=float(np.linalg.norm(offset[:2])),true_height_above_goal_m=float(offset[2]),
                 true_angle_mod_symmetry_deg=symmetric_angle(box_rotation,actual_rotation))
             if pose is not None:
-                row.update(visual_center_error_m=float(np.linalg.norm(pose.center-actual.mean(0))),
+                row.update(visual_rotation=pose.rotation.tolist(),
+                    visual_center_error_m=float(np.linalg.norm(pose.center-actual.mean(0))),
                     visual_angle_error_mod_symmetry_deg=symmetric_angle(actual_rotation,pose.rotation))
         self.stream.write(json.dumps(row)+'\n');self.stream.flush()
 

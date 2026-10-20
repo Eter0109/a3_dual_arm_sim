@@ -4,7 +4,7 @@ from scipy.optimize import linear_sum_assignment
 from .rgbd_localization import RGBDLocalizer,LocalizationFailure
 from .visual_goals import make_visual_goal,visual_region_complete,visual_region_diagnostics
 
-SUPERVISOR_VERSION="rgbd_release_pause_verify_v2"
+SUPERVISOR_VERSION="rgbd_release_pause_verify_v3_retreat_complete"
 
 
 class VisualBatchController:
@@ -55,6 +55,9 @@ class VisualBatchController:
             except LocalizationFailure as exc:next_available=False;next_error=str(exc)
         self.diagnostics=dict(frame_timestamp=float(scene.timestamp),target_instances=len(scene.target_cookies),
             hand_clear_and_open=bool(clear),current_region=current,previous_regions=previous,
+            source_visible_by_column={str(col):sum(c.column==col for c in scene.source_cookies)
+                                      for col in sorted({c.column for c in scene.source_cookies})},
+            placement_boundary_ready=bool(getattr(self.policy,'boundary_ready',True)),
             next_goal_available=next_available,next_goal_error=next_error)
         # Observe release even when placement is wrong: slot agreement must not
         # be required to stop an expired goal from driving the next grasp.
@@ -69,7 +72,7 @@ class VisualBatchController:
         self.diagnostics["new_or_displaced_target_instances"]=new_visible
         # A partially dropped batch also needs inspection, not another grasp.
         # A complete previous batch alone must not trigger a new release.
-        release=clear and new_visible>0
+        release=clear and new_visible>0 and getattr(self.policy,'boundary_ready',True)
         if self.phase=="EXECUTE" and release:
             self._pause();self.phase="VERIFY_RELEASE";self._verification_started=self.step
             self.events.append(dict(step=self.step,event="release_observed_queue_paused",index=self.goal.index))

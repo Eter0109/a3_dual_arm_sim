@@ -19,7 +19,7 @@ from .visual_controller import VisualBatchController,SUPERVISOR_VERSION
 from .rgbd_localization import TARGET_DETECTOR_VERSION
 
 
-def main():
+def main(argv=None,policy_factory=None):
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output",type=Path,required=True)
     p.add_argument("--checkpoint",type=Path,required=True)
@@ -29,6 +29,7 @@ def main():
     p.add_argument("--task",choices=("2x5","2x10"),default="2x5")
     p.add_argument("--profile",choices=("basic","medium","diverse"),default="basic")
     p.add_argument("--seed",type=int,default=26360)
+    p.add_argument("--max-batches",type=int,help="Development scope only; never labels partial work as full task success")
     p.add_argument("--source-column",choices=("1","2","3","4","auto"),default="1")
     p.add_argument("--vision-interval",type=int)
     p.add_argument("--placement-control",choices=("vla","rgbd-servo"),default="vla")
@@ -41,10 +42,12 @@ def main():
                    help="Save at most 32 RGB-D/proprioception packets; no physics snapshots")
     p.add_argument("--audit-placement-truth",action="store_true",
                    help="Log separate privileged labels AFTER decisions; never available to control")
-    a=p.parse_args()
+    a=p.parse_args(argv)
     if a.vision_interval is None:a.vision_interval=5
     if a.output.exists():p.error("Never overwrite an evaluation")
     if a.vision_interval<1:p.error("Invalid vision interval")
+    if a.max_batches is not None and not 1<=a.max_batches<={"2x5":2,"2x10":4}[a.task]:
+        p.error('Invalid development batch scope')
     if a.audit_placement_truth and a.placement_control!='rgbd-servo':
         p.error("Placement truth audit is only for the optional hybrid diagnostic")
     if a.placement_control=="rgbd-servo" and not a.extra_rgbd_view:
@@ -57,7 +60,7 @@ def main():
            (("input_features","observation.state"),("output_features","action"))):
         p.error("Expected a left8-only continuation checkpoint")
     import torch
-    if not torch.cuda.is_available() or torch.cuda.mem_get_info()[0]<14*1024**3:
+    if policy_factory is None and (not torch.cuda.is_available() or torch.cuda.mem_get_info()[0]<14*1024**3):
         p.error("At least 14 GiB free GPU memory required")
     torch.set_num_threads(2);torch.manual_seed(a.seed)
     sys.path.insert(0,str(a.policy_module_dir))
@@ -82,7 +85,7 @@ def main():
         sensor=MujocoRGBDViews(env,views=((a.elevation,a.azimuth),(-90.,90.),(-65.,90.),
                                         *[tuple(v) for v in a.extra_rgbd_view]))
         spec=geometry_spec_from_env(env)
-        policy=importlib.import_module("pi05_adapter").Pi05BenchmarkPolicy(a.checkpoint,a.job)
+        policy=(policy_factory or importlib.import_module("pi05_adapter").Pi05BenchmarkPolicy)(a.checkpoint,a.job)
         torch.manual_seed(a.seed)
         visual=VisualGoalPolicy(policy,descriptor)
         column="auto" if a.source_column=="auto" else int(a.source_column)
@@ -93,6 +96,7 @@ def main():
             placement=RGBDPlacementPolicy(visual,servo,spec)
         controller=VisualBatchController(placement or visual,spec,column=column,context=context)
         if placement:placement.scene_provider=lambda:controller.last_scene
+        if placement:placement.budget_provider=lambda:max(1,controller.batch_steps-(controller.step-controller.batch_started)-30)
         if a.audit_placement_truth:
             from .placement_audit import PlacementTruthAudit
             audit=PlacementTruthAudit(a.output/'placement_truth_audit.jsonl')
@@ -146,6 +150,7 @@ def main():
                     placement_perception_error=placement.last_error,action_counts=placement.counts)
                 (a.output/"status.json").write_text(json.dumps(status));print(json.dumps(status),flush=True)
             if controller.finished or terminated or truncated:break
+            if a.max_batches is not None and len(controller.completed)>=a.max_batches:break
         result=dict(task=a.task,seed=a.seed,phase=controller.phase,completed_batches=len(controller.completed),
             failure_reason=controller.failure_reason,events=controller.events,interaction_steps=step+1,
             native_success_evaluation_only=bool(info.get("success",False)),
@@ -161,6 +166,8 @@ def main():
         result["placement_probe_packets"]=recorder.count if recorder else 0
         result['placement_control']=a.placement_control
         result['placement_truth_audit_after_decisions']=bool(audit)
+        result['evaluation_scope_batches']=a.max_batches or {'2x5':2,'2x10':4}[a.task]
+        result['requested_scope_success']=len(controller.completed)>=result['evaluation_scope_batches']
         if placement:
             from .rgbd_placement import PLACEMENT_VERSION
             from .rgbd_held import HELD_POSE_VERSION
@@ -172,7 +179,7 @@ def main():
             with (a.output/'placement_trace.jsonl').open('w') as stream:
                 for row in placement.trace:stream.write(json.dumps(row)+'\n')
         (a.output/"result.json").write_text(json.dumps(result,indent=2))
-        return 0 if controller.phase=="DONE" else 2
+        return 0 if result['requested_scope_success'] else 2
     finally:
         if audit:audit.close()
         if video:video.close()

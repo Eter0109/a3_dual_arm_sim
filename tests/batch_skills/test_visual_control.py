@@ -149,5 +149,19 @@ class VisualControlTests(unittest.TestCase):
             self.assertEqual(ctrl.phase,"RECOVERY_REQUIRED");self.assertEqual(policy.starts,[0])
             self.assertIn("Next batch",ctrl.failure_reason)
 
+    def test_hybrid_retreat_finishes_before_queue_pause_and_visual_verification(self):
+        ctrl,policy,state=self.controller()
+        policy.boundary_ready=False
+        with patch('a3_batch_skills.visual_controller.make_visual_goal',side_effect=lambda f,s,p,i,**k:self.goal(i)):
+            self.run_controller(ctrl)
+            state[0]=self.scene(self.goal().target_positions_box,.1)
+            self.run_controller(ctrl)
+            self.assertEqual(ctrl.phase,'EXECUTE');self.assertEqual(policy.pauses,0)
+            self.assertEqual(policy.actions,2)
+            policy.boundary_ready=True
+            state[0]=replace(state[0],timestamp=.2);self.run_controller(ctrl)
+            self.assertEqual(ctrl.phase,'VERIFY_RELEASE');self.assertEqual(policy.pauses,1)
+            self.assertEqual(policy.actions,2)
+
 
 if __name__=="__main__":unittest.main()

@@ -10,11 +10,11 @@ from a3_batch_skills.rgbd import RGBDFrame,MujocoRGBDViews
 from a3_batch_skills.visual_goals import VisualBatchGoal
 from a3_batch_skills.placement_observation import PlacementProbeRecorder
 from a3_batch_skills.placement_audit import PlacementTruthAudit
-from a3_batch_skills.rgbd_held import HeldBatchLocalizer
+from a3_batch_skills.rgbd_held import HeldBatchLocalizer,upper_surface_plane
 from a3_batch_skills.rgbd_held import HeldBatchPose
 from a3_batch_skills.rgbd_localization import rotation_z,LocalizationFailure
 from a3_batch_skills.rgbd_placement import (MeasuredPlacementServo,RGBDPlacementPolicy,
-    RobotPlacementState,relative_goal_features)
+    RobotPlacementState,relative_goal_features,GraspPoseFilter)
 
 
 class PlacementProbeTests(unittest.TestCase):
@@ -59,6 +59,31 @@ class PlacementProbeTests(unittest.TestCase):
 
 
 class HeldGeometryTests(unittest.TestCase):
+    def test_tilted_bevel_group_keeps_three_dimensional_center_and_normal(self):
+        x,y=np.meshgrid(np.linspace(-.024,.024,75),np.linspace(-.0031665,.0031665,35))
+        z=.0125-np.maximum(0,abs(y)-(.0031665-.0025))
+        local=np.concatenate([np.c_[x.ravel(),y.ravel()+i*.006333,z.ravel()] for i in range(-2,3)])
+        from scipy.spatial.transform import Rotation
+        center=np.array([.1,.2,.9])
+        for angles in ([0,32,5],[28,-8,5]):
+            rotation=Rotation.from_euler('xyz',angles,degrees=True).as_matrix()
+            pose=self.localizer().fit(local@rotation.T+center,center+[0,0,.010],np.eye(3),2.)
+            np.testing.assert_allclose(pose.center,center,atol=.001)
+            error=np.rad2deg(np.arccos(np.clip((np.trace(pose.rotation.T@rotation)-1)/2,-1,1)))
+            self.assertLess(error,2.)
+
+    def test_bevel_dense_surface_does_not_bias_top_normal(self):
+        # Public shape: 6.33 mm thickness, 2.5 mm bevel, narrow flat top.
+        x,y=np.meshgrid(np.linspace(-.024,.024,75),np.linspace(-.0031665,.0031665,35))
+        z=.0125-np.maximum(0,abs(y)-(.0031665-.0025))
+        points=np.concatenate([np.c_[x.ravel(),y.ravel()+i*.006333,z.ravel()] for i in range(-2,3)])
+        from scipy.spatial.transform import Rotation
+        rotation=Rotation.from_euler('xyz',[4,-3,6],degrees=True).as_matrix()
+        center=np.array([.1,.2,.9]);points=points@rotation.T+center
+        normal,_=upper_surface_plane(points,center+[0,0,.010],np.eye(3))
+        angle=np.rad2deg(np.arccos(np.clip(normal@rotation[:,2],-1,1)))
+        self.assertLess(angle,1.)
+
     def cloud(self,count=5):
         x,y=np.meshgrid(np.linspace(-.025,.025,85),np.linspace(-.002,.002,9))
         patches=[np.c_[x.ravel(),y.ravel()+i*.006333,np.full(x.size,.0125)] for i in np.arange(count)-(count-1)/2]
@@ -80,6 +105,14 @@ class HeldGeometryTests(unittest.TestCase):
     def test_partial_group_is_unknown_not_filled_from_packing(self):
         cloud,center,_=self.cloud(3)
         with self.assertRaises(LocalizationFailure):self.localizer().fit(cloud,center+[0,0,.01],np.eye(3),1.)
+
+    def test_small_vertical_slip_requires_observed_support_for_all_five(self):
+        cloud,center,rotation=self.cloud()
+        local=(cloud-center)@rotation
+        cloud[local[:,1]<-.010,2]-=.0014
+        pose=self.localizer().fit(cloud,center+[0,0,.010],np.eye(3),1.)
+        self.assertEqual(pose.visible_count,5)
+        self.assertLess(pose.formation_error_m,.003)
 
     def test_both_visible_ends_support_pose_despite_middle_occlusion(self):
         cloud,center,rotation=self.cloud()
@@ -104,6 +137,25 @@ class FakeServo:
 
 
 class PlacementControlTests(unittest.TestCase):
+    def test_grasp_filter_preserves_robot_motion_and_rejects_isolated_offset_noise(self):
+        filt=GraspPoseFilter();offset=np.array([-.016,0,-.01])
+        for i in range(5):
+            rotation=rotation_z(i*.04);tool=np.array([i*.005,0,.10])
+            robot=RobotPlacementState(tool,rotation,tool,.032,.25,i*.05)
+            true=tool+rotation@offset
+            pose=self.pose(true,rotation,i*.05)
+            filtered=filt.update(pose,robot)
+            np.testing.assert_allclose(filtered.center,true,atol=1e-12)
+        noisy=self.pose(true+[.008,0,0],rotation,.25)
+        result=filt.update(noisy,replace(robot,timestamp=.25))
+        np.testing.assert_allclose(result.center,true,atol=1e-12)
+        with self.assertRaises(ValueError):filt.update(noisy,robot)
+
+    def test_geometry_budget_fits_remaining_batch_and_accounts_for_travel(self):
+        pose=self.pose((.06,.0,.11));robot=self.robot(pose);servo=MeasuredPlacementServo(FakeServo())
+        servo.start(pose,robot,np.array([0.,0.,.0185]),np.eye(3),remaining_steps=570)
+        self.assertGreater(servo.step_budget,350);self.assertLessEqual(servo.step_budget,570)
+
     def pose(self,center=(.02,.01,.08),rotation=None,time=0.):
         rotation=np.eye(3) if rotation is None else rotation;center=np.asarray(center,dtype=float)
         positions=np.c_[np.zeros(5),np.arange(-2,3)*.006333,np.zeros(5)]@rotation.T+center
