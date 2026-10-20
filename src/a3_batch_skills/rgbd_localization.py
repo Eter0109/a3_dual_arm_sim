@@ -142,7 +142,7 @@ class RGBDLocalizer:
             result[kind]=min(ranked,key=lambda row:row[0])[1]
         return result["source"],result["target"]
 
-    def _free_targets(self,q,box):
+    def _free_targets(self,q,box,*,allow_internal_occlusion=False):
         """Fit visible upright top ridges anywhere in the box, not at slot seeds.
 
         A misplaced object must still be detected. Slot agreement is evaluated
@@ -173,6 +173,9 @@ class RGBDLocalizer:
             width=(segment.stop-segment.start)*.0004
             if not .0035<width<.0085:continue
             row=q[(q[:,1]>yedges[segment.start]-.0002)&(q[:,1]<yedges[segment.stop]+.0002)]
+            # Held-object sensing may see both ends with the gripper hiding
+            # the middle. Length/coverage still need actual measured support.
+            if allow_internal_occlusion:patches.append(row)
             xedges=np.arange(-box.inner_half_size[0],box.inner_half_size[0]+.001,.001)
             density=ndimage.gaussian_filter1d(np.histogram(row[:,0],xedges)[0].astype(float),.65)
             spans=ndimage.binary_closing(density>max(.5,float(density.max())*.08),structure=np.ones(2))

@@ -153,7 +153,7 @@ class MujocoRGBDSensor:
 
 
 class MujocoRGBDViews:
-    """Calibrated virtual sensors at three explicit, fixed viewpoints.
+    """Calibrated virtual sensors at explicit, fixed viewpoints.
 
     They share a renderer for memory efficiency; no physics step occurs between
     captures. A real setup would need calibrated synchronous physical cameras.
@@ -161,7 +161,8 @@ class MujocoRGBDViews:
     def __init__(self,env,*,views=((-65.,180.),(-90.,90.),(-65.,90.)),**kwargs):
         self.sensor=MujocoRGBDSensor(env,**kwargs)
         self.views=tuple(views)
-        self.protocol=dict(self.sensor.protocol,sensor="three_fixed_rgbd_views",
+        self.protocol=dict(self.sensor.protocol,sensor="three_fixed_rgbd_views" if len(self.views)==3 else "fixed_rgbd_views",
+                           view_count=len(self.views),
                            views=[dict(elevation=e,azimuth=a) for e,a in self.views])
 
     def capture(self):

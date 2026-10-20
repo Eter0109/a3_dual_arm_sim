@@ -33,6 +33,8 @@ class VisualBatchController:
     @property
     def finished(self):return self.phase in ("DONE","FAILED","RECOVERY_REQUIRED")
 
+    def require_recovery(self,reason):self._fail(reason,recovery=True)
+
     def _pause(self):
         if not self._paused:self.policy.pause(self.context)
         self._paused=True
