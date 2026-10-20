@@ -978,3 +978,124 @@ documents the orientation correction and states that rev 1 is superseded.  Verif
 upload: `meta/info.json` reads 1000 episodes / 425,393 frames, the card sits at the repository
 root, the remote `MANIFEST.sha256` is byte-identical, and two downloaded files (`file-001.parquet`,
 one left-wrist video) hash to the same values as the local bundle.
+
+### 9.16 The third arm: the corrected data does help, and the curve is not monotonic (10-20)
+
+Third arm: the 20k incumbent, 4000 steps, the corrected dataset -- the recipe of 9.1 with a
+different one of the two inputs.  From the 20k base the loss starts at **0.109 at step 20**
+(against 0.002 for the drift arm of 9.15), so this arm actually trained.  Scored at every
+checkpoint on main's actual reset, 20 seeds, 900 steps, det+fp32:
+
+| checkpoint | main's scene | rev-1 upright scene |
+|---|---|---|
+| 001000 | 5.20 {5: 18, 7: 2} | -- |
+| 002000 | 5.00 {5: 20} | -- |
+| 003000 | 0.00 {0: 20} | -- |
+| **004000** | **7.75** {5: 9, 10: 11} | 9.90 {9: 2, 10: 18} |
+
+Two things fall out of that table.
+
+**The curve is not monotonic, and 3000 is a hole, not a trend.**  Arm 1 read 3.50 / 2.25 / 6.80
+/ 10.00 on its own scene at 1k/2k/3k/4k; this arm reads 5.20 / 5.00 / 0.00 / 7.75.  The 3000-step
+checkpoint grasps three Cookies in its first 300 steps and never releases them -- 80 of 80
+Cookies still in the source bin after 900 steps, three in the gripper, `floor +0.4 mm`, and the
+rollout runs at 0.7 steps/s instead of 1.9 because the arm is dragging them through contact.
+Reading a checkpoint from the middle of a cosine is therefore not reading the arm; both arms
+have a collapsed checkpoint somewhere in their history, and only the endpoint is comparable.
+
+**At the endpoint the corrected data is ahead, by two seeds.**  7.75 against 7.25 on main's own
+reset, 9.90 against 10.00 on the upright scene -- so the gain is specific to the scene where the
+second-batch insertion is hard, and costs nothing where it is easy.  Both arms read the same
+scene digest (`cookies 80 sha=535695d0`), the same statistics file (the two datasets' stats are
+identical to 1e-6), and the same seeds, so the rollouts are paired.
+
+Two seeds out of twenty is not a result, so both checkpoints were re-run on **seeds 20-39**
+immediately afterwards to decide the claim on 40 seeds rather than 20; those numbers go in 9.17
+when they land.
+
+**Where this leaves the numbers.**  The published card's 0.00 -> 7.55 came from the bf16,
+non-deterministic instrument on the upright scene; under the deterministic float32 instrument
+the same checkpoint reads 10.00 there and 7.25 on the benchmark's real scene.  The best
+checkpoint we now have on that scene is this arm's 004000 at **7.75**, against the benchmark's
+own policy at 5.00-5.25.  Every number in this section is a deterministic single measurement of
+a single checkpoint, so no seed-level error bar is being quoted.
+
+### 9.16 On the authority stack the two data revisions are indistinguishable (10-20)
+
+Everything in 9.14-9.15 was measured in *our* env with main's layout transplanted and *our*
+relaxed contract.  The number that matters to main is the one main's own code produces, so both
+checkpoints were scored there: `/tmp/a3-main` at 29fe90e, `bench_main_20k.py`, `--no-randomize`,
+900 steps, 20 episodes, 20 workers, weights served through the same bridge, det+fp32.
+
+| checkpoint | trained on | main's benchmark | our scene, 40 seeds |
+|---|---|---|---|
+| `a3_b2_aligned4000/004000` | rev-1 (upright) | **5.00** {5: 20} | 7.50 {5: 20, 10: 20} |
+| `a3_b2_aligned_v3_4000/004000` | rev-2 (oriented) | **5.00** {5: 20} | 7.75 {5: 18, 10: 22} |
+| 20k incumbent, same two | -- | 0.00 (9.6) | -- |
+
+Both read `failure_reason: max_steps_exceeded`, `cookies_in_target: 5`, `success_rate: 0.0`,
+`mean_steps: 900`.  On main's judge the Cookie-orientation correction buys **nothing measurable**,
+and neither does the extra 4000-step arm (5.00, 5.00, and 5.00 for the rev-1 checkpoint in 9.6).
+
+**Why the two columns disagree, and what each one is allowed to say.**  The 40-seed column uses
+this repository's contract (`require_upright: false`, `require_exact_slots: false`, "ten released,
+settled and contained"), the 20-episode column uses main's (`15 deg` upright, exact slots, wall
+contact, `success_hold_steps: 5`).  A rollout that ends 10-in-the-box-but-not-exact passes one and
+fails the other, so the columns are not two measurements of one quantity.  The only claim the
+data supports:
+
+* **On main's benchmark** the aligned fine-tune moved the score from 0.00 to 5.00, and that is
+  where it stops: 5.00 is the one-batch plateau, and 20 of 20 rollouts sit on it in every
+  configuration tried today (rev-1 data, rev-2 data, 4000-step continuation, 4000-step fresh arm).
+* **On a relaxed contract** the same checkpoints reach 7.5-7.75, and the two data revisions are
+  one seed apart in 40 (7.50 vs 7.75, p ~ 0.8) -- indistinguishable.
+* The 7.55 / 7.25 / 7.75 numbers in 9.1-9.15 are therefore **this branch's instrument**, not
+  main's score, and the dataset card was corrected to say so.
+
+**What is still unexplained.**  Five checkpoints across three arms and two data revisions all
+land exactly on the 5/10 plateau under main's judge, while the same checkpoints split ~50/50
+between 5 and 10 under the relaxed contract.  So the binding constraint on main's benchmark is the
+strict acceptance test (upright + exact slot + hold), not the scene, not the data revision, and not
+the sampler.  Closing the remaining gap means training for *precision*, not for the arrangement:
+the demonstrations are 100 % successful under the relaxed contract and were never filtered for
+exact-slot placement, so the data may simply not contain the signal main's judge asks for.
+
+### 9.17 Where the "20k scored better than 5" memory comes from, and why nothing regressed
+
+Four runs of the 20k incumbent through main's own benchmark exist, and none of them is a mean
+above 5:
+
+| file | checkpoint | scene | n | mean |
+|---|---|---|---|---|
+| `bench_main_20k_scene20.json` | 20k | `--training-scene /tmp/ours_scene.json --no-randomize` | 20 | 3.65 |
+| `bench_main_20k_scene20_w4.json` | 20k | same, 4 workers | 20 | **4.45** (one seed reached 10) |
+| `bench_main_seed0.json` | 20k | same | 20 | 3.70 |
+| `bench_main_random_seed0.json` | 20k | `--scene-mode cameras` (main's own per-seed randomisation kept) | 20 | 0.00 |
+
+The numbers above 5 that this session has quoted for the incumbent are from **our** instrument,
+on **our** arrangement: 5.35 (randomised layout, our judge, 9.5) and 7.75 on a four-seed batch of
+`a3_b2_unfreeze_20k`.  They are not main's benchmark.
+
+So the score sheet on main's judge is monotone, not regressive:
+
+| checkpoint | scene it is scored on | main's benchmark |
+|---|---|---|
+| 20k incumbent | main's layout, no shim | 0.00 (9.6) |
+| 20k incumbent | its own layout restored | 3.65-4.45 |
+| aligned +4000 (rev-1) | main's layout (= its training layout) | 5.00 |
+| aligned-from-20k +4000 (rev-2) | main's layout | 5.00 |
+
+The aligned fine-tune is the only thing that gets off zero on main's own layout, and it does so by
++5.00.  The flat 5.00 across checkpoints is **9.11's per-stack propensity**, not a fresh
+regression: the identical checkpoint reads 10.00 in four launches on this branch's stack and 5.00
+in four launches on main's, reproducibly, before any of today's data work.  `cookies_in_target`
+in main's code is a geometric count (`_cookie_inside_target`), so the 5 is "the second batch never
+got into the box", not "it got in and was rejected by the strict criterion" -- the strict part
+only gates `success`, which is 0 % everywhere.
+
+What would still be worth trying, in order of information per GPU-hour: (1) more steps under
+main's judge (1400 instead of 900) to see whether the plateau is a budget artefact; (2) a
+rollout-level comparison of the two stacks on the *same* observation stream, which 9.12 shows is
+already bit-identical for `right_wrist_view` and `observation.state` and differs only in the two
+Cookie-facing views; (3) demonstrations filtered for exact-slot placement, which is the one thing
+the current data never asked for.
