@@ -1241,10 +1241,16 @@ shim, no `--no-randomize`:
 
 | checkpoint | training data | mean | distribution | strict successes |
 |---|---|---|---|---|
+| `a3_b2_unfreeze_20k/020000` (incumbent) | original 20k, un-aligned | **0.00** | {0:20} | 0 / 20 (0 %) |
 | `a3_b2_aligned4000/004000` (arm 1) | rev 1, pinned layout | **3.75** | {0:6, 5:12, 6:1, 9:1} | 0 / 20 (0 %) |
 | `a3_b2_aligned_v3_4000/004000` (arm 3) | rev 2, main-aligned orientations | **4.05** | {0:5, 1:1, 4:1, 5:10, 6:1, 10:2} | **2 / 20 (10 %)** |
 
-Two things follow, and only two.
+**The incumbent's zero is real, not a crash.**  Every base episode ran the full 900 steps at a
+median wall time of 432 s, the same as the two aligned arms (419 s / 430 s), so the bridge was
+healthy and the policy was acting for the whole episode; it simply never placed a single Cookie
+inside the target.  With the layout frozen it scores 3.65 / 4.45 / 3.70 (9.17).  So the entire
+0.00 -> 3.75 jump is *robustness to the randomised layout*, not a difference in the nominal task:
+the incumbent only works when the bins sit exactly where it was trained to find them.
 
 1. **The orientation fix is worth something, but not much.**  +0.30 mean and the first genuine
    strict successes (episodes 5 and 11, full upright-in-slot with the 5-step hold).  Under the
@@ -1257,10 +1263,11 @@ Two things follow, and only two.
    measured as decisive.  A 10 % strict rate is not a task the policy has learned; it is a task it
    sometimes gets away with.
 
-**The missing row.**  The 20k incumbent has still never been run on the randomised judge -- 9.17's
-3.65 / 4.45 / 3.70 were all `--no-randomize` on our layouts.  Until that row exists, "the aligned
-fine-tune gets off zero where the base does not" is not supported.  It is one 15-minute run and it
-should be taken before any further training.
+**What the three rows together say.**  The aligned fine-tune is not "better at the task"; it is
+the only one of the three that survives a layout it was not shown.  That reframes the next
+collection: the question is no longer "does the aligned data help" (it does, 0.00 -> 4.05) but
+"how much of that 4.05 is insertion and how much is luck", which is exactly what training on
+jittered bins is meant to answer.
 
 Reproduce:
 
