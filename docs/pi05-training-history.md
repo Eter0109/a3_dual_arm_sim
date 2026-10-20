@@ -1207,9 +1207,22 @@ never exercised translation, while 9.19 shows that a translation of 0.454 mm is 
 of twenty seeds' outcomes.  The policy was trained on a scene whose insertion target sat at
 exactly one place, and it fails by less than half a millimetre whenever it does not.
 
-That is the change worth making in the next collection: keep everything above and add
-`--position-noise 5e-4` (0.5 mm, Gaussian, both bins) so the placement error that decides the
-outcome is inside the training distribution instead of outside it.
+That is the change worth making in the next collection: keep everything above and add box
+translation noise, so the placement error that decides the outcome is inside the training
+distribution instead of outside it.
+
+**Flag correction.**  The knob for that is `--align-bin-noise` (Gaussian sigma in metres, applied
+to *both bins* on top of the aligned arrangement).  `--position-noise` is **per-Cookie** XY jitter
+-- in the aligned path `cli.py` passes it to the hook as `cookie_noise_m`, not as a bin term --
+and `--yaw-noise` is per-Cookie yaw.  Matching main's shipped `basic` profile therefore means
+
+```
+--align-bin-noise 0.01 --align-bin-yaw-noise 0.03 --position-noise 0.0003 --yaw-noise 0.015
+--align-pose-noise 0
+```
+
+(bins +-1 cm, target yaw 0.03 rad, Cookies 0.3 mm / 0.9 deg, arm home pose pinned), not
+`--position-noise 5e-4`.
 
 **A reporting gap to close.**  `collection_summary.json` records `yaw_noise_rad: 0.0` and
 `position_noise_m: 0.0`, which are the *scene config's* randomisation fields (zeroed by the two
