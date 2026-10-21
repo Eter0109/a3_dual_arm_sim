@@ -1412,3 +1412,56 @@ release procedures differ.
 Verified after upload by downloading the card, the notice and both eval records and checking them
 against `MANIFEST.sha256` (all four OK), and by listing the repository through the API: 13 files,
 `model.safetensors` 9.35 GB.
+
+### 9.25 Measured: the policy's own first batch lands 2-10 mm off the slot column, and `prefill`
+only ever generates 0.2 mm (10-21)
+
+9.23 argued from episode-level bookkeeping that `prefill` cannot be doing its job.  This measures
+it.  The 4.05 checkpoint was driven on main's benchmark, one episode at a time, recording after
+every step the pose of each Cookie that the judge counts as inside the target -- in the box frame,
+so it is comparable with what `place_cookie_in_slot` generates.  Ten seeds; five of them reached
+five Cookies in the target, which is the state `prefill` is supposed to imitate.
+
+| seed | Cookies at first-5 | median offset from nearest slot | spread within the group | worst lean | worst \|yaw\| |
+|---|---|---|---|---|---|
+| 1 | 5 | 9.49 mm | 0.66 mm | 0.63° | 0.5° |
+| 4 | 5 | 2.29 mm | 6.22 mm | 0.37° | 1.6° |
+| 5 | 5 | 9.33 mm | 2.92 mm | 0.52° | 0.1° |
+| 6 | 5 | 2.04 mm | 9.59 mm | 1.02° | 3.3° |
+| 7 | 5 | 2.50 mm | 0.12 mm | 0.72° | 0.1° |
+
+Across the 25 Cookies: median offset **5.03 mm**, quartiles 2.34 / 5.03 / 9.45 mm, and **4 % within
+2 mm** of a slot centre.
+
+`prefill`'s generator (`batch_expert._prefill_first_batch`, soft draw) produces:
+lean `U(0, 4°)`, yaw `U(±1°)`, per-Cookie jitter **≤ 0.2 mm around the ideal slot centre**.  So the
+two distributions differ by **25-50x on the axis that matters**, and they differ in the other
+direction on the axes that do not: the policy is *more* upright than the generator ever is
+(≤ 1.0° against 0-4°) and its yaw is comparable.
+
+**Zero of five episodes fall inside `prefill`'s soft support.**  That is the covariate shift 9.23
+predicted, measured.
+
+Two structural facts make it worse than a scalar mismatch:
+
+* **The offset is coherent, not scattered.**  Where it goes well the five land in a block with
+  0.1-0.7 mm of internal spread, displaced as a unit.  That is a *group* error -- the whole batch
+  is deposited a few millimetres off the slot column -- and it is the shape the judge rewards with
+  5 rather than 10: footprint inside the box, nothing in a slot.  The 20-episode benchmark says the
+  same thing independently (score 5 in 10-12 episodes, score 10 in 2).
+* **`prefill` fixes the wrong residuals.**  It varies lean, yaw and sub-millimetre jitter around a
+  correctly slotted group.  Every one of those is already inside the policy's own error budget; the
+  one it does not vary is the millimetre-scale translation that dominates.
+
+So the change `prefill` needs is not a wider lean or a bigger jitter: it is a **group-level
+translation drawn from the measured error distribution** -- a per-episode offset of order 0-10 mm
+applied to all five slots together, plus a smaller per-Cookie residual -- and, because the policy
+also produces 5/10 episodes that never place five at all, the prefill has to remain only part of the
+data rather than most of it.
+
+The same measurement says what the *policy* needs, independent of the augmentation: it can already
+carry five Cookies as a coherent block and put them in the box; what it cannot do is put that block
+where the slots are.  A method that adds millimetre-accurate slot localisation to the second batch
+would be worth more than every layout-noise and prefill variant tried so far -- which is consistent
+with the 4.05 coming from the Cookie-orientation fix (a *localisation* change) rather than from any
+noise-setting change (9.21-9.23).
