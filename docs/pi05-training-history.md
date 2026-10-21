@@ -1739,3 +1739,56 @@ recording every step the way 9.28 did for the first batch.  The question is whic
 has -- the arm keeps carrying and dropping (transfer), it stops moving (the policy believes it is
 done), or it works on Cookies that never count (placement) -- because each points at a different
 fix and only the last is a training problem.
+
+### 9.32 The second batch is executable; what fails is the state the first one leaves (10-22)
+
+9.31 left one question: when three quarters of the episodes end at exactly five with the budget
+spent, is the policy unable to do a second batch, or is it refusing to?  The probe separates them.
+
+`_prefill_first_batch` teleports five Cookies into the first column's slots (with drawn lean, yaw
+and jitter) and leaves the arm at home.  That is a half-done episode with a *clean* first batch and
+a *reset* arm pose.  Handing that state to the policy, `execute: 24`, 900-step cap:
+
+| seed | steps | final in target |
+|---|---|---|
+| 0 | 243 | **10 / 10** |
+| 4 | 247 | **10 / 10** |
+
+Both finish in about the same time the first batch alone takes.  So **the second batch is
+executable at the same speed as the first** -- the policy is not refusing to work, and it does not
+treat five as the goal.
+
+What differs between this probe and a real rollout:
+
+* the box holds the policy's *own* block, 9-12 mm off the slots at `execute: 16`, ~1 mm at 24;
+* the arm starts mid-episode, above the box, rather than at home;
+* the source column has a hole where that block came from.
+
+The one real rollout that reached a second batch (seed 4, `execute: 24`) showed the arm returning to
+the source bin and hovering at **x = 110 mm while the Cookies sit at 99-101 mm** -- 11 mm outboard
+-- for 250 steps, rising and descending, without lifting anything.  That is the same
+"stops one approach-width short and repeats" signature 9.29 found in the first batch's placement,
+now at the second batch's grasp.
+
+**Consequence for training.**  The failure is not a missing capability that more demonstrations of
+the clean state would supply -- the policy already solves that.  It is a state-distribution problem:
+the policy meets its own half-done state at deployment and not in the demonstration's half-done
+state.  The two ways to attack that are on-policy data (collect from the policy's own states, which
+is what 9.27's gate was built to enable and could not, because the expert cannot finish from them)
+and more exposure to the existing data, which is the only one that can run tonight.
+
+**Tonight's run -- one variable, 4.05 with 4.5x the schedule.**  `a3_b2_aligned_v3_18k`:
+same base checkpoint, same dataset, same un-freeze scope, same batch 6, `lr 5e-6 -> 2.5e-7` over
+18000 steps (warmup 600).  The reason it is worth a night: at batch 6 the 4000-step run saw
+**24,000 samples = 5.6 % of one epoch, about 56 episodes of 1000**.  The aligned arm has been judged
+on five per cent of the data.
+
+Checkpoints every 2000 steps, so the morning has a scaling curve rather than one number.
+
+* If the "exactly five" count falls with steps (13 of 20 at 4k) and strict successes appear at 12k
+  or 18k, the aligned arm was under-trained and the next night is simply longer.
+* If it stays at 13 of 20, then exposure is not the lever, the covariate shift above is, and the
+  next step is on-policy collection with an expert that can work from the policy's states -- not
+  another training run.
+
+Either way the run answers a question the last four days kept deferring.
