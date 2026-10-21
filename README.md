@@ -3,9 +3,12 @@ AI305-Project
 
 ## 链接发布页
 
-SmolVLA模型数据(后续更新)：[`a3-cookie-multi-left8-40k-v1`](https://huggingface.co/Eter0109/a3-cookie-multi-left8-40k-v1)
+SmolVLA模型数据(后续更新)：[`Eter0109/a3-cookie-multi-left8-40k-v1`](https://huggingface.co/Eter0109/a3-cookie-multi-left8-40k-v1)
 
 SmolVLA基座模型：[`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_base)
+
+π0.5模型数据：[`yunsx114/a3-dual-arm-cookie-pi05-aligned`](https://www.modelscope.cn/models/yunsx114/a3-dual-arm-cookie-pi05-aligned)
+
 示范数据集：[`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)
 
 ---
