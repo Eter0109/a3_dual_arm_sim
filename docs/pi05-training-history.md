@@ -1675,3 +1675,37 @@ benchmark) was scored at `execute: 16`.  If the pacing is what kept the first ba
 slots, then that score is a floor set by our harness, not by the checkpoint, and main reproducing
 it with their own pacing would not get the same number.  The next measurement is the benchmark
 itself at `execute: 48`, which is what turns 3 seeds into a score.
+
+### 9.30 The pacing fixes the first batch and does not move the score (10-21)
+
+9.29 ended with a prediction: if the truncation is what kept the first batch out of the slots, the
+published score is a floor.  The paired benchmark tests it -- same checkpoint, same 20 seeds, same
+judge, same 900-step cap, one variable (`execute` of a 50-action chunk):
+
+| execute | mean | distribution | strict successes |
+|---|---|---|---|
+| 16 (published regime) | 3.85 | {0:6, 1:2, 5:9, 10:3} | 3 / 20 |
+| 48 | **4.40** | {0:2, 1:1, 4:1, 5:14, 6:1, 7:1} | **0 / 20** |
+
+The means differ by 0.55 with a paired standard deviation of 3.5 (SE 0.78), so **the score change is
+not significant** -- but the shape of the distribution is not noise.  Eight of twenty episodes
+improve (0 -> 5 in six of them), four get worse, eight are unchanged.  The four that get worse are
+exactly the episodes that had reached ten: 4, 10 and 17 go **10 -> 5**.
+
+So the prediction was half right.  `execute: 48` makes the first batch reliable -- the zero column
+nearly empties (6 -> 2) and the mode moves from 5-with-a-tail to a tight 5 -- and it removes every
+strict success, because the same long commitment that lets the final approach finish also makes the
+*second* batch worse.  The first batch was never the binding constraint; it was hiding the second.
+
+That is consistent with 9.27's gate: with `execute: 48` the takeover state now holds **5 Cookies in
+the slots** (it held 0 before) and one of four seeds completes (tier A, 10/10 in target, 9 slots),
+while the failures are the expert at ~39.5 N trying to insert into a box that is half full.  The
+wall is the second batch, and it is the same wall from both ends -- the policy's second batch and
+the expert's recovery both fail there.
+
+**What to carry forward.**  The 10 mm was real and is explained; fixing it did not raise the score,
+so it must not be sold as a win on its own.  Two open readings of the 10 -> 5 regressions: either
+the second batch needs the shorter re-plan (a 2.4 s commitment is too long for its insertion), or
+those three episodes were the ones where a mis-placed first batch accidentally left the box in a
+shape the second batch could use.  The per-batch trace at both pacings is what separates them, and
+that is the next measurement rather than another training run.
