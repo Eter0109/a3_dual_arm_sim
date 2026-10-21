@@ -1465,3 +1465,32 @@ where the slots are.  A method that adds millimetre-accurate slot localisation t
 would be worth more than every layout-noise and prefill variant tried so far -- which is consistent
 with the 4.05 coming from the Cookie-orientation fix (a *localisation* change) rather than from any
 noise-setting change (9.21-9.23).
+
+### 9.26 What the 4.05 handover actually consists of (10-21)
+
+`/root/autodl-tmp/release/handover-pi05-4.05.tar.gz` (152 KB) plus the ModelScope weights.  The
+package is code and protocol only, because the weights are 9.35 GB and already published:
+
+| file | why it has to travel |
+|---|---|
+| `PROMPT.txt` | the one sentence the checkpoint was trained on; with their harness's `"transfer 10 cookies into target box"` it places nothing |
+| `code/a3_bridge_server.py` + `code/pi05_a3.py` | the policy-side contract: 16-wide absolute joint actions, chunk 50 / **execute 16**, 224×224 `INTER_AREA` RGB, three named camera slots, state 16 wide and *not* padded, and the determinism switches |
+| `code/reference_driver_bench_main_20k.py` | their driver with the two changes; reference only |
+| `CHANGES_vs_your_benchmark.md` | the two changes, so they can patch their own tree instead of taking ours |
+| `eval/*.json` | the two runs behind 4.05 and 5.00, per episode |
+| `HANDOVER.md` | commands, protocol table, determinism, failure breakdown, provenance |
+
+**The benchmark does not need copying.**  Their `benchmark.py` already accepts an external policy
+through `worker_policy_spec`, and their CLI already has `--max-steps`, `--seed-start`,
+`--no-randomize-boxes` and `--no-randomize-cookies`.  The only two things that are genuinely ours
+are (a) a `--policy` route to a socket, which the driver shows how to bypass, and (b) the
+instruction override.  Handing over a forked benchmark would have implied a divergence that does
+not exist.
+
+Two details in the handover that would silently wreck a reproduction, both stated there and both
+worth repeating: **execute 16 of 50 predicted steps** (not all 50), and **fp32 + a fixed sampler
+seed** (bf16 without one scored 10/10, 0/10 and 5/10 on the same checkpoint and scene).
+
+The package is `tar.gz` rather than a branch push so that the recipient needs no repository access;
+`git bundle` of the same branch (167 commits, 11 MB) is at
+`/root/autodl-tmp/release/vla-policy-interface-v2.bundle` if a fetchable form is preferred.
