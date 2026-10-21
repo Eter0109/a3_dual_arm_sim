@@ -1792,3 +1792,43 @@ Checkpoints every 2000 steps, so the morning has a scaling curve rather than one
   another training run.
 
 Either way the run answers a question the last four days kept deferring.
+
+### 9.33 4.5x the training, same wall (10-22)
+
+9.32 pre-registered the test: if the "exactly five" count does not fall with more exposure, the
+aligned arm is not under-trained and the next move is on-policy data, not another run.  The run
+finished: 18,000 steps, 6h05m, final loss 0.002, **254 episodes seen** against the 4,000-step run's
+56 -- 4.5x the data exposure, everything else identical (same base, dataset, un-freeze, batch 6,
+`lr 5e-6 -> 2.5e-7`).
+
+Same 20 seeds, same judge, `execute: 24`:
+
+| model | steps | episodes seen | mean | strict | ending at exactly 5 | distribution |
+|---|---|---|---|---|---|---|
+| 4.05 | 4,000 | 56 | 4.60 | 0 / 20 | 13 | {0:2, 1:1, 2:1, 5:13, 6:1, 8:1, 10:1} |
+| 18k | 18,000 | 254 | 4.30 | **2 / 20** | **12** | {0:5, 5:12, 6:1, 10:2} |
+
+**The wall did not move.** 13 of 20 episodes still end at exactly five, and the mean is 0.30 lower,
+which is well inside the paired spread of ~3.5.  Two episodes now complete (they did not at 4k) and
+three more fail outright, so the model is more variable rather than better: the same 4.5x exposure
+that produced two completions also produced three more total failures.
+
+That is the answer 9.32 asked for, and it is negative: **the aligned arm is not under-trained.**  A
+policy that has seen 56 and one that has seen 254 demonstrations stall at the same place, so the
+missing information is not in the demonstrations -- it is the state the policy puts itself in, which
+no demonstration contains (9.32 measured that directly: from a clean half-done state the same
+policy finishes 10/10 in 243 steps).
+
+Two things follow, and they are not both training problems:
+
+* **Deployment**: the two batches want opposite pacing (9.31) -- 24 for the first, 16 for the
+  second, where 3 of 20 complete.  A hybrid that switches after the fifth Cookie is untested and is
+  the cheapest remaining shot at a score, because it changes no weights.
+* **Data**: the state the policy creates has to be *in* the training set, with a controller that can
+  finish from it.  The scripted expert mostly cannot (9.27: 39.5 N against the policy's own block),
+  so this needs either an expert that works around clutter or a human/teleop pass over exactly those
+  frames -- and it is the real next project, not a night's run.
+
+The 18k checkpoints are kept at 2k, 16k and 18k (`pi05-runs/a3_b2_aligned_v3_18k`); the intermediate
+ones were deleted to keep the run inside the disk budget, since this lerobot has no
+`save_total_limit`.
