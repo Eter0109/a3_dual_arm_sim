@@ -1630,3 +1630,48 @@ constants; 9.0 / 12.0 mm are two samples.
 The consequence for the next experiment: a rigid translation is the kind of error an inference-time
 setting or a calibration can shift, unlike "the policy is not smooth enough".  That distinction is
 worth an hour of measurement before it is worth a night of training.
+
+**Correction, same day -- see 9.29.**  Every number above was measured at the manifest's declared
+`execute: 16` of a 50-action chunk.  Executing 48 of the same chunk instead moves the block from
+9.8 mm off to 1.4 mm off and fills all five slots.  So the rigid translation is a property of the
+**deployment pacing**, not of the checkpoint: the checkpoint's placement is accurate when the
+chunk is allowed to finish.  The rest of this section -- grasp accuracy, block rigidity, the
+3.75-arm not grasping at all -- is unaffected, because those happen before the final approach.
+
+### 9.29 The ten millimetres were the chunk pacing (10-21)
+
+9.28 left one number unexplained: a block that the model had grasped to 1.4 mm landed 9-12 mm from
+the slots.  It was repeatable within a scene (6 seeds on the same layout gave 9.84 ± 0.68 mm) and
+varied across scenes, which reads either as a policy that cannot localise the slot column or as a
+deployment that never finishes the motion.  Those two have very different fixes, and one variable
+separates them: **how many of the 50 returned actions are executed before the next request**.
+
+The manifests declare `chunk: 50, execute: 16`.  `execute` is a deployment choice -- the training
+data has no chunks at all -- so it is the one thing that can be changed without touching the
+weights.
+
+The yardstick is the **frozen** layout (zero noise): every seed sees the identical scene, so the
+only spread left is the sampler's.  At `execute: 16` that spread is tight and the outcome never
+changes: 0 of 5 slots in 6 of 6 seeds.  At `execute: 48`:
+
+| execute | seeds | mean |dy| (per Cookie to its slot) | slots filled |
+|---|---|---|---|
+| 16 | 6 | 9.84 ± 0.68 mm | 0 / 5 in 6 / 6 |
+| 48 | 3 | 0.06 / 0.06 / 1.38 mm | **5 / 5 in 3 / 3** |
+
+`dy` is the direction that matters: the slot tolerance is **10 mm in x and 2.5 mm in y**, so a
+block displaced along the column fails no matter how well it is centred across it.  The 10 mm was
+in y.
+
+**Why it is stable rather than converging.**  Cutting a chunk at 16 of 50 truncates the final
+approach.  The next request re-plans from a state that is still ~10 mm short, produces the same
+truncated motion, and is cut again at the same point -- so the error holds instead of shrinking.
+That is the signature to look for: an offset that is repeatable to 1 mm on an identical scene is
+not a perception limit (perception would spread), it is a control loop that is not allowed to
+finish.
+
+**What this costs the record.**  The published 4.05 (2 / 20 strict successes on main's randomised
+benchmark) was scored at `execute: 16`.  If the pacing is what kept the first batch out of the
+slots, then that score is a floor set by our harness, not by the checkpoint, and main reproducing
+it with their own pacing would not get the same number.  The next measurement is the benchmark
+itself at `execute: 48`, which is what turns 3 seeds into a score.
