@@ -1381,3 +1381,34 @@ Checkpoints every 5000 steps (5k / 10k / 15k / 20k), each scored on main's shipp
 benchmark as soon as training ends, one line per checkpoint into `/tmp/overnight_summary.txt`.
 This run is also the only arm whose intermediate points can say whether the degradation in arm 4
 was the schedule (it should now be monotone) or the data (it will not be).
+
+### 9.24 The 4.05 checkpoint is published, with its failure breakdown attached (10-21)
+
+`yunsx114/a3-dual-arm-cookie-pi05-aligned` on ModelScope: 13 files, the weights at the repository
+root as a normal LeRobot policy directory, plus the two evaluation records that produce the
+numbers this line has been quoting.
+
+| file | |
+|---|---|
+| `model.safetensors` | 9.35 GB, bf16 |
+| `config.json`, `train_config.json` | policy config and the exact training configuration |
+| `policy_{pre,post}processor*.json` / `*.safetensors` | feature keys and the dataset's quantiles (pi05_base ships none) |
+| `eval/bench_main_basic_randomised.json` | the 4.05 run, per episode |
+| `eval/bench_main_frozen_layout.json` | the 5.00 run, per episode |
+| `README.md`, `NOTICE.md`, `MANIFEST.sha256`, `upload_modelscope.sh` | card, licence notice, integrity, the release script |
+
+The card states 4.05 with its standard error, says plainly that the 5.00 is a plateau rather than a
+score, gives the 7.75 on our own stack as a *different instrument*, and includes the failure split
+that 9.23's diagnosis produced -- 11/20 stop after one batch, 9/20 attempt the second, 2/20 finish.
+Shipping the checkpoint without that table would invite exactly the misreading that
+`cookies_in_target` produces on every checkpoint that can place five.
+
+Licence is **gemma**, not Apache: the weights are a derivative of `lerobot/pi05_base`, whose
+PaliGemma backbone is under the Gemma Terms of Use.  The dataset stays separate at CC BY 4.0.
+`NOTICE.md` carries both Gemma links, which the terms require to travel with redistribution --
+the dataset release's `LICENSE` file had no equivalent obligation, so this is the one place the two
+release procedures differ.
+
+Verified after upload by downloading the card, the notice and both eval records and checking them
+against `MANIFEST.sha256` (all four OK), and by listing the repository through the API: 13 files,
+`model.safetensors` 9.35 GB.
