@@ -1494,3 +1494,139 @@ seed** (bf16 without one scored 10/10, 0/10 and 5/10 on the same checkpoint and 
 The package is `tar.gz` rather than a branch push so that the recipient needs no repository access;
 `git bundle` of the same branch (167 commits, 11 MB) is at
 `/root/autodl-tmp/release/vla-policy-interface-v2.bundle` if a fetchable form is preferred.
+
+### 9.27 The gate: can the expert finish from what the policy leaves? (10-21)
+
+The question a DAgger-shaped dataset lives or dies on is not "would more data help" but **"is the
+state the policy creates recoverable at all"**.  If a second, privileged controller cannot finish
+from that state, then collecting 100 grafted episodes collects 100 failures.
+
+The protocol: the 4.05 checkpoint on main's `basic` layout, up to 700 steps of policy until the
+first five Cookies are in the target box, then a further `U[100,200]` steps **provided the source
+count has not gone down** (the policy must have stopped, not merely paused), then
+`A3CookieBatchExpert` in `adopt` mode for up to 700 steps.  `adopt` reads the occupancy, marks the
+in-target Cookies as already done, aims the second batch at the free column and **moves nothing** --
+moving the policy's block would make the recording a mixture of two controllers, which is exactly
+the mixture a trained policy could not parse.
+
+Outcome tiers: **A** 10 in the target *and* five slots gained (recoverable, the demonstration is
+usable), **B** 10 in the target with the expert's five not in slots (usable but must be labelled),
+**C** the expert could not place five more (unrecoverable).
+
+**Round 1, five seeds, 0/5.**  Every failure was a `CLOSE` timeout with the pads at 8 N and the
+opening at **0.000** -- the jaws had closed on air.  The adopted indices said why: seed 0 adopted
+`[1,2,3,4,5]`, leaving `[0,6..19]`, and the expert went for `[0,6,7,8,9]`.  `_candidate_batches`
+yielded "the first five remaining by y", which after the policy took the middle of a column is a
+group spanning a 31 mm hole.
+
+The fix is two conditions on a candidate batch -- **consecutive** indices, and each within
+`SOURCE_IN_PLACE_TOLERANCE_M = 1 mm` of its nominal source position, upright and still in the
+source -- so a batch is five adjacent Cookies the pad can actually close around.  The selection now
+yields `whole[:5]` / `whole[-5:]` of every consecutive run.
+
+*Regression check first, because that function is used by every future collection*: 3 accepted in 4
+attempts, `failed shards: 0`, on the production flags (`--align-bin-noise 0.01 --align-noise-dist
+uniform --align-bin-yaw-noise 0.03 --position-noise 0.0003 --align-cookie-yaw-noise 0.015
+--fast-render --main-aligned`).  With no perturbation a column is one consecutive run, so the
+rewrite is a no-op for ordinary collection.
+
+**Round 2, four seeds, 0/4 -- but the failure moved.**  Grasping air disappeared; what remains is
+insertion:
+
+| seed | adopted | at takeover (target / slots) | outcome | failure |
+|---|---|---|---|---|
+| 0 | [1..5] | 5 / 0 | 8 / 3 | `DESCEND_TO_PLACE` timeout, 421 steps, pads 2.55 / 2.50 N |
+| 2 | [1..5] | 5 / 5 | 5 / 5 | none; 413 steps, budget spent |
+| 7 | [2..6] | 5 / 5 | 5 / 5 | `CLOSE` timeout, pads 11.60 / 11.72 N, opening 0.000 |
+| 9 | [1..5] | 5 / 2 | 5 / 2 | `DESCEND` blocked, pads 59.12 / 0.0 N |
+
+The 11.7 N at `opening = 0.000` is a *different* zero-opening than round 1: the jaws are closed on
+something.  And 59 N on one pad at `DESCEND` is the arm pressing into a Cookie that is in the way.
+Both are consistent with 9.28: the policy's block sits in the target column.
+
+A second sample of the same protocol was recorded as video (`/root/autodl-tmp/logs/videos/gate_v4/`,
+seeds 0-3, 700/700 caps, both phases in one file): seed 0 reached **tier A** (expert `DONE`, 10/10
+in target, +5 slots, `success`), seed 1 never triggered (0 in target), seeds 2 and 3 timed out in
+`CLOSE` at 21.2 / 1418.9 N and 21.8 / 21.8 N.  Same seed is **not** the same episode across runs:
+the bridge's sampler state is consumed per request, so a run that follows other episodes in the same
+process samples a different trajectory.  The video is a sample of the protocol, not a replay of
+`gate_fix.json`.
+
+**What this says.**  Recoverability is real but rare (1 of 4 in the video run; 0 of 4 in round 2),
+and the obstruction is the policy's own first batch.  Two consequences for the plan: (a) collecting
+grafted episodes now would collect mostly failures, and (b) the useful version of the idea is not
+"expert cleans up after the policy" but either an expert that can work around clutter, or a policy
+whose block stops landing in the way.  9.28 says which of those two is cheaper.
+
+### 9.28 Where the first batch actually differs: expert vs 4.05 vs 3.75 (10-21)
+
+Two questions got conflated in 9.25: *does the model grasp as well as the expert*, and *does it put
+the grasped block where the expert puts it*.  Measuring one rollout step by step answers both:
+end-effector pose, 16 joints, the action, all eighty Cookie positions and the per-Cookie containment
+verdict are written every step, for the expert and for a model, **from the same initial state**
+(`reset(seed)` plus the same `basic` rewrite).
+
+"Picked up" is a **30 mm rise**, not the containment clause `released`: the expert carries five
+Cookies in one grasp and raises them together, and the clause is a placement verdict -- on the
+expert's own run it marked two of the five it lifted.  A rise is a property of the object, which is
+what the comparison is about.
+
+| controller | seed | lift step | tool-to-group | path | block rot | block translation | block RMS | joint RMS at grasp |
+|---|---|---|---|---|---|---|---|---|
+| expert | 0 | 99 | 0.06 mm | 570.8 mm | +0.61° | 0.3 mm | 0.29 mm | -- |
+| expert | 2 | 99 | 0.13 mm | 573.6 mm | +0.99° | 0.5 mm | 0.19 mm | -- |
+| 4.05 | 0 | 109 | 1.43 mm | 619.3 mm | +0.18° | **12.0 mm** | 0.14 mm | 0.0198 rad (1.13°) |
+| 4.05 | 2 | 108 | 0.64 mm | 604.0 mm | +0.03° | **9.0 mm** | 0.16 mm | 0.0172 rad (0.99°) |
+| 4.05 | 1 | 107 | −0.07 mm | 1573.4 mm | -- | -- | -- | -- |
+| arm 1 (3.75) | 0,1,2 | **none** | -- | 335 / 351 / 319 mm | -- | -- | -- | -- |
+
+"Block" is the rigid transform taking the five placed Cookies onto the five nearest slots, fitted in
+the target bin's own frame; the residual after removing the transform is the block's internal
+spread.
+
+**The window has to outlast the release.**  The first recording stopped the step the fifth Cookie
+was counted inside (217 steps), and at that step the jaws had not opened yet -- it measured the
+block in transit.  Re-recorded to 245 steps, past `OPEN` and the retract, the block is still 12.0 /
+9.0 mm off (RMS 0.14 / 0.16 mm, rotation 0.18° / 0.03°).  The offset is where the block comes to
+rest, not a frame of the carry, and that is the version this table reports.
+
+1. **Grasping is not the bottleneck.**  At the moment the five leave the packing, the tool is
+   0.6-1.4 mm from the centre of the group it is lifting; the expert is 0.1 mm by construction.  The
+   path over the same phases is 6-8 % *longer* than the expert's (619 / 604 mm against
+   571 / 574 mm) and the joint state at the grasp moment differs by 1.0-1.1°.  Nothing here needs
+   fixing.
+2. **The difference is one rigid translation of 9-12 mm.**  Both blocks are internally coherent
+   (0.1-0.2 mm RMS), both are square to the slot grid (the model's rotation is *smaller* than the
+   expert's), and the model's is displaced as a unit.  The tool is 13.4 / 9.5 mm from where the
+   expert's was at the moment the first Cookie counts as inside -- while the block is still in the
+   jaws -- with 2.8° / 1.8° of joint difference, and the gap survives to rest (12.0 / 9.0 mm).
+   Over the whole rollout the two paths stay within 15-17 mm of each other at equal arc length
+   (DTW 3.8 / 3.1 m), so this is not a different route: it is the same route ending in a different
+   place.  `block_offset_seed0.png` in `logs/first_batch/` draws it: the expert's rings sit on the
+   left slot column, the model's dots sit ~12 mm inboard of it.
+3. **The 3.75 -> 4.05 step is "grasping at all", not placement accuracy.**  arm 1 never lifted
+   anything on any of three seeds: 700 steps, 80 Cookies still in the source, and on seed 0 **30
+   Cookies displaced more than 5 mm** with a maximum rise of 1.15 mm -- it was sweeping with the
+   jaws, not closing on a group.  That is the same discontinuity 9.23 attributed to the
+   Cookie-orientation fix.
+
+Two details that look like errors and are not:
+
+* **The model grasps `[1..5]` where the expert grasps `[0..4]`.**  Both are five adjacent Cookies in
+  one column; the model's group is one pitch (8.83 mm) further along.  This is orthogonal to the
+  12 mm placement error (which is along the transfer axis), and any five adjacent Cookies can go
+  into five slots, so it is not itself a defect.
+* **The source pitch is 8.83 mm and the slot pitch is 6.32 mm.**  The expert's placement compresses
+  the group by 10 mm over its length and both controllers achieve it (0.29 mm and 0.11 mm RMS
+  respectively), so the box's own geometry is doing that work, not the controller.
+
+**What the comparison does not say.**  Two usable (seed, controller) pairs, because the scripted
+expert fails on seed 1: `DESCEND`, 421 steps, pads at **0.0 N**, tool parked at 759.44 mm -- the arm
+is stopped by the source bin's wall, not by a Cookie.  So seed 1 is not evidence about the model
+(4.05 fails it differently: it lifts the group to 860 mm and holds it there for 590 steps).  The
+offsets should be read as a direction (rigid, translational, along the transfer axis), not as
+constants; 9.0 / 12.0 mm are two samples.
+
+The consequence for the next experiment: a rigid translation is the kind of error an inference-time
+setting or a calibration can shift, unlike "the policy is not smooth enough".  That distinction is
+worth an hour of measurement before it is worth a night of training.

@@ -96,6 +96,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         mode = getattr(self.env, "second_batch_mode", "full")
         if mode in ("prefill", "prefill_perturb"):
             self._prefill_first_batch(hard=(mode == "prefill_perturb"))
+        elif mode == "adopt":
+            # The DAgger-shaped entry: continue from whatever is already in the box.  See
+            # `_adopt_current_state` for why nothing is moved here.
+            self._adopt_current_state()
 
     def _prefill_first_batch(self, *, hard: bool) -> None:
         """Start the episode *at* the second batch: five Cookies already in the box.
@@ -184,6 +188,50 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 "lift_heights_m": [0.0] * 5,
                 "released": True,
                 "prefilled": True,
+            }
+        )
+
+    def _adopt_current_state(self) -> None:
+        """Continue from whatever is already in the box, moving nothing.
+
+        `_prefill_first_batch` teleports five Cookies into the slots because the alternative
+        was starting from an empty box.  This is the other case: the Cookies are already in
+        the box, put there by a *policy*, and they are not where the expert would have put
+        them (measured on the 4.05 checkpoint: a coherent block 2-10 mm off the slot column,
+        4 % of Cookies within 2 mm -- see `docs/pi05-training-history.md` 9.25).  The point
+        of taking over here is to demonstrate recovery from exactly that state, so nothing
+        is moved and no slot is re-derived:
+
+        * ``completed_cookie_indices`` becomes the Cookies the judge already counts inside
+          the target, so `_candidate_batches` skips them and the expert asks for a *new*
+          five from the source;
+        * ``batch_index`` becomes 1 when five are there, which is what makes `_place_pose`
+          aim at the other column;
+        * a released report is appended for the batch that "already happened", because
+          VERIFY_RELEASE only ever reads the most recent one.
+
+        **The slot targets are deliberately not shifted by the block's offset.**  The slots
+        are the box's geometry; the Cookies are what is misplaced.  Following the Cookies
+        would teach the second batch to aim at the mistake, and the recovery the policy needs
+        is the opposite: put the next five where the slots actually are.
+        """
+        in_target = tuple(
+            self.env._cookie_inside_target(index)  # noqa: SLF001 - the judge, not a policy input
+            for index in range(len(self.env.cookie_positions))
+        )
+        completed = [index for index, inside in enumerate(in_target) if inside]
+        self.completed_cookie_indices = completed
+        self.batch_indices = []
+        self.adopted_cookie_count = len(completed)
+        if len(completed) >= 5:
+            self.batch_index = 1
+        self.batch_reports.append(
+            {
+                "cookies": list(completed),
+                "lifted": len(completed),
+                "lift_heights_m": [0.0] * len(completed),
+                "released": True,
+                "adopted": True,
             }
         )
 
@@ -504,25 +552,63 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         travel = float(self.env._finger_travel["L"])
         return abs(actual_opening - self._opening) * travel <= self.profile.preclose_tolerance
 
+    #: How far a source Cookie may sit from the point it was placed at and still be grasped as
+    #: part of its row.  A row grasp puts one fingertip in each end groove, and A3's fingertip is
+    #: 1.00 mm wide in a 2.50 mm groove -- 0.75 mm of slack a side -- so a Cookie that has been
+    #: shoved more than about a millimetre is no longer part of the row the pads close on.
+    SOURCE_IN_PLACE_TOLERANCE_M = 0.001
+
+    def _graspable_in_place(self, index: int, source: np.ndarray, actual: np.ndarray) -> bool:
+        """Is Cookie ``index`` still standing where the row grasp assumes it is?"""
+        if index in self.completed_cookie_indices:
+            return False
+        if not self.env.privileged_cookie_in_source(index):
+            return False
+        if abs(self.data.xmat[self.env._cookie_bodies[index], 8]) < np.cos(np.deg2rad(10)):
+            return False
+        return (
+            float(np.linalg.norm(actual[index][:2] - source[index][:2]))
+            <= self.SOURCE_IN_PLACE_TOLERANCE_M
+        )
+
     def _candidate_batches(self):
-        """Prefer exposed ends; do not force an insertion through fallen Cookies."""
+        """Prefer exposed ends; do not force an insertion through fallen Cookies.
+
+        **Consecutive Cookies, not merely the first five of the ones that remain.**  A column is
+        a row at one pitch, and the grasp closes round five neighbours; if the five handed to
+        `_select_batch` are not neighbours the pads meet each other in the gaps.  Collection only
+        ever consumed a column from one end, so index order and physical adjacency were the same
+        thing and the difference could not show.  A *policy* takes its first batch from wherever
+        it likes, and leaves a hole: measured on the 4.05 checkpoint, seed 0 had taken Cookies
+        1-5 of a twenty-Cookie column, so the remaining 0 and 6-19 sorted to `[0, 6, 7, 8, 9]` --
+        a 31 mm gap between the first two -- and CLOSE timed out with both pads at 8 N and the
+        fingers fully shut.  Seeds 2 and 7 failed the same way.
+
+        So a run has to be consecutive *and* still in place: each Cookie within
+        `SOURCE_IN_PLACE_TOLERANCE_M` of where it was put, upright, and inside the source bin.
+        Undisturbed rows pass unchanged, which is why this is a filter rather than a new
+        behaviour.
+        """
         source = np.asarray(self.env.SOURCE_POSITIONS)
+        actual = np.asarray(self.env.cookie_positions)
         for x in sorted(set(source[:, 0])):
             indices = np.flatnonzero(np.isclose(source[:, 0], x))
-            remaining = sorted(
-                (i for i in indices.tolist() if i not in self.completed_cookie_indices),
-                key=lambda i: source[i, 1],
-            )
-            if len(remaining) < 5:
-                continue
-            for batch in (remaining[:5], remaining[-5:]):
-                if all(
-                    self.env.privileged_cookie_in_source(i)
-                    and abs(self.data.xmat[self.env._cookie_bodies[i], 8])
-                    >= np.cos(np.deg2rad(10))
-                    for i in batch
-                ):
-                    yield batch
+            order = sorted(indices.tolist(), key=lambda i: source[i, 1])
+            runs: list[list[int]] = []
+            run: list[int] = []
+            for index in order:
+                if self._graspable_in_place(index, source, actual):
+                    run.append(index)
+                else:
+                    if len(run) >= 5:
+                        runs.append(run)
+                    run = []
+            if len(run) >= 5:
+                runs.append(run)
+            for whole in runs:
+                yield whole[:5]
+                if len(whole) > 5:
+                    yield whole[-5:]
 
     def _jaw_lowest_offset(self) -> float:
         """Signed z, in the **tool** frame, of the lowest colliding point on either jaw.
