@@ -1709,3 +1709,33 @@ the second batch needs the shorter re-plan (a 2.4 s commitment is too long for i
 those three episodes were the ones where a mis-placed first batch accidentally left the box in a
 shape the second batch could use.  The per-batch trace at both pacings is what separates them, and
 that is the next measurement rather than another training run.
+
+### 9.31 Four pacings: the mean peaks in the middle, the strict successes do not (10-21)
+
+9.30 used two settings.  Four of them, same checkpoint, same 20 seeds, same judge:
+
+| execute | mean | distribution | strict successes | episodes ending at exactly 5 |
+|---|---|---|---|---|
+| 16 | 3.85 | {0:6, 1:2, 5:9, 10:3} | **3 / 20** | 9 |
+| 24 | **4.60** | {0:2, 1:1, 2:1, 5:13, 6:1, 8:1, 10:1} | 0 / 20 | 13 |
+| 32 | 4.55 | {0:1, 1:1, 4:1, 5:16, 6:1} | 0 / 20 | 16 |
+| 48 | 4.40 | {0:2, 1:1, 4:1, 5:14, 6:1, 7:1} | 0 / 20 | 14 |
+
+Two things are stable and one is not:
+
+* **The zero column collapses as soon as the chunk is allowed to finish**: 6 -> 2 -> 1 -> 2.  This
+  is the 9.29 mechanism showing up in the benchmark.
+* **The mode is pinned at exactly five at every pacing above 16**: 13, 16 and 14 episodes end there,
+  and none of them finish early.  The second batch makes no progress in roughly three episodes out
+  of four, whatever the pacing.
+* **The mean peak at 24 is not significant**: 4.60 against 4.40 is 0.2 with a paired spread of ~3.5.
+  The strict successes are also not significant in isolation (3 of 20 against 0 of 20), but they are
+  the only place a 10 appears, so the reading is that short re-planning occasionally rescues a
+  second batch that long commitment cannot -- not that 16 is better on average.
+
+So the pacing is a real lever on the *first* batch and a coin-flip on the second.  The next
+measurement is the second batch itself: full 900-step traces at `execute: 24` on seeds 0, 4 and 10,
+recording every step the way 9.28 did for the first batch.  The question is which of three shapes it
+has -- the arm keeps carrying and dropping (transfer), it stops moving (the policy believes it is
+done), or it works on Cookies that never count (placement) -- because each points at a different
+fix and only the last is a training problem.
