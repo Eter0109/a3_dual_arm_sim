@@ -56,6 +56,20 @@ def data_gate(clips):
         correction_servo_frames=sum(c['metadata'].get('visual_servo_frames',0) for c in corrections))
 
 
+def supplement_seeds(roots,start,count):
+    """Do not replay the same collection after reboot to inflate data gates."""
+    used={26490,26491}  # paired development evaluation only
+    for root in roots:
+        protocol=Path(root)/'protocol.json'
+        if protocol.exists():
+            used.update(c['seed'] for c in json.loads(protocol.read_text()).get('cases',[]))
+    selected=[];candidate=start
+    while len(selected)<count:
+        if candidate not in used:selected.append(candidate)
+        candidate+=1
+    return selected
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True);p.add_argument('--job',type=Path,required=True)
@@ -122,15 +136,17 @@ def main():
             # One bounded supplement per data source, rather than relaxing gates.
             if gate['clips']<12 or gate['later_batch_clips']<2 or gate['frames']<4000 or len(gate['source_columns'])<2:
                 target=a.output/'supplement_teacher';phase('supplementing_teacher_clips',**gate)
+                seeds=supplement_seeds(roots,26442,1)
                 if run('a3_batch_skills.geometry_collect',['--output',target,'--camera-reference',camera,
-                    '--workers','3','--seeds','26442'],target.with_suffix('.log'),4*3600):
+                    '--workers','3','--seeds',*seeds],target.with_suffix('.log'),4*3600):
                     raise RuntimeError('Supplement collection runtime failed')
                 roots.append(target)
             if gate['correction_clips']<2:
                 target=a.output/'supplement_corrections';phase('supplementing_correction_clips')
+                seeds=supplement_seeds(roots,26468,2)
                 if run('a3_batch_skills.visual_suite',['--output',target,'--checkpoint',a.checkpoint,'--job',job,
                     '--policy-module-dir',policy_dir,'--camera-reference',camera,'--workers','2',
-                    '--seeds','26468','26470','--profiles','basic','medium','--task','2x5',
+                    '--seeds',*seeds,'--profiles','basic','medium','--task','2x5',
                     '--max-batches','1','--record-training-clips'],target.with_suffix('.log'),2*3600):
                     raise RuntimeError('Supplement correction runtime failed')
                 roots.append(target)

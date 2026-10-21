@@ -76,6 +76,16 @@ class GeometryFeaturesTests(unittest.TestCase):
         for i in range(2,4):clips[i]['metadata'].update(entry_kind='after_previous_release',source_column=2)
         self.assertTrue(data_gate(clips)['passed'])
 
+    def test_reboot_supplement_avoids_planned_and_evaluation_seeds(self):
+        import tempfile,json
+        from pathlib import Path
+        from a3_batch_skills.geometry_pipeline import supplement_seeds
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'protocol.json').write_text(json.dumps(dict(cases=[dict(seed=26442),dict(seed=26443)])))
+            self.assertEqual(supplement_seeds([root],26442,2),[26444,26445])
+            self.assertEqual(supplement_seeds([root],26490,2),[26492,26493])
+
 
 @unittest.skipUnless(importlib.util.find_spec('torch'),'Requires real PyTorch')
 class GeometryHeadTests(unittest.TestCase):
