@@ -29,6 +29,10 @@ def audit(root,repo_id,checkpoint=None,job=None,policy_module_dir=None):
         raw = np.load(Path(meta["source_clip"])/"trajectory.npz",allow_pickle=False)
         np.testing.assert_allclose(item["action"][0].numpy(),raw["action"][-1],atol=1e-6)
         np.testing.assert_allclose(item["observation.state"].numpy(),raw["state"][-1],atol=1e-6)
+        if meta.get('per_frame_geometry'):
+            from .geometry_context import GEOMETRY_KEY,GEOMETRY_DIM
+            if item[GEOMETRY_KEY].shape!=(GEOMETRY_DIM,):raise ValueError('Geometry shape changed in dataset reader')
+            np.testing.assert_allclose(item[GEOMETRY_KEY].numpy(),raw['geometry'][-1],atol=1e-6)
         raw.close()
         examples.append(item)
         rows.append(dict(batch_index=meta["batch_index"],entry_kind=meta["entry_kind"],
@@ -42,7 +46,9 @@ def audit(root,repo_id,checkpoint=None,job=None,policy_module_dir=None):
         adapter = importlib.import_module("pi05_adapter")
         adapter.install_state_projector(job)
         config,pre,_ = adapter.load_processors(checkpoint,job,"cpu")
-        batch = pre(default_collate(examples))
+        from .geometry_context import GEOMETRY_KEY
+        collated=default_collate(examples)
+        batch = pre({key:value for key,value in collated.items() if key!=GEOMETRY_KEY})
         if "action_is_pad" not in batch:
             raise ValueError("The pi05 preprocessing pipeline discarded action_is_pad")
         losses = torch.ones(len(examples),50,config.max_action_dim,requires_grad=True)

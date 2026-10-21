@@ -82,6 +82,7 @@ def main():
     parser.add_argument("--rgbd-goals",action="store_true",
         help="Record independently measured, latched RGB-D goal cues; teacher still uses truth for actions")
     parser.add_argument("--rgbd-elevation",type=float,default=-65.)
+    parser.add_argument('--record-geometry',action='store_true',help='Observe geometry30 before every applied action; no object truth features')
     parser.add_argument("--rgbd-azimuth",type=float,default=180.)
     parser.add_argument("--video", action="store_true")
     args = parser.parse_args()
@@ -95,6 +96,7 @@ def main():
         parser.error("Skill demonstrations currently require the goal-bound grounded executor")
     if args.rgbd_goals and (not args.record_skills or args.unmarked_skills):
         parser.error("--rgbd-goals requires --record-skills and marked images")
+    if args.record_geometry and not args.rgbd_goals:parser.error('--record-geometry requires --rgbd-goals')
     if args.goal_conditioned and args.executor != "pi05":
         parser.error("--goal-conditioned applies to an adapted pi05 checkpoint")
     if args.executor == "pi05" and not all((args.job, args.checkpoint, args.camera_reference,
@@ -170,10 +172,13 @@ def main():
             visual_spec=None
             if args.rgbd_goals:
                 from .rgbd import MujocoRGBDViews,geometry_spec_from_env
-                visual_sensor=MujocoRGBDViews(env,views=((args.rgbd_elevation,args.rgbd_azimuth),(-90.,90.),(-65.,90.)))
+                views=((args.rgbd_elevation,args.rgbd_azimuth),(-90.,90.),(-65.,90.))
+                if args.record_geometry:views+=((-25.,0.),(-25.,180.))
+                visual_sensor=MujocoRGBDViews(env,views=views)
                 visual_spec=geometry_spec_from_env(env)
             recorder = SkillClipRecorder(args.output/"skill_clips", env, seed=args.seed,
                 marked=not args.unmarked_skills,visual_sensor=visual_sensor,visual_spec=visual_spec,
+                record_geometry=args.record_geometry,
                 source_column=config.source_column,provenance=dict(task=args.task,profile=args.profile,
                     source_column=args.source_column,executor=executor.name,
                     camera_sha256=hashlib.sha256(args.camera_reference.read_bytes()).hexdigest() if args.camera_reference else None,
@@ -197,7 +202,8 @@ def main():
             if prepared:
                 recorder.commit(env.last_applied_action[:8],
                     batch_completed=controller.batch_index > controller.goal.index,
-                    failed=controller.phase == Phase.FAILED, reason=controller.failure_reason)
+                    failed=controller.phase == Phase.FAILED, reason=controller.failure_reason,
+                    native_count=int(info.get('cookies_in_target',0)))
             actions.append(env.last_applied_action[:8].copy())
             right_error = max(right_error, float(np.max(np.abs(env.last_applied_action[8:] - servo.right_hold))))
             native_ever |= bool(info.get("success", False))

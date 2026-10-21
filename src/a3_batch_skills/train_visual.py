@@ -28,11 +28,12 @@ def atomic_json(path,value):
 
 class PolicyRows:
     """Keep only deployment observations, action labels, task and padding mask."""
-    def __init__(self,root,horizon):
+    def __init__(self,root,horizon,*,geometry=False,require_geometry=False):
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
         info=json.loads((Path(root)/'meta/info.json').read_text())
         self.dataset=LeRobotDataset(info.get('repo_id','local/a3_left8'),root=Path(root),
             delta_timestamps={'action':[i/info['fps'] for i in range(horizon)]},video_backend='pyav')
+        self.geometry,self.require_geometry=geometry,require_geometry
 
     def __len__(self):return len(self.dataset)
 
@@ -45,6 +46,13 @@ class PolicyRows:
         if row['observation.state'].shape[-1]!=8 or row['action'].shape[-1]!=8:
             raise ValueError('Replay and skill data must both be genuinely left8')
         if 'action_is_pad' not in row or not row.get('task'):raise ValueError('Missing padding or instruction')
+        if getattr(self,'geometry',False):
+            import torch
+            from .geometry_context import GEOMETRY_KEY,GEOMETRY_DIM
+            if self.require_geometry and GEOMETRY_KEY not in raw:raise ValueError('Missing measured training geometry')
+            value=raw.get(GEOMETRY_KEY,torch.zeros(GEOMETRY_DIM))
+            if value.shape!=(GEOMETRY_DIM,) or not torch.isfinite(value).all():raise ValueError('Invalid geometry row')
+            row[GEOMETRY_KEY]=value
         return row
 
 
@@ -62,10 +70,14 @@ def save_checkpoint(adapter,base,output,step,optimizer,manifest,descriptor):
     model=pending/'pretrained_model'
     adapter.policy.save_pretrained(model)
     for item in Path(base).iterdir():
-        if item.is_file() and item.name not in ('model.safetensors','config.json','train_config.json','goal_conditioning.json'):
+        if item.is_file() and item.name not in ('model.safetensors','config.json','train_config.json','goal_conditioning.json','geometry_conditioning.json'):
             shutil.copy2(item,model/item.name)
     atomic_json(model/'goal_conditioning.json',dict(descriptor,training_completed=True,
         completed_updates=step,source_checkpoint=str(base),time_padding_masked=True,active_action_dimensions=8))
+    if manifest.get('learned_geometry'):
+        from .geometry_model import geometry_descriptor
+        atomic_json(model/'geometry_conditioning.json',geometry_descriptor(training_completed=True,
+            completed_updates=step,source_checkpoint=str(base),external_action_takeover_required=False))
     atomic_json(pending/'adaptation_manifest.json',dict(manifest,completed_updates=step))
     torch.save(dict(step=step,optimizer=optimizer.state_dict(),torch_rng=torch.get_rng_state(),
         cuda_rng=torch.cuda.get_rng_state_all(),numpy_rng=np.random.get_state(),python_rng=random.getstate()),
@@ -91,6 +103,7 @@ def main():
     p.add_argument('--seed',type=int,default=26400)
     p.add_argument('--learning-rate',type=float,default=2.5e-6)
     p.add_argument('--smoke',action='store_true',help='Two real gradient updates; save no weights or optimizer')
+    p.add_argument('--geometry-conditioning',action='store_true',help='Learn a geometry residual; original replay uses zero/invalid geometry')
     a=p.parse_args()
     if a.output.exists():p.error('Use an independent output; preserve existing runs')
     if a.steps<1 or a.learning_rate<=0:p.error('Invalid adaptation budget')
@@ -98,6 +111,10 @@ def main():
     descriptor=json.loads((a.dataset/'goal_conditioning.json').read_text())
     if descriptor.get('goal_conditioning')!=VISUAL_MARKER_VERSION or descriptor.get('localization')!=LOCALIZER_VERSION:
         p.error('Expected independently measured RGB-D goal clips')
+    if a.geometry_conditioning:
+        from .geometry_context import GEOMETRY_VERSION
+        if descriptor.get('geometry_conditioning')!=GEOMETRY_VERSION:p.error('Missing per-frame geometry training data')
+    else:descriptor.pop('geometry_conditioning',None)
     cfg=json.loads((a.checkpoint/'config.json').read_text())
     if cfg['output_features']['action']['shape']!=[8] or cfg['input_features']['observation.state']['shape']!=[8]:
         p.error('Continuation checkpoint must be left8')
@@ -112,7 +129,15 @@ def main():
     install_pi05_skill_loss()  # before the legacy state-projector forward wrapper
     sys.path.insert(0,str(a.policy_module_dir))
     from pi05_adapter import Pi05BenchmarkPolicy
-    adapter=Pi05BenchmarkPolicy(a.checkpoint,a.job)
+    if a.geometry_conditioning and (a.checkpoint/'geometry_conditioning.json').exists():
+        from .geometry_adapter import GeometryPi05Adapter
+        adapter=GeometryPi05Adapter(a.checkpoint,a.job)
+    else:adapter=Pi05BenchmarkPolicy(a.checkpoint,a.job)
+    if a.geometry_conditioning:
+        from .geometry_model import attach_geometry_head,install_geometry_model
+        torch.manual_seed(a.seed)
+        if not hasattr(adapter.policy.model,'a3_geometry_proj'):attach_geometry_head(adapter.policy.model)
+        install_geometry_model()
     random.seed(a.seed);np.random.seed(a.seed);torch.manual_seed(a.seed)
     spec=importlib.util.spec_from_file_location('visual_training_scope',a.job/'repo/scripts/train_pi05_launcher.py')
     scope=importlib.util.module_from_spec(spec);spec.loader.exec_module(scope)
@@ -122,8 +147,8 @@ def main():
     policy.model.paligemma_with_expert._set_requires_grad()
     scope._apply_unfreeze(policy.model.paligemma_with_expert,True)
     policy.train()
-    old=PolicyRows(a.job/'datasets/cookie_enhanced_1k_left8',policy.config.chunk_size)
-    new=PolicyRows(a.dataset,policy.config.chunk_size)
+    old=PolicyRows(a.job/'datasets/cookie_enhanced_1k_left8',policy.config.chunk_size,geometry=a.geometry_conditioning)
+    new=PolicyRows(a.dataset,policy.config.chunk_size,geometry=a.geometry_conditioning,require_geometry=a.geometry_conditioning)
     # Independent worker pools keep video decoding off the training thread.
     loaders=[]
     for offset,data in enumerate((old,new)):
@@ -148,8 +173,18 @@ def main():
         training_goal_frames=len(new),original_frames=len(old),
         claimed_task_improvement=False,smoke_only=a.smoke)
     manifest['training_code_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    manifest['learned_geometry']=bool(a.geometry_conditioning)
+    from collections import Counter
+    clip_metadata=json.loads((a.dataset/'a3_skill_metadata.json').read_text())
+    manifest['data_clip_roles']=dict(Counter(m.get('clip_role','legacy_teacher') for m in clip_metadata))
+    manifest['teacher']='verified action provenance in a3_skill_metadata; sensor-only deployed observation fields'
+    if a.geometry_conditioning:
+        from .geometry_model import geometry_descriptor
+        manifest['geometry']=geometry_descriptor(training_completed=False)
+        manifest['method']='geometry_conditioned_flow_imitation_with_original_replay'
+        manifest['deploy_controller']='RGB-D observations and batch verification; learned VLA emits all movement actions'
     atomic_json(a.output/'manifest.json',manifest)
-    gradient_checked=False
+    gradient_checked=False;geometry_gradient_checked=False
     def check_gradient(gradient):
         nonlocal gradient_checked
         if not gradient_checked:
@@ -159,6 +194,15 @@ def main():
             gradient_checked=True
         return gradient
     policy.model.action_out_proj.weight.register_hook(check_gradient)
+    def check_geometry_gradient(gradient):
+        nonlocal geometry_gradient_checked
+        if not torch.isfinite(gradient).all():raise RuntimeError('Nonfinite geometry gradient')
+        if torch.count_nonzero(gradient):
+            geometry_gradient_checked=True
+            atomic_json(a.output/'geometry_gradient_check.json',dict(passed=True,
+                gradient_norm=float(gradient.float().norm()),geometry_is_trainable=True))
+        return gradient
+    if a.geometry_conditioning:policy.model.a3_geometry_proj[-1].weight.register_hook(check_geometry_gradient)
     started=time.monotonic()
     for step in range(1,a.steps+1):
         before=time.monotonic();optimizer.zero_grad(set_to_none=True)
@@ -169,7 +213,10 @@ def main():
         losses=[]
         for i in range(6):
             micro={key:value[i:i+1] for key,value in raw.items()}
-            batch=adapter.pre(micro)
+            from .geometry_context import GEOMETRY_KEY
+            batch=adapter.pre({key:value for key,value in micro.items() if key!=GEOMETRY_KEY})
+            if a.geometry_conditioning:
+                batch[GEOMETRY_KEY]=micro[GEOMETRY_KEY].to(policy.model.state_proj.weight.device)
             loss,_=policy(batch)
             if not torch.isfinite(loss):raise FloatingPointError('Nonfinite flow-matching loss')
             (loss/6).backward();losses.append(float(loss.detach()))
@@ -186,7 +233,9 @@ def main():
                 gpu_peak_allocated_bytes=torch.cuda.max_memory_allocated())
             atomic_json(a.output/'status.json',report);print(json.dumps(report),flush=True)
         if not a.smoke and (step%5000==0 or step==a.steps):
+            if a.geometry_conditioning and not geometry_gradient_checked:raise RuntimeError('Geometry head received no learning signal')
             save_checkpoint(adapter,a.checkpoint,a.output,step,optimizer,manifest,descriptor)
+    if a.geometry_conditioning and not geometry_gradient_checked:raise RuntimeError('Geometry gradient smoke failed')
     atomic_json(a.output/'result.json',dict(status='smoke_complete' if a.smoke else 'training_complete',updates=a.steps,
         wall_seconds=time.monotonic()-started,task_improvement_requires_separate_evaluation=True))
 

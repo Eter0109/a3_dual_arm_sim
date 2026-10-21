@@ -36,14 +36,18 @@ def export_clips(inputs, output, repo_id):
         raise ValueError("No verified successful clips; failures are not imitation labels")
     if len({p.resolve() for p, _ in clips}) != len(clips):
         raise ValueError("Duplicate source clips")
-    signatures = {(m["fps"],m["goal_conditioning"],m["state_dim"],m["action_dim"],m["localization"]) for _,m in clips}
+    signatures = {(m["fps"],m["goal_conditioning"],m["state_dim"],m["action_dim"],m["localization"],m.get('geometry_conditioning')) for _,m in clips}
     if len(signatures) != 1 or next(iter(signatures))[2:4] != (8,8):
         raise ValueError("Mixed conditioning, frame rate, or non-left8 clips")
-    fps, conditioning, _, _, localization = next(iter(signatures))
+    fps, conditioning, _, _, localization, geometry_version = next(iter(signatures))
+    if geometry_version:
+        from .geometry_context import GEOMETRY_VERSION,GEOMETRY_DIM,GEOMETRY_KEY
+        if geometry_version!=GEOMETRY_VERSION:raise ValueError('Unknown geometry representation')
     first = next(rgb_frames(clips[0][0]/"front.mkv"))
     h, w = first.shape[:2]
     features = {"observation.state":dict(dtype="float32", shape=(8,), names=[f"left_{i}" for i in range(8)]),
                 "action":dict(dtype="float32", shape=(8,), names=[f"left_{i}" for i in range(8)])}
+    if geometry_version:features[GEOMETRY_KEY]=dict(dtype='float32',shape=(GEOMETRY_DIM,),names=[f'geometry_{i}' for i in range(GEOMETRY_DIM)])
     for key in DATASET_CAMERAS.values():
         features["observation.images."+key] = dict(dtype="video", shape=(h,w,3), names=["height","width","channels"])
     output = Path(output)
@@ -65,9 +69,13 @@ def export_clips(inputs, output, repo_id):
                     raise ValueError("Clip state/action/time alignment failed")
                 if not np.isfinite(state).all() or not np.isfinite(action).all():
                     raise ValueError("Non-finite demonstration values")
+                geometry=trace['geometry'] if geometry_version else None
+                if geometry_version and (geometry.shape!=(n,GEOMETRY_DIM) or not np.isfinite(geometry).all()):
+                    raise ValueError('Geometry missing or not aligned with applied actions')
                 videos = {name:rgb_frames(path/(name+".mkv")) for name in CAMERAS}
                 for i in range(n):
                     frame = {"observation.state":state[i], "action":action[i], "task":meta["task"]}
+                    if geometry_version:frame[GEOMETRY_KEY]=geometry[i]
                     for name, frames in videos.items():
                         image = next(frames)
                         if image.shape != (h,w,3):
@@ -83,7 +91,8 @@ def export_clips(inputs, output, repo_id):
     (output/"a3_skill_metadata.json").write_text(json.dumps(provenance,indent=2),encoding="utf-8")
     (output/"goal_conditioning.json").write_text(json.dumps(dict(goal_conditioning=conditioning,
         state_dim=8,action_dim=8,localization=localization,training_episodes="one verified batch per episode",
-        note="Copy this descriptor only alongside weights actually trained on these goal-conditioned images."),indent=2),encoding="utf-8")
+        geometry_conditioning=geometry_version,
+        note="Copy this descriptor only alongside weights actually trained on these observations."),indent=2),encoding="utf-8")
     report = dict(episodes=len(provenance),frames=sum(m["frames"] for m in provenance),
                   entry_kinds=sorted({m["entry_kind"] for m in provenance}), goal_conditioning=conditioning,
                   state_dim=8,action_dim=8,failed_clips_exported=0)

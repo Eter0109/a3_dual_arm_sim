@@ -150,16 +150,18 @@ def visual_region_complete(scene,goal,*,xy_tolerance=.004,z_tolerance=.0025):
 
 class VisualGoalPolicy:
     """One adapted policy executes the complete batch; no geometric takeover."""
-    def __init__(self,policy,metadata):
+    def __init__(self,policy,metadata,geometry_context=None):
         if (metadata.get("goal_conditioning")!=VISUAL_MARKER_VERSION
                 or metadata.get("localization")!=LOCALIZER_VERSION
                 or metadata.get("training_completed") is not True):
             raise ValueError("RGB-D goal mode requires weights actually trained with these measured, latched cues")
         self.policy=policy
         self.goal=None
+        self.geometry_context=geometry_context
 
     def start(self,goal,context=None):
         self.goal=goal
+        if self.geometry_context:self.geometry_context.start(goal)
         self._reset_queue(context)
 
     def _reset_queue(self,context):
@@ -171,7 +173,11 @@ class VisualGoalPolicy:
 
     def act(self,observation,calibrations):
         if self.goal is None:raise RuntimeError("No RGB-D batch goal")
-        return self.policy.act(annotate_visual_goal(observation,calibrations,self.goal),MARKED_INSTRUCTION)
+        obs=annotate_visual_goal(observation,calibrations,self.goal)
+        if self.geometry_context:
+            from .geometry_context import GEOMETRY_KEY
+            obs[GEOMETRY_KEY]=self.geometry_context.build()
+        return self.policy.act(obs,MARKED_INSTRUCTION)
 
     def pause(self,context=None):
         self._reset_queue(context)

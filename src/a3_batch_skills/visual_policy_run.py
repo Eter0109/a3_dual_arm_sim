@@ -30,6 +30,8 @@ def main(argv=None,policy_factory=None):
     p.add_argument("--profile",choices=("basic","medium","diverse"),default="basic")
     p.add_argument("--seed",type=int,default=26360)
     p.add_argument("--max-batches",type=int,help="Development scope only; never labels partial work as full task success")
+    p.add_argument('--record-training-clips',action='store_true',help='Full sensor/action clips; visual/native acceptance required')
+    p.add_argument('--n-action-steps',type=int,help='Explicit deployment execution horizon')
     p.add_argument("--source-column",choices=("1","2","3","4","auto"),default="1")
     p.add_argument("--vision-interval",type=int)
     p.add_argument("--placement-control",choices=("vla","rgbd-servo"),default="vla")
@@ -43,14 +45,15 @@ def main(argv=None,policy_factory=None):
     p.add_argument("--audit-placement-truth",action="store_true",
                    help="Log separate privileged labels AFTER decisions; never available to control")
     a=p.parse_args(argv)
-    if a.vision_interval is None:a.vision_interval=5
+    geometry_weights=(a.checkpoint/'geometry_conditioning.json').exists()
+    if a.vision_interval is None:a.vision_interval=1 if geometry_weights or a.record_training_clips else 5
     if a.output.exists():p.error("Never overwrite an evaluation")
     if a.vision_interval<1:p.error("Invalid vision interval")
     if a.max_batches is not None and not 1<=a.max_batches<={"2x5":2,"2x10":4}[a.task]:
         p.error('Invalid development batch scope')
     if a.audit_placement_truth and a.placement_control!='rgbd-servo':
         p.error("Placement truth audit is only for the optional hybrid diagnostic")
-    if a.placement_control=="rgbd-servo" and not a.extra_rgbd_view:
+    if (a.placement_control=="rgbd-servo" or geometry_weights or a.record_training_clips) and not a.extra_rgbd_view:
         a.extra_rgbd_view=[[-25.,0.],[-25.,180.]]
     descriptor=json.loads((a.checkpoint/"goal_conditioning.json").read_text())
     if descriptor.get("goal_conditioning")!=VISUAL_MARKER_VERSION or not descriptor.get("training_completed"):
@@ -72,7 +75,7 @@ def main(argv=None,policy_factory=None):
     apply_camera_reference(benchmark,a.camera_reference)
     env=benchmark.create_env(render_cameras=True)
     a.output.mkdir(parents=True)
-    sensor=policy=video=audit=None
+    sensor=policy=video=audit=training_recorder=None
     started=time.monotonic()
     try:
         env.task_config=replace(env.task_config,terminate_on_success=False)
@@ -85,9 +88,22 @@ def main(argv=None,policy_factory=None):
         sensor=MujocoRGBDViews(env,views=((a.elevation,a.azimuth),(-90.,90.),(-65.,90.),
                                         *[tuple(v) for v in a.extra_rgbd_view]))
         spec=geometry_spec_from_env(env)
-        policy=(policy_factory or importlib.import_module("pi05_adapter").Pi05BenchmarkPolicy)(a.checkpoint,a.job)
+        if policy_factory is None:
+            if geometry_weights:
+                from .geometry_adapter import GeometryPi05Adapter
+                factory=GeometryPi05Adapter
+            else:factory=importlib.import_module("pi05_adapter").Pi05BenchmarkPolicy
+        else:factory=policy_factory
+        policy=factory(a.checkpoint,a.job)
+        if a.n_action_steps is not None:
+            if not 1<=a.n_action_steps<=policy.config.chunk_size:p.error('Invalid execution horizon')
+            policy.config.n_action_steps=a.n_action_steps
         torch.manual_seed(a.seed)
-        visual=VisualGoalPolicy(policy,descriptor)
+        geometry=None
+        if geometry_weights or a.record_training_clips:
+            from .geometry_context import GeometryContext
+            geometry=GeometryContext(spec)
+        visual=VisualGoalPolicy(policy,descriptor,geometry_context=geometry)
         column="auto" if a.source_column=="auto" else int(a.source_column)
         context=EpisodeContext(a.seed,"Transfer the marked five cookies, release, and retreat.",policy.action_mode)
         placement=None
@@ -95,7 +111,9 @@ def main(argv=None,policy_factory=None):
             from .rgbd_placement import RGBDPlacementPolicy
             placement=RGBDPlacementPolicy(visual,servo,spec)
         controller=VisualBatchController(placement or visual,spec,column=column,context=context)
+        if geometry:geometry.scene_provider=lambda:controller.last_scene
         if placement:placement.scene_provider=lambda:controller.last_scene
+        if placement and geometry:geometry.observed_provider=lambda:placement.last_pose
         if placement:placement.budget_provider=lambda:max(1,controller.batch_steps-(controller.step-controller.batch_started)-30)
         if a.audit_placement_truth:
             from .placement_audit import PlacementTruthAudit
@@ -104,6 +122,11 @@ def main(argv=None,policy_factory=None):
         if a.record_placement_probes:
             from .placement_observation import PlacementProbeRecorder
             recorder=PlacementProbeRecorder(a.output/"placement_probes",spec)
+        if a.record_training_clips:
+            from .sensor_recording import SensorPolicyClipRecorder
+            training_recorder=SensorPolicyClipRecorder(a.output/'skill_clips',env.config.control_hz,
+                provenance=dict(task=a.task,profile=a.profile,seed=a.seed,checkpoint=str(a.checkpoint),
+                    placement_control=a.placement_control,sensor=sensor.protocol,full_sensor_trajectory=True))
         if a.video:
             from .__main__ import Video
             video=Video(a.output/"rollout.mp4",env.config.control_hz//2,env.config.image_width,env.config.image_height)
@@ -114,11 +137,15 @@ def main(argv=None,policy_factory=None):
             pads=env.data.geom_xpos[list(env._left_finger_geoms)].copy()  # robot FK only
             gap=np.linalg.norm(pads[1]-pads[0])-2*env.config.cookie_transfer.left_finger_pad_half_thickness_m
             trace_count=len(placement.trace) if placement else 0
+            counts_before=dict(placement.counts) if placement else {}
             if placement:
                 from .rgbd_placement import RobotPlacementState
                 placement.update(frame,RobotPlacementState(env.data.site_xpos[servo.site].copy(),
                     env.data.site_xmat[servo.site].reshape(3,3).copy(),pads.mean(0),float(gap),
                     float(env.last_applied_action[7]),float(env.data.time)))
+            if geometry:
+                from .geometry_context import robot_state_from_env
+                geometry.update(frame,robot_state_from_env(env))
             calibrations=camera_calibrations_from_fk(env)
             action=controller.act(obs,calibrations,frame=frame,
                 pad_midpoint_world=pads.mean(0),jaw_gap_m=float(gap))
@@ -136,7 +163,22 @@ def main(argv=None,policy_factory=None):
                 pose=placement.last_pose
                 if pose is not None and abs(pose.timestamp-float(env.data.time))>1e-6:pose=None
                 audit.write_after_decision(env,placement.goal,pose,float(env.data.time))
+            prepared=False
+            if training_recorder:
+                goal=controller.goal or training_recorder.goal
+                if goal is not None:
+                    from .visual_goals import annotate_visual_goal
+                    source='vla' if action is not None else 'boundary_hold'
+                    if placement:
+                        source=next((key for key in placement.counts if placement.counts[key]>counts_before.get(key,0)),'boundary_hold')
+                    training_recorder.prepare(annotate_visual_goal(obs,calibrations,goal),geometry.build(),
+                        goal,step+1,source);prepared=True
             obs,_,terminated,truncated,info=env.step(servo.hold() if action is None else servo.canonical(action))
+            if prepared:
+                training_recorder.commit(env.last_applied_action[:8],
+                    visual_verified=len(controller.completed)>training_recorder.goal.index,
+                    native_count=int(info.get('cookies_in_target',0)),failed=controller.finished,
+                    reason=controller.failure_reason)
             if placement and len(placement.trace)>trace_count:
                 placement.trace[-1].update(global_step=step+1,applied_left8=env.last_applied_action[:8].tolist())
             right_error=max(right_error,float(np.max(abs(env.last_applied_action[8:]-servo.right_hold))))
@@ -166,6 +208,8 @@ def main(argv=None,policy_factory=None):
         result["placement_probe_packets"]=recorder.count if recorder else 0
         result['placement_control']=a.placement_control
         result['placement_truth_audit_after_decisions']=bool(audit)
+        result['learned_geometry']=geometry_weights
+        result['training_clips']=len(training_recorder.clips) if training_recorder else 0
         result['evaluation_scope_batches']=a.max_batches or {'2x5':2,'2x10':4}[a.task]
         result['requested_scope_success']=len(controller.completed)>=result['evaluation_scope_batches']
         if placement:
@@ -181,6 +225,7 @@ def main(argv=None,policy_factory=None):
         (a.output/"result.json").write_text(json.dumps(result,indent=2))
         return 0 if result['requested_scope_success'] else 2
     finally:
+        if training_recorder:training_recorder.close()
         if audit:audit.close()
         if video:video.close()
         if policy:policy.close()

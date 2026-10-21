@@ -33,8 +33,10 @@ def serve(checkpoint,job,adapter_dir,pipes,control,ready,log):
                 import torch
                 torch.set_num_threads(2)
                 sys.path.insert(0,adapter_dir)
-                from pi05_adapter import Pi05BenchmarkPolicy
-                base=Pi05BenchmarkPolicy(Path(checkpoint),Path(job))
+                if (Path(checkpoint)/'geometry_conditioning.json').exists():
+                    from .geometry_adapter import GeometryPi05Adapter as Adapter
+                else:from pi05_adapter import Pi05BenchmarkPolicy as Adapter
+                base=Adapter(Path(checkpoint),Path(job))
                 ready.send(dict(ready=True,n_action_steps=base.config.n_action_steps))
                 sessions={};random_states={};active=[*pipes,control]
                 while True:
@@ -61,7 +63,7 @@ def serve(checkpoint,job,adapter_dir,pipes,control,ready,log):
                                     value=None
                                 elif op=='act':value=session.act(request['observation'],request['task'])
                                 elif op=='close':value=None
-                                elif op=='new':value=dict(n_action_steps=base.config.n_action_steps)
+                                elif op=='new':value=dict(n_action_steps=base.config.n_action_steps,chunk_size=base.config.chunk_size)
                                 else:raise ValueError('Unknown inference operation')
                                 random_states[connection]=(torch.get_rng_state(),torch.cuda.get_rng_state())
                             connection.send(dict(ok=True,value=value))
@@ -85,6 +87,8 @@ class RemotePolicy:
     def reset(self,context=None):return self.call('reset',context=context)
     def act(self,observation,task):
         names=('observation.state','observation.images.front','observation.images.left_wrist','observation.images.right_wrist')
+        from .geometry_context import GEOMETRY_KEY
+        if GEOMETRY_KEY in observation:names+=(GEOMETRY_KEY,)
         return self.call('act',observation={k:observation[k] for k in names},task=task)
     def close(self):self.call('close')
 
@@ -136,6 +140,8 @@ def main():
     p.add_argument('--task',choices=('2x5','2x10'),default='2x5')
     p.add_argument('--source-column',choices=('auto','1','2','3','4'),default='auto')
     p.add_argument('--max-batches',type=int)
+    p.add_argument('--record-training-clips',action='store_true')
+    p.add_argument('--placement-control',choices=('vla','rgbd-servo'),default='rgbd-servo')
     a=p.parse_args()
     if a.output.exists():p.error('Never overwrite a suite')
     import torch
@@ -166,9 +172,12 @@ def main():
         ready=ready_parent.recv()
         if not ready['ready']:raise RuntimeError(ready['error'])
         common=['--checkpoint',a.checkpoint,'--job',a.job,'--policy-module-dir',a.policy_module_dir,
-                '--camera-reference',a.camera_reference,'--placement-control','rgbd-servo',
+                '--camera-reference',a.camera_reference,'--placement-control',a.placement_control,
                 '--source-column',a.source_column,
-                '--record-placement-probes','--audit-placement-truth','--video']
+                '--video']
+        if a.placement_control=='rgbd-servo':common+=['--record-placement-probes','--audit-placement-truth']
+        else:common+=['--vision-interval','1','--extra-rgbd-view','-25','0','--extra-rgbd-view','-25','180']
+        if a.record_training_clips:common+=['--record-training-clips']
         for i,(_,client) in enumerate(pairs):
             process=context.Process(target=worker,args=(i,client,tasks,str(a.output),common));process.start();workers.append(process)
         write_json(a.output/'processes.json',dict(root=os.getpid(),model=server.pid,

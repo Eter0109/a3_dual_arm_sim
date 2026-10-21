@@ -28,7 +28,7 @@ class LosslessRGBVideo:
 
 class SkillClipRecorder:
     def __init__(self, root, env, *, seed, marked=True, video_factory=LosslessRGBVideo, provenance=None,
-                 visual_sensor=None,visual_spec=None,source_column="auto"):
+                 visual_sensor=None,visual_spec=None,source_column="auto",record_geometry=False):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=False)
         self.env, self.seed, self.marked = env, seed, marked
@@ -40,12 +40,19 @@ class SkillClipRecorder:
         self.visual_sensor,self.visual_spec=visual_sensor,visual_spec
         self.source_column=source_column
         self.visual_completed=[]
+        self.record_geometry=record_geometry;self.geometry_context=None
+        if record_geometry:
+            if visual_sensor is None:raise ValueError('Geometry needs calibrated RGB-D')
+            from .geometry_context import GeometryContext
+            self.geometry_context=GeometryContext(visual_spec)
+            self.geometry_context.scene_provider=lambda:self._measured_scene
         if visual_sensor is not None:
             from .rgbd_localization import RGBDLocalizer
             self.visual_localizer=RGBDLocalizer(visual_spec)
             if not marked:raise ValueError("RGB-D goal recording requires the same marked images used at inference")
 
     def prepare(self, observation, goal, scene, global_step, phase):
+        frame=None
         if self.pending is not None:
             raise RuntimeError("A prepared observation has no applied action")
         if self.active is None:
@@ -69,6 +76,7 @@ class SkillClipRecorder:
                 if np.max(distance[a,b])>.003:
                     raise RuntimeError("Independent RGB-D goal differs from the teacher's selected five")
                 self.active.update(visual_goal=visual,teacher_goal_match_max_m=float(distance[a,b].max()))
+                if self.geometry_context:self.geometry_context.start(visual)
         if self.active["goal"].index != goal.index:
             raise RuntimeError("A batch clip was not finalized at its boundary")
         if self.visual_sensor is not None:
@@ -85,8 +93,16 @@ class SkillClipRecorder:
             relative_tool_pose=np.r_[rotation.T @ (scene.tool_position-center),
                                     (rotation.T @ scene.tool_rotation).ravel()].astype(np.float32),
             images={name:np.asarray(obs["observation.images."+name]).copy() for name in CAMERAS})
+        if self.geometry_context:
+            from .geometry_context import robot_state_from_env
+            from .rgbd_localization import LocalizationFailure
+            if frame is None:frame=self.visual_sensor.capture()
+            try:self._measured_scene=self.visual_localizer.observe(frame)
+            except LocalizationFailure:self._measured_scene=None
+            self.geometry_context.update(frame,robot_state_from_env(self.env))
+            self.pending['geometry']=self.geometry_context.build()
 
-    def commit(self, applied_left8, *, batch_completed=False, failed=False, reason=None):
+    def commit(self, applied_left8, *, batch_completed=False, failed=False, reason=None,native_count=None):
         row = self.pending
         if row is None:
             raise RuntimeError("No pre-action observation was prepared")
@@ -101,6 +117,7 @@ class SkillClipRecorder:
                     self.env.config.control_hz, image.shape)
             self.active["videos"][name].add(image)
         self.active["rows"].append(row)
+        if native_count is not None:self.active['native_count']=int(native_count)
         self.pending = None
         if batch_completed or failed:
             self.finish(batch_completed, reason)
@@ -111,6 +128,8 @@ class SkillClipRecorder:
         if self.pending is not None:
             raise RuntimeError("Cannot finalize a clip before applying its pending action")
         active = self.active
+        if self.record_geometry and success and active.get('native_count',0)!=5*(active['goal'].index+1):
+            success=False;reason='Native upright/contact count did not retain this and previous batches'
         visual_verified=False
         if self.visual_sensor is not None and success:
             from .visual_goals import visual_region_complete
@@ -133,6 +152,7 @@ class SkillClipRecorder:
         rows = active["rows"]
         if rows:
             keys = ("state", "action", "phase", "global_step", "source_frame", "relative_tool_pose")
+            if self.record_geometry:keys+=('geometry',)
             np.savez_compressed(active["path"]/"trajectory.npz",
                 **{key:np.asarray([r[key] for r in rows]) for key in keys})
             goal = active["goal"]
@@ -164,6 +184,11 @@ class SkillClipRecorder:
                     visual_goal=json.loads(json.dumps(asdict(active["visual_goal"]),default=json_value)),
                     rgbd_sensor=self.visual_sensor.protocol,geometry_spec=self.visual_spec,
                     auxiliary_pose_fields="teacher_diagnostics_not_policy_inputs")
+                if self.record_geometry:
+                    from .geometry_context import GEOMETRY_VERSION,GEOMETRY_DIM
+                    meta.update(geometry_conditioning=GEOMETRY_VERSION,geometry_dim=GEOMETRY_DIM,
+                        per_frame_geometry=True,geometry_source='calibrated_RGBD_and_robot_FK_only',
+                        clip_role='teacher_bootstrap',native_count_at_accept=active.get('native_count'))
             (active["path"]/"metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
             self.clips.append(meta)
         self.active = None
