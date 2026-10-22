@@ -2083,3 +2083,47 @@ seeds 0, 1, 2 and 4 of the earlier probe sweeps did the same.  Those episodes ar
 any expert quality, so a collection campaign has to budget for them: they are the reason the
 achievable rate is a product -- the policy finishing a first batch *times* the expert finishing the
 second from it -- and only the second factor is what these fixes move.
+
+**The episode was ending in eight steps and nothing said why.**  With the column and the row
+ranking both fixed, seed 7 still came back `tier C` -- five in target, five in slots, no progress,
+`expert_failed = False`, `expert_error = None`.  The loop had run **8** steps of the expert phase
+and stopped without either party reporting anything, which is only possible if the environment
+ended it: `terminated` is the safety stop and nothing else, and its reason lives in `info` where the
+gate was not looking.  Recorded, it is one line:
+
+```
+expert_stopped_by: terminated
+expert_safety_reason: joint velocity exceeded safety threshold
+```
+
+Printing the first twelve steps of the expert phase, with the worst joint named and the size of the
+command step, says where it came from:
+
+```
+step+1: phase=APPROACH qvel_max=7.5  at cookie_8_free[3] command_jump=0.6240
+step+2: phase=APPROACH qvel_max=28.8 at cookie_7_free[3] command_jump=0.5440
+step+3: phase=APPROACH qvel_max=6.9  at cookie_22_free[3] command_jump=0.4640
+step+8: phase=APPROACH qvel_max=95.2 at cookie_1_free[3]  command_jump=0.0662
+```
+
+`command_jump` falls by exactly 0.08 a step, which is the environment's own joint-step limit: the
+expert's very first command is 0.62 away from what the policy last applied, and the biggest single
+term is the jaw opening -- `APPROACH` asks for 1.0 while the hand is still holding the release
+opening.  So the adopted hand was being **re-opened and sent to the source while it was still inside
+the box**, through the block it had just released.  The Cookie velocities are the block being swept,
+not an expert that cannot grasp.
+
+`adopt` now starts with a **vertical retreat**: 60 mm up, at the jaw opening the hand already has,
+before the phase machine does anything else, with the right gripper held at whatever the policy was
+commanding.  Same seed, same takeover:
+
+```
+step+1:  qvel_max=1.0  at cookie_9_free[3] command_jump=0.0289
+step+7:  qvel_max=21.8 at cookie_7_free[3] command_jump=0.0137
+step+9:  qvel_max=0.3  at cookie_9_free[3] command_jump=0.0134
+step+12: qvel_max=0.1  at L_SHOULDER_P[0]  command_jump=0.0055
+```
+
+The command step is 20x smaller, the arm's own joints stay at 0.1, and the block's settling
+(21.8 m/s, one squeezed Cookie releasing) decays instead of tripping the limit.  That is the first
+time this seed has reached the expert's second batch at all.

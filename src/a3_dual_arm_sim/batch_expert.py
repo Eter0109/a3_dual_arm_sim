@@ -68,6 +68,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: third attempt costs more than starting a fresh episode does.
     MAX_BATCH_RETRIES = 2
 
+    #: How far above the hand's takeover pose the *first* move of an adopted episode goes.  It has
+    #: to clear the box's wall and the block inside it, and a batch stands ~10 mm tall in a box
+    #: ~30 mm deep, so 60 mm is above every Cookie and below the transit height the expert plans
+    #: its approach from.
+    ADOPT_CLEAR_HEIGHT_M = 0.060
+
     def reset(self, context=None):
         super().reset(context)
         self.profile: BatchProfile = PROFILES[self.env.config.batch_expert_profile]
@@ -108,6 +114,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         #: Rows a grasp already failed on, so `_candidate_batches` cannot offer them again.
         self._failed_batches: set[int] = set()
         self.batch_retries: list[dict[str, object]] = []
+        #: Set by `adopt` when the hand is still inside the box's airspace: the tool is asked to
+        #: leave vertically, holding its current jaw opening, before the phase machine does
+        #: anything else.  See `_adopt_current_state` for the measurement that requires it.
+        self._clear_lift: tuple[np.ndarray, np.ndarray] | None = None
+        self._clear_opening = 1.0
         #: Which column the *placement* aims at, when it is not simply the batch number.
         #: `_place_pose` used to read `self.batch_index` and nothing else, so an adopted episode
         #: that set only `target_slot_index` still carried its five into the column the policy had
@@ -259,6 +270,17 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             self.batch_index = 1
         self.adopted_slot_column = self._free_slot_column(in_target)
         self.target_column = self.adopted_slot_column
+        # **Leave the box before touching anything.**  The hand is wherever the policy left it,
+        # which is above the block it has just released, and the first thing the phase machine
+        # would do is re-open the jaws to their insertion width and swing to the source.  Held at
+        # the opening it already has, a vertical retreat cannot sweep or squeeze the block.
+        here = np.asarray(self.data.site_xpos[self._l_site], dtype=np.float64).copy()
+        rotation = np.asarray(self.data.site_xmat[self._l_site], dtype=np.float64).reshape(3, 3)
+        self._clear_lift = (here + np.array([0.0, 0.0, self.ADOPT_CLEAR_HEIGHT_M]), rotation.copy())
+        self._clear_opening = float(np.clip(self.env.current_joint_action[7], 0.0, 1.0))
+        # The right arm is idle in a batch episode, so it holds whatever the policy was holding
+        # rather than snapping to the expert's own idle value.
+        self.right_gripper = float(np.clip(self.env.last_applied_action[15], 0.0, 1.0))
         free = self._free_slots_per_column(in_target)
         if max(free) < 5:
             # One grasp carries all five into a single column, so an empty column is not a
@@ -1151,6 +1173,23 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             )
             return self._stay_command()
         if self.phase is CookiePhase.APPROACH:
+            if self._clear_lift is not None:
+                # Straight up, at the opening the hand already has.  An adopted episode starts
+                # with the tool inside the box's airspace, and both of the expert's first
+                # instincts -- opening the jaws to their insertion width and travelling to the
+                # next row -- are unsafe from there.  Measured on the gate's seed 7: the first
+                # command changed the jaw opening by 0.62 while the hand was still over the
+                # block, a Cookie was at 7.5 m/s on the first step and 95 m/s by the eighth, and
+                # the environment's joint-velocity limit ended the episode.  Nothing about the
+                # block was wrong in that episode; the hand simply left through it.
+                position, rotation = self._clear_lift
+                action, reached = self._servo(
+                    position, rotation, self._clear_opening,
+                    speed=self.profile.retract_m_per_step,
+                )
+                if reached:
+                    self._clear_lift = None
+                return action
             # Travel with the jaws fully open.  The target batch width is set
             # only once the tool is steady above the Cookies.
             if self.profile.joint_transit:
