@@ -1925,3 +1925,35 @@ millimetres off inside an already-moved source bin (the saved poses show it: the
 splits into 0.767 and 0.7685 heights where it should be one).  Both are fixed by snapshotting
 after `apply_scene` and copying hinge and slide joints only.  B''s single "0 progress in 517
 steps" sample came from the old `park_arm_at_home`, so it is being re-run as well.
+
+**`prefill-after` settles the history question, and sharpens the real one.**  Seed 6's own
+rollout hands over at 233 with five in target and four in slots; the scene is then put back to
+prefill's construction exactly -- every other Cookie at its start-of-episode pose, prefill's own
+five laid into column 1, the arm parked -- and the policy finishes **10 / 10 in 219 further
+steps**.  A prior rollout is therefore harmless: the model is stateless and the scene, not the
+history, is what phase 2 reads.  That removes 9.34's least comfortable explanation.
+
+What it does not remove is that A's two accepted samples failed.  The first-frame dump already
+said the scenes were not matched, and rebuilding the block from *the policy's own five* rather
+than prefill's five is the reason.  So variant A as designed cannot separate block from pose: the
+identity of the five Cookies and the position of the five gaps in the source grid move together
+with the block.
+
+**`tidy` -- and the structural fact underneath the whole section.**  The single-variable version
+sends only the in-box, in-no-slot Cookie back to the source, leaving the block and the arm
+untouched.  Seed 6: five in target, four in slots -> one Cookie tidied -> **4 / 10, slots 4, and
+nothing added for 667 steps**.  The count fell because the tidied Cookie was one of the five.
+
+That sample also exposes an invariant that reorders 9.33-9.35: **a handover with a loose Cookie
+always has at most four Cookies in slots.**  Five in the box with five in slots is clean by
+definition, so there is never a loose Cookie to remove from a completed first batch.  "The policy
+leaves a loose Cookie" and "the policy's first batch is not finished" are the same statement --
+the fifth Cookie went into the box but not into a slot.  The stall is therefore not an extra
+object blocking a free column; it is a first batch that is one placement short, and "finish the
+batch you started" is a task the demonstrations never contain, since every recorded first batch
+ends five-in-five.
+
+Which leaves exactly one clean question, and it is the run in flight: a handover at five in five
+slots, arm parked at home, block untouched (`block` on a clean handover).  If that finishes, the
+pose the policy leaves is the blocker and A's failures are pose failures.  If it does not, the
+remaining difference is the source grid's five gaps, which `prefill-after` moves and A does not.
