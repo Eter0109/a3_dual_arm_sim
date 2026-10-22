@@ -55,8 +55,14 @@ class VisualBatchGoal:
     source_column: int
     source_clear_fraction: float
     target_empty_fraction: float
+    source_timestamp: float | None = None
+    target_timestamp: float | None = None
 
     def __post_init__(self):
+        for name in ('source_timestamp','target_timestamp'):
+            value=self.timestamp if getattr(self,name) is None else getattr(self,name)
+            if not np.isfinite(value) or value>self.timestamp+10.+1e-6:raise ValueError('Invalid evidence timestamp')
+            object.__setattr__(self,name,float(value))
         shapes=dict(source_positions=(5,3),source_rotation=(3,3),target_positions_box=(5,3),
                     target_position=(3,),target_rotation=(3,3),half_size=(3,))
         for name,shape in shapes.items():
@@ -100,6 +106,55 @@ def make_visual_goal(frame,scene,spec,index,*,column="auto"):
         return VisualBatchGoal(index,positions,scene.source_box.rotation,target,scene.target_box.position,
             scene.target_box.rotation,half,frame.timestamp,col,clear,empty)
     raise LocalizationFailure("No five-cookie end has a visibly clear approach; acquire another view")
+
+
+def measured_goal_parts(frame,scene,spec,index,*,column='auto',completed=(),known_occupancy=()):
+    """Independent source/target evidence; no requirement of joint visibility.
+
+    All slot proposals still require positive depth floor evidence. Previous
+    measured footprints also exclude visibly occupied or encroached regions.
+    """
+    from .planning import rectangle_overlap
+    half=np.asarray(spec['cookie_half_size']);regions=target_regions(spec['target_slots_local'],spec['floor_offset_m']+half[2])
+    target_part=None;source_part=None
+    order=[index,*[i for i in range(len(regions)) if i!=index]]
+    for i in order:
+        if not 0<=i<len(regions):continue
+        target=regions[i]
+        if any(np.allclose(target,g.target_positions_box) for g in completed):continue
+        occupied=False
+        for c in (*scene.target_cookies,*known_occupancy):
+            p=(c.position-scene.target_box.position)@scene.target_box.rotation
+            r=scene.target_box.rotation.T@c.rotation
+            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-.001) for t in target):occupied=True;break
+        if occupied:continue
+        lower=target[:,:2].min(0)-half[:2]+.001;upper=target[:,:2].max(0)+half[:2]-.001
+        empty=floor_visibility(frame,scene.target_box,rectangle_samples(lower,upper),spec['floor_offset_m'])
+        if empty>=.90:target_part=(target,empty);break
+    for col in sorted({c.column for c in scene.source_cookies}):
+        if column!='auto' and col!=column:continue
+        try:five=select_visible_five(scene,column=col)
+        except LocalizationFailure:continue
+        positions=np.asarray([c.position for c in five]);local=(positions-scene.source_box.position)@scene.source_box.rotation
+        low=np.array([local[:,0].mean()-.018,-scene.source_box.inner_half_size[1]+.001])
+        high=np.array([local[:,0].mean()+.018,local[:,1].min()-half[1]-.0007])
+        if high[1]<=low[1]:continue
+        clear=floor_visibility(frame,scene.source_box,rectangle_samples(low,high),spec['source_floor_top_offset_m'])
+        if clear>=.90:source_part=(positions,scene.source_box.rotation,col,clear);break
+    return source_part,target_part
+
+
+def measured_target_capacity(scene,spec,completed=(),known_occupancy=()):
+    from .planning import rectangle_overlap
+    half=np.asarray(spec['cookie_half_size']);regions=target_regions(spec['target_slots_local'],spec['floor_offset_m']+half[2])
+    for target in regions:
+        if any(np.allclose(target,g.target_positions_box) for g in completed):continue
+        blocked=False
+        for c in (*scene.target_cookies,*known_occupancy):
+            p=(c.position-scene.target_box.position)@scene.target_box.rotation;r=scene.target_box.rotation.T@c.rotation
+            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-.001) for t in target):blocked=True;break
+        if not blocked:return True
+    return False
 
 
 def camera_calibrations_from_fk(env):

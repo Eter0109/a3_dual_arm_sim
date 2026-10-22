@@ -142,6 +142,9 @@ def main():
     p.add_argument('--max-batches',type=int)
     p.add_argument('--record-training-clips',action='store_true')
     p.add_argument('--placement-control',choices=('vla','rgbd-servo'),default='rgbd-servo')
+    p.add_argument('--observation-mode',choices=('passive','active-left-wrist'),default='passive')
+    p.add_argument('--placement-mode',choices=('strict','contained_unstacked'),default='strict')
+    p.add_argument('--sensor-mode',choices=('legacy-fixed','native-three'),default='legacy-fixed')
     a=p.parse_args()
     if a.output.exists():p.error('Never overwrite a suite')
     import torch
@@ -152,7 +155,8 @@ def main():
     a.output.mkdir(parents=True);(a.output/'cases').mkdir()
     (a.output/'protocol.json').write_text(json.dumps(dict(cases=cases,workers=a.workers,gpu_models=1,
         independent_action_queues=True,independent_rng=True,automatic_training=False,checkpoint=a.checkpoint,
-        source_column=a.source_column),indent=2))
+        source_column=a.source_column,observation_mode=a.observation_mode,placement_mode=a.placement_mode,
+        sensor_mode=a.sensor_mode,placement_control=a.placement_control),indent=2))
     context=mp.get_context('spawn')
     tasks=context.Queue()
     for case in cases:tasks.put(case)
@@ -174,6 +178,8 @@ def main():
         common=['--checkpoint',a.checkpoint,'--job',a.job,'--policy-module-dir',a.policy_module_dir,
                 '--camera-reference',a.camera_reference,'--placement-control',a.placement_control,
                 '--source-column',a.source_column,
+                '--observation-mode',a.observation_mode,'--placement-mode',a.placement_mode,
+                '--sensor-mode',a.sensor_mode,
                 '--video']
         if a.placement_control=='rgbd-servo':common+=['--record-placement-probes','--audit-placement-truth']
         else:common+=['--vision-interval','1','--extra-rgbd-view','-25','0','--extra-rgbd-view','-25','180']
