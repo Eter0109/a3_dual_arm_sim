@@ -1957,3 +1957,33 @@ Which leaves exactly one clean question, and it is the run in flight: a handover
 slots, arm parked at home, block untouched (`block` on a clean handover).  If that finishes, the
 pose the policy leaves is the blocker and A's failures are pose failures.  If it does not, the
 remaining difference is the source grid's five gaps, which `prefill-after` moves and A does not.
+
+### 9.36 What actually stops the second batch: the source grid, not the box (10-22)
+
+Four probes now hold the same seed (6) and the same handover (233, five in target, four in
+slots), and they disagree in exactly one place each:
+
+| what is put back | box | arm | source grid | result |
+|---|---|---|---|---|
+| everything (`prefill-after`, seed 6) | prefill's five-in-five | home | pristine | **10 / 10**, 219 more steps |
+| the box only (`tidy`, seed 6) | policy's, minus the loose Cookie | policy's | as the policy left it | 4 / 10, 0 added |
+| the arm only (`block`, seed 3 at 5 / 5) | policy's, clean | home | as the policy left it | 5 / 10, 0 added |
+| nothing (`normal`, `pose`) | policy's | policy's | as the policy left it | 5 / 10 |
+
+Restoring the box does not help.  Restoring the arm does not help.  Restoring the whole scene
+finishes.  The only thing the two failing cells still share is the **source bin's grid after the
+policy's own five grasps**, and the saved poses say what that grid looks like: next to the neat
+8.83 mm lattice there are Cookies at 0.1006, 0.0986, 0.0980 against a column at 0.0994 -- nudged
+0.8 to 1.4 mm, and one Cookie at 0.1006 / 0.3215 sitting where the lattice has 0.0994 / 0.3215.
+With a 7.2 mm Cookie on an 8.83 mm pitch the clearance is 1.63 mm, so a 1.4 mm nudge is very
+nearly a contact, and a gripper that approaches on a fixed lattice-relative path will find that
+row closed.
+
+That also re-reads 9.33-9.35.  "The policy stalls at five" is not one behaviour with one cause:
+the first batch's own grasps rearrange the source, and the sixth pick is attempted on a grid that
+no longer exists.  The loose Cookie in the box was a correlate -- it appears in exactly the
+episodes that stalled, because a fifth grasp that ends badly also nudges its neighbours.
+
+`regrid` is the test: put back **only** the source grid, leave the box and the arm exactly as the
+policy left them.  If that finishes, the second batch's difficulty lives in the source bin and
+9.34's block explanation has to be dropped.
