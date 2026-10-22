@@ -700,7 +700,17 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: shoved more than about a millimetre is no longer part of the row the pads close on.
     SOURCE_IN_PLACE_TOLERANCE_M = 0.001
 
-    def _graspable_in_place(self, index: int, source: np.ndarray, actual: np.ndarray) -> bool:
+    #: The tolerance an *adopted* episode tries first.  A policy's own picks nudge the Cookies
+    #: around them by 0.8-1.4 mm (measured: 0.1006 / 0.0986 / 0.0980 against a 0.0994 column),
+    #: and on an 8.83 mm pitch with a 7.2 mm Cookie the pad has 1.63 mm of clearance -- so a
+    #: Cookie that passes a 1 mm filter can still stop the descent, which is how seed 7 of round
+    #: 4 ended: `DESCEND` blocked with 75.7 N on one pad.  Rows that pass this one are pristine,
+    #: and the loose tolerance is still tried afterwards, so the rule can only add rows.
+    ADOPT_IN_PLACE_TOLERANCE_M = 0.0004
+
+    def _graspable_in_place(
+        self, index: int, source: np.ndarray, actual: np.ndarray, tolerance: float | None = None
+    ) -> bool:
         """Is Cookie ``index`` still standing where the row grasp assumes it is?"""
         if index in self.completed_cookie_indices:
             return False
@@ -708,12 +718,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             return False
         if abs(self.data.xmat[self.env._cookie_bodies[index], 8]) < np.cos(np.deg2rad(10)):
             return False
+        limit = self.SOURCE_IN_PLACE_TOLERANCE_M if tolerance is None else tolerance
         return (
             float(np.linalg.norm(actual[index][:2] - source[index][:2]))
-            <= self.SOURCE_IN_PLACE_TOLERANCE_M
+            <= limit
         )
 
-    def _candidate_batches(self):
+    def _candidate_batches(self, tolerance: float | None = None):
         """Prefer exposed ends; do not force an insertion through fallen Cookies.
 
         **Consecutive Cookies, not merely the first five of the ones that remain.**  A column is
@@ -739,7 +750,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             runs: list[list[int]] = []
             run: list[int] = []
             for index in order:
-                if self._graspable_in_place(index, source, actual):
+                if self._graspable_in_place(index, source, actual, tolerance):
                     run.append(index)
                 else:
                     if len(run) >= 5:
@@ -828,7 +839,19 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
 
     def _select_batch(self):
         source = np.asarray(self.env.SOURCE_POSITIONS)
-        self.batch_indices = next(self._candidate_batches(), [])
+        # An adopted episode asks for a pristine row first, because the policy's own picks have
+        # nudged its neighbours by about a millimetre and the pad has less clearance than that.
+        # If nothing is pristine the loose tolerance still applies, so this can only add rows.
+        adopting = self.target_column is not None
+        batch = next(
+            self._candidate_batches(
+                tolerance=self.ADOPT_IN_PLACE_TOLERANCE_M if adopting else None
+            ),
+            [],
+        )
+        if not batch and adopting:
+            batch = next(self._candidate_batches(), [])
+        self.batch_indices = batch
         if len(self.batch_indices) != 5:
             raise RuntimeError("no exposed, upright five-Cookie batch available")
         self.current_cookie_index = self.batch_indices[0]
