@@ -10,7 +10,7 @@ SUPERVISOR_VERSION="rgbd_release_pause_verify_v3_retreat_complete"
 class VisualBatchController:
     def __init__(self,policy,spec,*,column="auto",batch_steps=750,stable_observations=3,
                  verification_steps=60,context=None,localizer=None,placement_mode='strict',
-                 observation_mode='passive',modern=False):
+                 observation_mode='passive',modern=False,batch_handoff='preserve'):
         self.policy,self.spec,self.column=policy,spec,column
         self.batch_steps,self.stable_observations=int(batch_steps),int(stable_observations)
         self.verification_steps=int(verification_steps)
@@ -33,6 +33,8 @@ class VisualBatchController:
         if placement_mode not in ('strict','contained_unstacked') or observation_mode not in ('passive','active-left-wrist'):
             raise ValueError('Invalid observation/placement mode')
         self.placement_mode=placement_mode;self.observation_mode=observation_mode
+        if batch_handoff not in ('preserve','initial-open'):raise ValueError('Invalid batch handoff')
+        self.batch_handoff=batch_handoff
         self.modern=bool(modern or placement_mode!='strict' or observation_mode!='passive')
         from .visual_evidence import PlanningEvidence
         self.evidence=PlanningEvidence();self.observation_attempts=0;self.observation_steps=0
@@ -105,6 +107,14 @@ class VisualBatchController:
         self._scan_placement_scene=None;self._scan_anchor=None;self._scan_since=None;self._scan_last=None;self._scan_count=0
         self.evidence.invalidate('release_and_batch_boundary')
         self.phase='DONE' if 5*len(self.completed)==self.spec['required_cookies'] else 'LOCATE'
+        if self.phase=='LOCATE' and self.batch_handoff=='initial-open':self.phase='HANDOFF'
+
+    def handoff_finished(self,error,steps):
+        self.observation_steps+=steps;self.total_observation_steps+=steps
+        self.evidence.invalidate('boundary_handoff_finished')
+        self.events.append(dict(step=self.step,event='boundary_handoff_finished',error=error,steps=steps))
+        if error:self._fail('BOUNDARY_HANDOFF_FAILED: '+str(error),recovery=True)
+        else:self.phase='LOCATE'
 
     def request_observation(self,reason):
         if 'Conflicting' in str(reason):self.evidence.invalidate('calibration_conflict')
@@ -229,6 +239,7 @@ class VisualBatchController:
             self._fail("Release could not be visually verified within its time budget",recovery=True);return None
         if self.step-self.batch_started>self.batch_steps:
             self._fail("Single-batch time budget exceeded");return None
+        if self.phase=='HANDOFF':return None
         scene=None
         if frame is not None:
             try:scene=self.localizer.observe(frame)

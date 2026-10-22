@@ -41,6 +41,27 @@ class LeftWristObservation:
         self.max_steps=max_steps;self.active=False;self.done=False;self.error=None;self.used_steps=0
         self.events=[];self._phase='IDLE';self._return=[]
 
+    def begin_handoff(self,state,initial_state,scene,packet,remaining=200):
+        """Empty-hand return to the episode's real initial pose; no scene reset."""
+        self.state=np.asarray(state,dtype=float).copy();self.home=self.state[:7].copy()
+        self.rim=max(scene.source_box.rim_z,scene.target_box.rim_z)
+        _,_,pad,_,_=self.fk(self.home)
+        gap=np.linalg.norm(self.data.geom_xpos[self.pad_ids[1]]-self.data.geom_xpos[self.pad_ids[0]])-2*self.pad_half
+        held=held_surface_suspected(packet,pad,self.rim)
+        if not observation_entry_ready(pad[2],self.rim,gap,self.open_width,held):
+            raise LocalizationFailure('Boundary handoff requires a clear, open, visually empty hand')
+        self.target=np.asarray(initial_state,dtype=float)[:7].copy()
+        if not np.isfinite(self.target).all() or np.any(self.target<self.lower) or np.any(self.target>self.upper):
+            raise LocalizationFailure('Invalid initial handoff joint target')
+        if not all(self._safe(self.home+(self.target-self.home)*v) for v in np.linspace(0,1,60)):
+            raise LocalizationFailure('Boundary handoff path lost clearance')
+        self.limit=min(self.max_steps,int(remaining));self.used_steps=0
+        travel=int(np.ceil(np.max(abs(self.target-self.home))/.025))
+        if self.limit<travel+20:raise LocalizationFailure('Insufficient boundary handoff budget')
+        self.active=True;self.done=False;self.error=None;self._phase='HANDOFF';self._stable=0
+        self.events.append(dict(event='boundary_handoff_started',home=self.home.tolist(),
+            goal=self.target.tolist(),gripper_target=1.,physical_scene_reset=False))
+
     def fk(self,q):
         import mujoco
         self.data.qpos[self.addresses]=np.r_[q,self.state[8:15]]
@@ -109,6 +130,20 @@ class LeftWristObservation:
 
     def act(self,state,timestamp):
         measured=np.asarray(state)[:7];self.used_steps+=1
+        if self._phase=='HANDOFF':
+            command=measured+np.clip(self.target-measured,-.025,.025)
+            if not self._safe(measured) or not self._safe(command):
+                self.error='Boundary handoff path lost clearance';self.done=True;self.active=False
+                return np.r_[measured,float(np.asarray(state)[7])]
+            error=float(np.max(abs(measured-self.target)))
+            self._stable=self._stable+1 if error<=.005 and float(np.asarray(state)[7])>=.98 else 0
+            if self._stable>=3:
+                self.done=True;self.active=False;self._phase='DONE'
+                self.events.append(dict(event='boundary_handoff_returned',steps=self.used_steps,
+                    maximum_joint_error_rad=error,gripper_opening=float(np.asarray(state)[7])))
+            elif self.used_steps>=self.limit:
+                self.error='Boundary handoff return budget exhausted';self.done=True;self.active=False
+            return np.r_[command,min(1.,float(np.asarray(state)[7])+.025)]
         if self._phase=='OUTBOUND':
             if not self._safe(measured):
                 self.error='Observation path lost measured clearance';self._start_return()

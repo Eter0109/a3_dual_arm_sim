@@ -25,11 +25,13 @@ class PlanningEvidence:
             self.target_reason='TARGET_EMPTY_UNOBSERVED' if measured_target_capacity(scene,spec,completed,known_occupancy) else 'NO_FREE_TARGET_REGION'
         if self.target is not None:
             from .planning import rectangle_overlap
+            from .execution_settings import target_planning_settings
+            _,overlap_tolerance=target_planning_settings(spec)
             half=np.asarray(spec['cookie_half_size']);region=self.target['value'][0]
             for c in scene.target_cookies:
                 p=(c.position-scene.target_box.position)@scene.target_box.rotation
                 r=scene.target_box.rotation.T@c.rotation
-                if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-.001) for t in region):
+                if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-overlap_tolerance) for t in region):
                     self.invalidate('target_occupancy_changed','target');break
         for name,value in (('source',source),('target',target)):
             old=getattr(self,name)

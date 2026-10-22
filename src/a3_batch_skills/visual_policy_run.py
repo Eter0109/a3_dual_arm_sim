@@ -32,6 +32,11 @@ def main(argv=None,policy_factory=None):
     p.add_argument("--max-batches",type=int,help="Development scope only; never labels partial work as full task success")
     p.add_argument('--record-training-clips',action='store_true',help='Full sensor/action clips; visual/native acceptance required')
     p.add_argument('--n-action-steps',type=int,help='Explicit deployment execution horizon')
+    p.add_argument('--continuation-action-steps',type=int,help='Execution horizon from the second batch onward')
+    p.add_argument('--batch-handoff',choices=('preserve','initial-open'),default='preserve')
+    p.add_argument('--target-floor-fraction',type=float,default=.90)
+    p.add_argument('--target-overlap-tolerance-mm',type=float,default=1.,
+                   help='Measured footprint overlap allowance; >1 mm is an experimental contact probe')
     p.add_argument("--source-column",choices=("1","2","3","4","auto"),default="1")
     p.add_argument("--vision-interval",type=int)
     p.add_argument("--placement-control",choices=("vla","rgbd-servo"),default="vla")
@@ -51,6 +56,14 @@ def main(argv=None,policy_factory=None):
     modern=a.sensor_mode=='native-three' or a.observation_mode!='passive' or a.placement_mode!='strict'
     if a.observation_mode=='active-left-wrist' and a.sensor_mode!='native-three':p.error('Active wrist observation requires native-three depth')
     if modern and a.placement_control!='vla':p.error('New observation/acceptance modes keep all manipulation actions in the VLA')
+    if a.batch_handoff!='preserve' and (a.observation_mode!='active-left-wrist' or a.sensor_mode!='native-three'):
+        p.error('Initial-open handoff requires the native empty-hand observation controller')
+    from .execution_settings import target_planning_settings,set_action_steps
+    settings=dict(target_floor_fraction=a.target_floor_fraction,target_overlap_tolerance_m=a.target_overlap_tolerance_mm/1000.)
+    try:target_planning_settings(settings)
+    except ValueError as exc:p.error(str(exc))
+    if a.sensor_mode!='native-three' and (a.target_floor_fraction!=.90 or a.target_overlap_tolerance_mm!=1.):
+        p.error('Target tolerance experiments require native-three perception')
     geometry_weights=(a.checkpoint/'geometry_conditioning.json').exists()
     if a.vision_interval is None:a.vision_interval=1 if geometry_weights or a.record_training_clips else 5
     if a.output.exists():p.error("Never overwrite an evaluation")
@@ -94,9 +107,11 @@ def main(argv=None,policy_factory=None):
             target_bin_noise_m=benchmark.target_bin_noise_m,target_bin_yaw_noise_rad=benchmark.target_bin_yaw_noise_rad,
             randomization_profile=a.profile,appearance_seed=a.seed,randomization_settings=benchmark.randomization_settings))
         servo=LeftArmServo(env)
+        initial_handoff_state=np.asarray(obs['observation.state']).copy()
         if sensor is None:sensor=MujocoRGBDViews(env,views=((a.elevation,a.azimuth),(-90.,90.),(-65.,90.),
                                         *[tuple(v) for v in a.extra_rgbd_view]))
         spec=geometry_spec_from_env(env)
+        spec.update(settings)
         if policy_factory is None:
             if geometry_weights:
                 from .geometry_adapter import GeometryPi05Adapter
@@ -105,14 +120,20 @@ def main(argv=None,policy_factory=None):
         else:factory=policy_factory
         policy=factory(a.checkpoint,a.job)
         if a.n_action_steps is not None:
-            if not 1<=a.n_action_steps<=policy.config.chunk_size:p.error('Invalid execution horizon')
-            policy.config.n_action_steps=a.n_action_steps
+            try:set_action_steps(policy,a.n_action_steps)
+            except ValueError as exc:p.error(str(exc))
+        if a.continuation_action_steps is not None:
+            from .execution_settings import checked_action_steps
+            try:checked_action_steps(a.continuation_action_steps,policy.config.chunk_size)
+            except ValueError as exc:p.error(str(exc))
+        initial_action_steps=policy.config.n_action_steps
         torch.manual_seed(a.seed)
         geometry=None
         if geometry_weights or a.record_training_clips:
             from .geometry_context import GeometryContext
             geometry=GeometryContext(spec)
-        visual=VisualGoalPolicy(policy,descriptor,geometry_context=geometry)
+        visual=VisualGoalPolicy(policy,descriptor,geometry_context=geometry,
+            continuation_action_steps=a.continuation_action_steps)
         column="auto" if a.source_column=="auto" else int(a.source_column)
         context=EpisodeContext(a.seed,"Transfer the marked five cookies, release, and retreat.",policy.action_mode)
         placement=None
@@ -124,13 +145,14 @@ def main(argv=None,policy_factory=None):
             from .visual_fusion import FusedRGBDLocalizer
             localizer=FusedRGBDLocalizer(spec,allow_fallen=a.placement_mode=='contained_unstacked')
         controller=VisualBatchController(placement or visual,spec,column=column,context=context,
-            localizer=localizer,placement_mode=a.placement_mode,observation_mode=a.observation_mode,modern=modern)
+            localizer=localizer,placement_mode=a.placement_mode,observation_mode=a.observation_mode,modern=modern,
+            batch_handoff=a.batch_handoff)
         observer=None
         if a.observation_mode=='active-left-wrist':
             from .active_observation import LeftWristObservation
             observer=LeftWristObservation(sensor,env)
         control_log=(a.output/'control.jsonl').open('w',buffering=1)
-        action_sources=dict(model=0,observation_move=0,hold=0);snapshot_count=0;last_phase=None
+        action_sources=dict(model=0,observation_move=0,boundary_handoff=0,hold=0);snapshot_count=0;last_phase=None
         if geometry:geometry.scene_provider=lambda:controller.last_scene
         if placement:placement.scene_provider=lambda:controller.last_scene
         if placement and geometry:geometry.observed_provider=lambda:placement.last_pose
@@ -172,6 +194,17 @@ def main(argv=None,policy_factory=None):
                 pad_midpoint_world=pads.mean(0),jaw_gap_m=float(gap),
                 observation_settled=bool(observer and observer.active and observer._phase=='CAPTURE'))
             source='model' if action is not None else 'hold'
+            if observer and controller.phase=='HANDOFF':
+                from .rgbd_localization import LocalizationFailure
+                if not observer.active:
+                    try:observer.begin_handoff(obs['observation.state'],initial_handoff_state,controller.last_scene,frame,
+                        remaining=min(200-controller.observation_steps,
+                            controller.batch_steps-(controller.step-controller.batch_started)))
+                    except LocalizationFailure as exc:controller.handoff_finished(str(exc),0)
+                if observer.active:
+                    action=observer.act(obs['observation.state'],frame.timestamp);source='boundary_handoff'
+                    if observer.done:
+                        controller.handoff_finished(observer.error,observer.used_steps);action=None;source='hold'
             if observer and controller.phase=='OBSERVE':
                 from .rgbd_localization import LocalizationFailure
                 if not observer.active:
@@ -228,7 +261,8 @@ def main(argv=None,policy_factory=None):
             applied=servo.hold() if action is None else servo.canonical(action)
             control_log.write(json.dumps(dict(step=step+1,timestamp=float(env.data.time),source=source,
                 phase=controller.phase,left_state=np.asarray(obs['observation.state'])[:8].tolist(),
-                left_command=applied[:8].tolist(),completed_batches=len(controller.completed)))+'\n')
+                left_command=applied[:8].tolist(),completed_batches=len(controller.completed),
+                n_action_steps=policy.config.n_action_steps))+'\n')
             obs,_,terminated,truncated,info=env.step(applied)
             if prepared:
                 training_recorder.commit(env.last_applied_action[:8],
@@ -265,6 +299,9 @@ def main(argv=None,policy_factory=None):
         result["placement_probe_packets"]=recorder.count if recorder else 0
         result['placement_control']=a.placement_control
         result.update(observation_mode=a.observation_mode,placement_mode=a.placement_mode,sensor_mode=a.sensor_mode,
+            batch_handoff=a.batch_handoff,initial_n_action_steps=initial_action_steps,
+            continuation_action_steps=a.continuation_action_steps,target_planning=settings,
+            experimental_contact_probe=a.target_overlap_tolerance_mm>1.,
             action_sources=action_sources,observation_steps=controller.total_observation_steps,
             observation_events=observer.events if observer else [],model_weights_updated=False,
             manipulation_action_takeover=False if modern else bool(placement),

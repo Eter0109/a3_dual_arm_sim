@@ -115,6 +115,8 @@ def measured_goal_parts(frame,scene,spec,index,*,column='auto',completed=(),know
     measured footprints also exclude visibly occupied or encroached regions.
     """
     from .planning import rectangle_overlap
+    from .execution_settings import target_planning_settings
+    minimum_floor,overlap_tolerance=target_planning_settings(spec)
     half=np.asarray(spec['cookie_half_size']);regions=target_regions(spec['target_slots_local'],spec['floor_offset_m']+half[2])
     target_part=None;source_part=None
     order=[index,*[i for i in range(len(regions)) if i!=index]]
@@ -126,11 +128,11 @@ def measured_goal_parts(frame,scene,spec,index,*,column='auto',completed=(),know
         for c in (*scene.target_cookies,*known_occupancy):
             p=(c.position-scene.target_box.position)@scene.target_box.rotation
             r=scene.target_box.rotation.T@c.rotation
-            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-.001) for t in target):occupied=True;break
+            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-overlap_tolerance) for t in target):occupied=True;break
         if occupied:continue
         lower=target[:,:2].min(0)-half[:2]+.001;upper=target[:,:2].max(0)+half[:2]-.001
         empty=floor_visibility(frame,scene.target_box,rectangle_samples(lower,upper),spec['floor_offset_m'])
-        if empty>=.90:target_part=(target,empty);break
+        if empty>=minimum_floor:target_part=(target,empty);break
     for col in sorted({c.column for c in scene.source_cookies}):
         if column!='auto' and col!=column:continue
         try:five=select_visible_five(scene,column=col)
@@ -146,13 +148,15 @@ def measured_goal_parts(frame,scene,spec,index,*,column='auto',completed=(),know
 
 def measured_target_capacity(scene,spec,completed=(),known_occupancy=()):
     from .planning import rectangle_overlap
+    from .execution_settings import target_planning_settings
+    _,overlap_tolerance=target_planning_settings(spec)
     half=np.asarray(spec['cookie_half_size']);regions=target_regions(spec['target_slots_local'],spec['floor_offset_m']+half[2])
     for target in regions:
         if any(np.allclose(target,g.target_positions_box) for g in completed):continue
         blocked=False
         for c in (*scene.target_cookies,*known_occupancy):
             p=(c.position-scene.target_box.position)@scene.target_box.rotation;r=scene.target_box.rotation.T@c.rotation
-            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-.001) for t in target):blocked=True;break
+            if any(rectangle_overlap(p,r,half,t,np.eye(3),half,margin=-overlap_tolerance) for t in target):blocked=True;break
         if not blocked:return True
     return False
 
@@ -205,7 +209,7 @@ def visual_region_complete(scene,goal,*,xy_tolerance=.004,z_tolerance=.0025):
 
 class VisualGoalPolicy:
     """One adapted policy executes the complete batch; no geometric takeover."""
-    def __init__(self,policy,metadata,geometry_context=None):
+    def __init__(self,policy,metadata,geometry_context=None,continuation_action_steps=None):
         if (metadata.get("goal_conditioning")!=VISUAL_MARKER_VERSION
                 or metadata.get("localization")!=LOCALIZER_VERSION
                 or metadata.get("training_completed") is not True):
@@ -213,8 +217,12 @@ class VisualGoalPolicy:
         self.policy=policy
         self.goal=None
         self.geometry_context=geometry_context
+        self.continuation_action_steps=continuation_action_steps
 
     def start(self,goal,context=None):
+        if self.continuation_action_steps is not None and goal.index>0:
+            from .execution_settings import set_action_steps
+            set_action_steps(self.policy,self.continuation_action_steps)
         self.goal=goal
         if self.geometry_context:self.geometry_context.start(goal)
         self._reset_queue(context)

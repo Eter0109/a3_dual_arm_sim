@@ -20,6 +20,9 @@ def clone_session(base):
     session=copy.copy(base)
     session.policy=copy.copy(base.policy)
     session.policy.reset()  # creates independent queue objects; weights shared
+    if hasattr(base,'config'):
+        session.config=copy.deepcopy(base.config)
+        session.policy.config=session.config
     session.pre=copy.deepcopy(base.pre);session.post=copy.deepcopy(base.post)
     session._right_hold=None;session.last_raw_action=None;session.steps=0
     return session
@@ -62,6 +65,9 @@ def serve(checkpoint,job,adapter_dir,pipes,control,ready,log):
                                     torch.set_rng_state(cpu);torch.cuda.set_rng_state(gpu)
                                     value=None
                                 elif op=='act':value=session.act(request['observation'],request['task'])
+                                elif op=='configure_execution':
+                                    from .execution_settings import set_action_steps
+                                    value=set_action_steps(session,request['n_action_steps'])
                                 elif op=='close':value=None
                                 elif op=='new':value=dict(n_action_steps=base.config.n_action_steps,chunk_size=base.config.chunk_size)
                                 else:raise ValueError('Unknown inference operation')
@@ -85,6 +91,10 @@ class RemotePolicy:
         if not result['ok']:raise RuntimeError(result['error'])
         return result['value']
     def reset(self,context=None):return self.call('reset',context=context)
+    def configure_execution(self,n_action_steps):
+        value=self.call('configure_execution',n_action_steps=n_action_steps)
+        self.config.n_action_steps=value
+        return value
     def act(self,observation,task):
         names=('observation.state','observation.images.front','observation.images.left_wrist','observation.images.right_wrist')
         from .geometry_context import GEOMETRY_KEY
@@ -145,6 +155,11 @@ def main():
     p.add_argument('--observation-mode',choices=('passive','active-left-wrist'),default='passive')
     p.add_argument('--placement-mode',choices=('strict','contained_unstacked'),default='strict')
     p.add_argument('--sensor-mode',choices=('legacy-fixed','native-three'),default='legacy-fixed')
+    p.add_argument('--n-action-steps',type=int)
+    p.add_argument('--continuation-action-steps',type=int)
+    p.add_argument('--batch-handoff',choices=('preserve','initial-open'),default='preserve')
+    p.add_argument('--target-floor-fraction',type=float,default=.90)
+    p.add_argument('--target-overlap-tolerance-mm',type=float,default=1.)
     a=p.parse_args()
     if a.output.exists():p.error('Never overwrite a suite')
     import torch
@@ -156,7 +171,9 @@ def main():
     (a.output/'protocol.json').write_text(json.dumps(dict(cases=cases,workers=a.workers,gpu_models=1,
         independent_action_queues=True,independent_rng=True,automatic_training=False,checkpoint=a.checkpoint,
         source_column=a.source_column,observation_mode=a.observation_mode,placement_mode=a.placement_mode,
-        sensor_mode=a.sensor_mode,placement_control=a.placement_control),indent=2))
+        sensor_mode=a.sensor_mode,placement_control=a.placement_control,batch_handoff=a.batch_handoff,
+        n_action_steps=a.n_action_steps,continuation_action_steps=a.continuation_action_steps,
+        target_floor_fraction=a.target_floor_fraction,target_overlap_tolerance_mm=a.target_overlap_tolerance_mm),indent=2))
     context=mp.get_context('spawn')
     tasks=context.Queue()
     for case in cases:tasks.put(case)
@@ -180,7 +197,11 @@ def main():
                 '--source-column',a.source_column,
                 '--observation-mode',a.observation_mode,'--placement-mode',a.placement_mode,
                 '--sensor-mode',a.sensor_mode,
+                '--batch-handoff',a.batch_handoff,'--target-floor-fraction',str(a.target_floor_fraction),
+                '--target-overlap-tolerance-mm',str(a.target_overlap_tolerance_mm),
                 '--video']
+        if a.n_action_steps is not None:common+=['--n-action-steps',str(a.n_action_steps)]
+        if a.continuation_action_steps is not None:common+=['--continuation-action-steps',str(a.continuation_action_steps)]
         if a.placement_control=='rgbd-servo':common+=['--record-placement-probes','--audit-placement-truth']
         else:common+=['--vision-interval','1','--extra-rgbd-view','-25','0','--extra-rgbd-view','-25','180']
         if a.record_training_clips:common+=['--record-training-clips']
