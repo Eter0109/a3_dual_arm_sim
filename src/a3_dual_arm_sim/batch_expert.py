@@ -49,6 +49,25 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: See `_jaw_lowest_offset` for why this is measured per hand instead of assumed.
     JAW_FLOOR_CLEARANCE_M = 0.001
 
+    #: Phases whose failure is about the *grasp*, not about the box.  A row the pads cannot close
+    #: around is one row out of fifteen: the source has other columns and other runs, so the
+    #: episode does not have to end with it.  This matters most on an adopted episode, where the
+    #: policy's own picks have left holes and nudged neighbours -- the gate's round 2 lost three of
+    #: four seeds to exactly this (a `CLOSE` timeout at 11.7 N, a `DESCEND` blocked at 59 N).
+    GRASP_RETRY_PHASES = frozenset(
+        {
+            CookiePhase.APPROACH,
+            CookiePhase.PRE_CLOSE,
+            CookiePhase.ALIGN,
+            CookiePhase.DESCEND,
+            CookiePhase.CLOSE,
+            CookiePhase.VERIFY_GRASP,
+        }
+    )
+    #: How many rows may be abandoned before the episode is called.  Two is the point where a
+    #: third attempt costs more than starting a fresh episode does.
+    MAX_BATCH_RETRIES = 2
+
     def reset(self, context=None):
         super().reset(context)
         self.profile: BatchProfile = PROFILES[self.env.config.batch_expert_profile]
@@ -86,6 +105,19 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.phase = CookiePhase.SELECT_COOKIE
         self.transition_history = [self.phase]
         self._group_offset = self._pad_offset - self._canonical.T @ np.array([0, 0, 0.010])
+        #: Rows a grasp already failed on, so `_candidate_batches` cannot offer them again.
+        self._failed_batches: set[int] = set()
+        self.batch_retries: list[dict[str, object]] = []
+        #: Which column the *placement* aims at, when it is not simply the batch number.
+        #: `_place_pose` used to read `self.batch_index` and nothing else, so an adopted episode
+        #: that set only `target_slot_index` still carried its five into the column the policy had
+        #: already filled -- a change that looked right in the report and did nothing on the arm.
+        #: ``None`` keeps every non-`adopt` path byte-identical.
+        self.target_column: int | None = None
+        #: Set when an adopted box leaves no column with five free slots.  The expert carries a
+        #: whole group of five into one column, so such an episode cannot be completed at all;
+        #: saying so at takeover costs no steps, where discovering it costs a 420-step timeout.
+        self.adopt_infeasible: str | None = None
         self._validate_target_workspace()
         # **The second-batch condition this episode runs under.**  Drawn by the
         # environment's reset from `second_batch_modes`, by seed; the expert applies
@@ -226,6 +258,18 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if len(completed) >= 5:
             self.batch_index = 1
         self.adopted_slot_column = self._free_slot_column(in_target)
+        self.target_column = self.adopted_slot_column
+        free = self._free_slots_per_column(in_target)
+        if max(free) < 5:
+            # One grasp carries all five into a single column, so an empty column is not a
+            # preference but a precondition.  A policy that scattered its five across both
+            # columns (measured: 5 in target, 4 in slots is the common shape) leaves 3 and 3, and
+            # no failure is recoverable from there -- the gate spent a 420-step
+            # `DESCEND_TO_PLACE` timeout proving it.  Failing here makes the episode cheap to
+            # drop and tells the collector why, instead of recording a 700-step failure.
+            self.adopt_infeasible = (
+                f"no column has five free slots (free per column: {free})"
+            )
         self.batch_reports.append(
             {
                 "cookies": list(completed),
@@ -233,8 +277,14 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 "lift_heights_m": [0.0] * len(completed),
                 "released": True,
                 "adopted": True,
+                "free_slots_per_column": list(free),
             }
         )
+        if self.adopt_infeasible is not None:
+            self._fail(self.adopt_infeasible)
+            # `_fail` records the phase it was called in, and at construction that is
+            # SELECT_COOKIE, which would read as "a grasp went wrong".  It did not.
+            self.failure_phase = "ADOPT"
 
     def _free_slot_column(self, in_target: tuple[bool, ...]) -> int:
         """The slot column that is emptiest right now, so an adopted box is not re-filled.
@@ -257,10 +307,36 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 if cookie >= 0 and np.isclose(slots[index, 0], column))
             for column in columns
         ]
-        fewest = min(taken)
-        candidates = [column for column, count in enumerate(taken) if count == fewest]
+        # The emptiest column wins outright: the group of five needs the whole column, so what
+        # matters is free slots, not occupied ones, and the two only disagree at the boundary.
+        free = [int(occupied_column_size - count)
+                for count, occupied_column_size in zip(taken, self._column_sizes(columns))]
+        most = max(free)
+        candidates = [column for column, count in enumerate(free) if count == most]
         preferred = self.batch_index % len(columns)
         return preferred if preferred in candidates else candidates[0]
+
+    def _column_sizes(self, columns: np.ndarray) -> list[int]:
+        """How many slots each column has, in the same order as ``columns``."""
+
+        slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
+        return [int(np.isclose(slots[:, 0], column).sum()) for column in columns]
+
+    def _free_slots_per_column(self, in_target: tuple[bool, ...]) -> list[int]:
+        """Free slots in each column, the number ``adopt`` is feasible against."""
+
+        occupancy = self.env._target_slot_occupancy(in_target)  # noqa: SLF001 - the judge
+        slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
+        columns = np.unique(slots[:, 0])
+        free = []
+        for column, size in zip(columns, self._column_sizes(columns)):
+            taken = sum(
+                1
+                for index, cookie in enumerate(occupancy)
+                if cookie >= 0 and np.isclose(slots[index, 0], column)
+            )
+            free.append(int(size - taken))
+        return free
 
     def _validate_target_workspace(self):
         """Reject unreachable table layouts before starting a physical grasp."""
@@ -420,6 +496,45 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         threshold = self.MAX_INSERTION_FORCE_N if limit is None else limit
         self._jam_count = self._jam_count + 1 if max(forces) > threshold else 0
         return self._jam_count >= 3
+
+    def _fail(self, reason: str) -> None:
+        """End the episode, unless the failure was only this row's grasp.
+
+        The gate's round 2 lost three of four seeds inside `CLOSE` and `DESCEND` -- pads meeting in
+        a gap the policy's own picks had left, or pressing into a Cookie that a neighbour's grasp
+        had nudged.  Neither says anything about the box or the second batch, and the source holds
+        fifteen more rows.  So a grasp failure marks its five as unusable and selects again;
+        everything else still ends the episode, which is what keeps the reason trustworthy.
+        """
+
+        if self._retry_grasp_with_next_batch(reason):
+            return
+        super()._fail(reason)
+
+    def _retry_grasp_with_next_batch(self, reason: str) -> bool:
+        """Abandon this row and select another one, if the failure was a grasp and budget allows."""
+
+        if self.phase not in self.GRASP_RETRY_PHASES:
+            return False
+        if not self.batch_indices:
+            return False
+        if len(self.batch_retries) >= self.MAX_BATCH_RETRIES:
+            return False
+        self.batch_retries.append(
+            {"phase": self.phase.name, "reason": reason, "batch": sorted(self.batch_indices)}
+        )
+        self._failed_batches.update(int(i) for i in self.batch_indices)
+        for index in self.batch_indices:
+            index = int(index)
+            if index not in self.skipped_cookie_indices:
+                self.skipped_cookie_indices.append(index)
+        self.batch_indices = []
+        self.current_cookie_index = None
+        self.target_slot_index = None
+        # Back to the top of the machine; `_advance` clears the phase's own counters, and
+        # `_select_batch` re-opens the jaws for the new row.
+        self._advance(CookiePhase.SELECT_COOKIE)
+        return True
 
     def _release_settled(self) -> bool:
         """Whether the just-placed batch may be counted as released.
@@ -633,9 +748,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             if len(run) >= 5:
                 runs.append(run)
             for whole in runs:
-                yield whole[:5]
-                if len(whole) > 5:
-                    yield whole[-5:]
+                for group in ([whole[:5]] + ([whole[-5:]] if len(whole) > 5 else [])):
+                    if any(index in self._failed_batches for index in group):
+                        continue
+                    yield group
 
     def _jaw_lowest_offset(self) -> float:
         """Signed z, in the **tool** frame, of the lowest colliding point on either jaw.
@@ -718,7 +834,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.current_cookie_index = self.batch_indices[0]
         #: In `adopt` mode the column is chosen from occupancy at reset, not from the index;
         #: outside it there is no occupancy to read and the index is the whole story.
-        self.target_slot_index = getattr(self, "adopted_slot_column", self.batch_index)
+        #: `target_column` is what `_place_pose` reads -- the two have to agree, and before this
+        #: they did not, so the report said "column 0" while the arm went to column 1.
+        self.target_slot_index = (
+            self.target_column if self.target_column is not None else self.batch_index
+        )
         positions = self._positions()
         self._pick_center = positions.mean(axis=0)
         pitch = float(np.median(np.diff(source[self.batch_indices, 1])))
@@ -928,9 +1048,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     def _place_pose(self, clearance=0.0, column_index=None):
         rotation = self.data.xmat[self._tb_id].reshape(3, 3)
         slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
-        column_x = np.unique(slots[:, 0])[
-            self.batch_index if column_index is None else column_index
-        ]
+        if column_index is None:
+            # `adopt` decides this from occupancy; everywhere else the batch number is the
+            # column, which is why the two were the same expression until an adopted episode
+            # needed them to differ.
+            column_index = self.target_column if self.target_column is not None else self.batch_index
+        column_x = np.unique(slots[:, 0])[column_index]
         center = np.array(
             [
                 column_x,

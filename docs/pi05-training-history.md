@@ -2010,3 +2010,45 @@ That is a different failure from the one 9.34 described, and it changes what to 
   demonstrations leave it -- so the experiment worth running is not "teach the policy to recover
   from clutter" but "make batch one end where the demonstrations end", or drop the boundary and
   train one policy for ten Cookies in one episode.
+
+### 9.37 Raising the takeover yield: two fixes and what they cost (10-22)
+
+The grafted dataset is worth collecting only if the expert can finish from what the policy leaves,
+and 9.27 measured that at roughly one usable episode in four.  Two things were wrong, and the
+first is the more embarrassing.
+
+**The column choice never reached the arm.**  9.27 attributed the 39.5 N jams to the expert aiming
+at the column the policy had already filled, and the fix was `_free_slot_column`, which reads the
+occupancy and returns the emptiest column.  It set `target_slot_index` -- and `_place_pose`, the
+only thing that decides where the batch is carried, reads `self.batch_index`.  `target_slot_index`
+is bookkeeping for the report and is overwritten by `_select_cookie` from `_slot_order`; nothing
+downstream moves the arm.  So the report said "aimed at column 0" while the arm went to column 1,
+which is exactly the jam the fix was written for, and the gate kept failing for a reason that had
+already been "fixed".
+
+`target_column` is now the single value `_place_pose` reads, `adopt` sets it from occupancy, and
+every other path leaves it `None` so that `batch_index` is still the answer and non-adopted
+episodes are byte-identical.  Checked without a policy, by filling a box and reading what the
+expert decided:
+
+| block in | target column | free per column | verdict |
+|---|---|---|---|
+| column 0 | 1 | [0, 5] | ok |
+| column 1 | **0** | [5, 0] | ok (previously 1 -- the full column) |
+| 3 in 0, 2 in 1 | 1 | [2, 3] | **infeasible** |
+
+**A full column is a precondition, not a preference.**  One grasp carries all five into a single
+column, so an episode whose block straddles both columns cannot be completed at all -- and the
+common shape is exactly that, five in the box with four in slots.  The gate used to discover it as
+a 420-step `DESCEND_TO_PLACE` timeout.  `_adopt_current_state` now counts free slots per column and
+fails at takeover with `no column has five free slots (free per column: [2, 3])`, under the phase
+name `ADOPT` so it cannot be mistaken for a grasp failure.  For a collection that is the right
+outcome: an uncollectable episode costs three steps instead of seven hundred, and the reason is
+recorded.
+
+**A row is not the source.**  Round 2's failures were mostly grasp-side -- `CLOSE` timing out with
+both pads at 11.7 N and the jaws shut in a gap the policy's picks had left, `DESCEND` blocked at
+59 N against a Cookie a neighbour's grasp had nudged.  Neither is evidence about the box, and the
+source holds fifteen more rows, so `_fail` now intercepts failures in the grasp phases
+(`APPROACH` … `VERIFY_GRASP`), marks that five as unusable, and selects again, up to twice.
+Everything else still ends the episode, which is what keeps the recorded reason worth reading.
