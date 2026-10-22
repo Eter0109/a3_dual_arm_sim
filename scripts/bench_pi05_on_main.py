@@ -58,22 +58,73 @@ import scene_compat  # noqa: E402
 #: This file's own module name, so the spawned workers of main's process pool can import it
 #: and call the factory below.  Requires the directory holding this file on `sys.path`, which
 #: is true when it is run as a script (`sys.path[0]` is its directory).
-FACTORY_MODULE = "bench_main_20k"
+#:
+#: Derived from the filename rather than written out.  It used to be the literal
+#: ``"bench_main_20k"`` -- the name this file had on the machine it was written on -- so
+#: after it was renamed for delivery, `--workers 2` died with
+#: ``ModuleNotFoundError: No module named 'bench_main_20k'`` on every other machine, while
+#: `--workers 1` (the default) worked.  A path-independent name is the only correct one.
+FACTORY_MODULE = Path(__file__).stem
 
-#: The dataset every checkpoint in this line was fine-tuned on; its `meta/tasks.parquet`
-#: holds the one instruction they were trained with.
-TRAINING_DATASET = os.environ.get("A3_TRAINING_DATASET", "/root/autodl-tmp/datasets/a3_b2_merged")
+#: The dataset every checkpoint in this line was fine-tuned on.  Only used as a *source for
+#: the instruction*; the weights are given on the bridge's command line.
+TRAINING_DATASET = os.environ.get("A3_TRAINING_DATASET", "")
+
+#: The instruction this checkpoint was fine-tuned on, embedded because the dataset path above
+#: is a fact about the machine that collected it and nobody else has it.  Read from
+#: `a3_b2_merged/meta/tasks.parquet` and pasted; `--task-prompt` overrides both this and the
+#: dataset.  It must match the dataset character for character -- the model was fine-tuned on
+#: this one sentence, and main's harness prompt ("transfer 10 cookies into target box") makes
+#: it place nothing at all.  That is the single most common way this benchmark reads 0/10.
+DEFAULT_TRAINING_PROMPT = (
+    "grasp five yellow blocks together from the source bin, insert them upright into the "
+    "marked slots of the 2 by 5 box, then return to the source bin, grasp five more, and "
+    "fill all ten slots"
+)
 
 
 def training_prompt() -> str:
-    """The instruction the checkpoint was trained on, read from the dataset rather than
-    copied here -- a literal would drift the moment the dataset is re-collected."""
-    import pyarrow.parquet as pq
+    """The instruction the checkpoint was trained on.
 
-    rows = pq.read_table(f"{TRAINING_DATASET}/meta/tasks.parquet").to_pylist()
+    Read from the dataset when one is given, since a re-collected dataset is the authority on
+    its own task string; otherwise the embedded copy, because requiring a dataset path that
+    only exists on the collecting machine is how a delivered benchmark fails to start.
+    """
+    if not TRAINING_DATASET:
+        return DEFAULT_TRAINING_PROMPT
+    try:
+        import pyarrow.parquet as pq
+
+        rows = pq.read_table(f"{TRAINING_DATASET}/meta/tasks.parquet").to_pylist()
+    except Exception as exc:  # noqa: BLE001 - any unreadable dataset falls back, loudly
+        print(
+            f"[bench] cannot read {TRAINING_DATASET}/meta/tasks.parquet ({exc}); "
+            "using the embedded training instruction",
+            flush=True,
+        )
+        return DEFAULT_TRAINING_PROMPT
     if not rows or "task" not in rows[0]:
         raise SystemExit(f"no task string in {TRAINING_DATASET}/meta/tasks.parquet")
     return str(rows[0]["task"])
+
+
+def check_prompt(prompt: str) -> None:
+    """Refuse to spend an hour measuring a policy on an instruction it never saw.
+
+    Not an error -- a different fine-tune legitimately has a different sentence -- but it has
+    to be *stated*, because the symptom of getting it wrong is not a crash: the arm sits still,
+    every episode scores 0, and nothing in the output says why.
+    """
+    if prompt.strip() == DEFAULT_TRAINING_PROMPT:
+        return
+    print(
+        "[bench] WARNING: the instruction is not the one this checkpoint was fine-tuned on.\n"
+        f"[bench]          using: {prompt!r}\n"
+        "[bench]          trained: " + repr(DEFAULT_TRAINING_PROMPT) + "\n"
+        "[bench]          If this is not the sentence your dataset used, the policy will "
+        "place nothing at all.  Pass --task-prompt to set it.",
+        flush=True,
+    )
 
 # main's benchmark -- first on sys.path so `a3_dual_arm_sim` resolves to the worktree, never
 # to the feature-branch checkout that this file's protocol comes from.
@@ -344,6 +395,93 @@ def verify_scene(bench, fingerprint: dict) -> int:
     return 0
 
 
+def diagnose_motion(policy, bench, *, steps: int, task_prompt: str, shots_dir: str) -> int:
+    """Answer "is the policy moving at all" without waiting out 20 episodes.
+
+    Two numbers, printed per step, separate the three failure modes that all look like
+    "pi0.5 does nothing" from the outside:
+
+    ``|cmd|``   max over the 16 joint targets of ``|action - observation.state|``.  A bridge
+                that is serving a model which refuses the instruction returns the state it
+                was given, so this sits at ~0 and the environment has nothing to execute.
+    ``|dq|``    max over those joints of how far the arm actually got from its reset pose.
+                Non-zero ``|cmd|`` with zero ``|dq|`` is not the model's fault: the command
+                never reached the actuators, which is an action-space mismatch.
+    and the cookie counts say whether the motion was the task.
+
+    Saves the first frame of all three cameras as ``<shots_dir>/diag_<camera>.png``, which is
+    the other half of the check: a view the checkpoint was not trained on produces motion that
+    goes nowhere, and "is the box near or far" is a question only a picture answers.
+    """
+
+    env = bench.create_env(render_cameras=True)
+    try:
+        observation, _ = env.reset(seed=0)
+        policy.reset()
+        state0 = np.asarray(observation[STATE_KEY], dtype=float).reshape(-1)[:16].copy()
+        Path(shots_dir).mkdir(parents=True, exist_ok=True)
+        for camera, key in VIEWS.items():
+            name = camera.replace("_view", "")
+            image = np.asarray(observation[key])
+            cv2.imwrite(
+                str(Path(shots_dir) / f"diag_{name}.png"),
+                cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+            )
+        worst_command = 0.0
+        worst_displacement = 0.0
+        info: dict = {}
+        for step in range(1, steps + 1):
+            action = np.asarray(policy.act(observation, task_prompt), dtype=float).reshape(-1)
+            state = np.asarray(observation[STATE_KEY], dtype=float).reshape(-1)[:16]
+            command = float(np.max(np.abs(action[:16] - state)))
+            observation, _reward, terminated, truncated, info = env.step(action)
+            now = np.asarray(observation[STATE_KEY], dtype=float).reshape(-1)[:16]
+            displacement = float(np.max(np.abs(now - state0)))
+            worst_command = max(worst_command, command)
+            worst_displacement = max(worst_displacement, displacement)
+            if step <= 5 or step % 40 == 0:
+                print(
+                    f"[diag] step {step:4d}  |cmd|={command:.4f} rad  |dq|={displacement:.4f} rad"
+                    f"  in_target={info.get('cookies_in_target')}"
+                    f" in_source={info.get('cookies_in_source')}",
+                    flush=True,
+                )
+            if terminated or truncated:
+                print(f"[diag] episode ended early ({info.get('safety_reason')})", flush=True)
+                break
+    finally:
+        env.close()
+
+    print(
+        f"[diag] worst |cmd| = {worst_command:.4f} rad over {steps} steps; "
+        f"worst |dq| = {worst_displacement:.4f} rad",
+        flush=True,
+    )
+    if worst_command < 0.02:
+        print(
+            "[diag] VERDICT: the bridge keeps returning the state it was given -- the model is\n"
+            "[diag]          not acting on this instruction.  Check the printed instruction\n"
+            "[diag]          against the dataset's own task string, and that the checkpoint is\n"
+            "[diag]          the fine-tune rather than a base model.",
+            flush=True,
+        )
+        return 2
+    if worst_displacement < 0.01:
+        print(
+            "[diag] VERDICT: commands arrive but the arm does not move -- the action space is\n"
+            "[diag]          not the one the environment applies (joint targets vs torques).",
+            flush=True,
+        )
+        return 3
+    print(
+        f"[diag] VERDICT: the arm moves ({worst_displacement:.3f} rad).  Compare "
+        f"{shots_dir}/diag_front.png with docs/repro/expected_view_front.png before running\n"
+        "[diag]          a long sweep: a wrong view still moves, and then scores 0.",
+        flush=True,
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--socket", default="/tmp/bench-main.sock")
@@ -415,6 +553,21 @@ def main() -> int:
     )
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--selftest-steps", type=int, default=120)
+    parser.add_argument(
+        "--diagnose",
+        type=int, default=0,
+        help=(
+            "Run this many steps of one episode and print, per step, how far the commanded "
+            "joints are from the observed state and how far the arm has moved, then save the "
+            "first frame of all three cameras.  Answers 'the model does nothing' in under a "
+            "minute instead of after a 20-episode sweep."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-shots",
+        default="/tmp/bench_diag",
+        help="Where --diagnose writes diag_front/left_wrist/right_wrist.png",
+    )
     args = parser.parse_args()
 
     fingerprint = None
@@ -435,6 +588,7 @@ def main() -> int:
 
     task_prompt = args.task_prompt if args.task_prompt is not None else training_prompt()
     print(f"[bench] instruction: {task_prompt!r}", flush=True)
+    check_prompt(task_prompt)
     # make_cookie_benchmark defaults: task 2x5, prompt_style "task", randomize_boxes=True
     # (+-1 cm), randomize_cookies=True (0.3 mm / 0.9 deg), hold 5, slots (15, 5) mm,
     # wall 30 mm.  These are main's benchmark parameters unless overridden here.
@@ -448,6 +602,19 @@ def main() -> int:
 
     if args.verify_scene:
         return verify_scene(bench, fingerprint)
+
+    if args.diagnose:
+        policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt)
+        try:
+            return diagnose_motion(
+                policy,
+                bench,
+                steps=args.diagnose,
+                task_prompt=task_prompt,
+                shots_dir=args.diagnose_shots,
+            )
+        finally:
+            policy.close()
 
     if args.selftest:
         bench.max_steps = args.selftest_steps
