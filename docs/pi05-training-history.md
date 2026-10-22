@@ -2052,3 +2052,34 @@ both pads at 11.7 N and the jaws shut in a gap the policy's picks had left, `DES
 source holds fifteen more rows, so `_fail` now intercepts failures in the grasp phases
 (`APPROACH` … `VERIFY_GRASP`), marks that five as unusable, and selects again, up to twice.
 Everything else still ends the episode, which is what keeps the recorded reason worth reading.
+
+**The neighbour outside the group is part of the grasp's problem.**  With the column target fixed,
+round 4's first usable seed still failed: seed 7 reached a clean takeover (328 steps, five in the
+box, five in slots) and stopped inside `DESCEND` at **75.7 N on one pad with the other at 0.0 N**.
+One-sided force is not a jam between the jaws -- it is a lateral hit, and the only lateral obstacle a
+row grasp has is the Cookie just past either end of the group, because the pads stand *outside* the
+five.  `_graspable_in_place` cannot see that Cookie: it is not one of the five, and its own
+displacement is what makes it an obstacle -- 1.4 mm of it closes a 1.63 mm clearance.
+
+`_candidate_batches` now ranks runs by what bounds them.  A run ends at the column's edge, at a hole
+(that Cookie was taken, so nothing is in the pad's path), or at a Cookie that is present but
+displaced -- and only the third kind is dangerous.  Groups are yielded with the safe ends first, so
+a retry walks down the ranking instead of re-trying the same geometry at another position.  Checked
+without a policy, on a row of twenty with five taken from the middle and one nudged 2 mm:
+
+```
+row of 20: 0..19 | in the box: 5..9 | nudged: 12
+  0: [0, 1, 2, 3, 4]        upper end is the hole at 5
+  1: [15, 16, 17, 18, 19]   taken from the column's end
+  2: [20, 21, 22, 23, 24]   second column
+  ...
+  and [13, 14, 15, 16, 17] — the row that would put a pad against the nudged Cookie — is ranked
+  after both.
+```
+
+**The other half of the yield is not the expert's.**  Two of round 3's four seeds never produced a
+takeover at all: the policy put nothing in the box in 700 steps (`no trigger (0 in target)`), and
+seeds 0, 1, 2 and 4 of the earlier probe sweeps did the same.  Those episodes are not collectable at
+any expert quality, so a collection campaign has to budget for them: they are the reason the
+achievable rate is a product -- the policy finishing a first batch *times* the expert finishing the
+second from it -- and only the second factor is what these fixes move.

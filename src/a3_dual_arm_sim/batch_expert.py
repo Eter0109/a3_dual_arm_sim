@@ -741,28 +741,62 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         `SOURCE_IN_PLACE_TOLERANCE_M` of where it was put, upright, and inside the source bin.
         Undisturbed rows pass unchanged, which is why this is a filter rather than a new
         behaviour.
+
+        **The Cookie just outside a group is part of the group's problem.**  The pads straddle the
+        five and stand *outside* the row, so what they can hit is the neighbour past each end --
+        and a run ends either at the column's end, at a hole (that Cookie is gone), or at a Cookie
+        that is present but *displaced*, which is what a policy's own grasp leaves behind.  Only
+        the third case leaves an obstacle in the pad's path, and it is one the in-place filter
+        cannot see, because that Cookie is not in the group.  Measured on the gate's seed 7: a
+        1.4 mm nudge closed a 1.63 mm clearance and `DESCEND` stopped at 75.7 N on **one** pad
+        with the other at 0.0 N -- a lateral hit, not a jam.  So runs are ranked by what bounds
+        them, holes and column ends first, and the retry ladder walks down the ranking.
         """
         source = np.asarray(self.env.SOURCE_POSITIONS)
         actual = np.asarray(self.env.cookie_positions)
+
+        def state(index: int) -> str:
+            if self._graspable_in_place(index, source, actual, tolerance):
+                return "ok"
+            if not self.env.privileged_cookie_in_source(index):
+                return "hole"
+            return "displaced"
+
+        ranked: list[tuple[int, int, list[int]]] = []
         for x in sorted(set(source[:, 0])):
             indices = np.flatnonzero(np.isclose(source[:, 0], x))
             order = sorted(indices.tolist(), key=lambda i: source[i, 1])
-            runs: list[list[int]] = []
+            runs: list[tuple[list[int], str, str]] = []
             run: list[int] = []
+            before = "edge"
             for index in order:
-                if self._graspable_in_place(index, source, actual, tolerance):
+                verdict = state(index)
+                if verdict == "ok":
                     run.append(index)
-                else:
-                    if len(run) >= 5:
-                        runs.append(run)
-                    run = []
+                    continue
+                if len(run) >= 5:
+                    runs.append((run, before, verdict))
+                run = []
+                before = verdict
             if len(run) >= 5:
-                runs.append(run)
-            for whole in runs:
-                for group in ([whole[:5]] + ([whole[-5:]] if len(whole) > 5 else [])):
+                runs.append((run, before, "edge"))
+            for whole, low, high in runs:
+                if len(whole) == 5:
+                    # A run of exactly five is bounded at both ends, so both neighbours are in
+                    # the pads' path: count them both.
+                    if any(index in self._failed_batches for index in whole):
+                        continue
+                    blocked = int(low == "displaced") + int(high == "displaced")
+                    ranked.append((blocked, len(ranked), list(whole)))
+                    continue
+                # A longer run can be taken from either end, and only the end it is taken from has
+                # an outside neighbour that is not itself one of the five.
+                for group, outside in ((whole[:5], low), (whole[-5:], high)):
                     if any(index in self._failed_batches for index in group):
                         continue
-                    yield group
+                    ranked.append((int(outside == "displaced"), len(ranked), group))
+        for _blocked, _order, group in sorted(ranked, key=lambda row: row[:2]):
+            yield group
 
     def _jaw_lowest_offset(self) -> float:
         """Signed z, in the **tool** frame, of the lowest colliding point on either jaw.
