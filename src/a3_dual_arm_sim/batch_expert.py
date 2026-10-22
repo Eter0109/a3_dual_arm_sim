@@ -1064,18 +1064,37 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         # nudged its neighbours by about a millimetre and the pad has less clearance than that.
         # If nothing is pristine the loose tolerance still applies, so this can only add rows.
         adopting = self.target_column is not None
-        batch = next(
-            self._candidate_batches(
-                tolerance=self.ADOPT_IN_PLACE_TOLERANCE_M if adopting else None
-            ),
-            [],
-        )
-        if not batch and adopting:
-            batch = next(self._candidate_batches(), [])
-        self.batch_indices = batch
-        if len(self.batch_indices) != 5:
+        # **Every candidate is tried, not just the first.**  A row can pass every geometric
+        # filter and still be somewhere this arm cannot put a vertical grasp: measured on the
+        # gate's seed 7, the source's first column had been taken and the next rows in it solved
+        # the IK **63 mm** short, and the episode ended on the first candidate.  Reachability is
+        # only knowable by asking the solver, so the selection loops over candidates and keeps
+        # the first one it can actually reach.
+        attempts = []
+        for tolerance in ((self.ADOPT_IN_PLACE_TOLERANCE_M if adopting else None), None):
+            if tolerance is None and attempts:
+                break
+            for batch in self._candidate_batches(tolerance=tolerance):
+                if len(batch) != 5:
+                    continue
+                try:
+                    self.batch_indices = list(batch)
+                    self.current_cookie_index = self.batch_indices[0]
+                    self._configure_batch(source)
+                except RuntimeError as exc:
+                    # Unreachable from here.  Remember it so the retry ladder does not come back
+                    # to the same row, and try the next.
+                    attempts.append((list(batch), str(exc)))
+                    self._failed_batches.update(int(i) for i in batch)
+                    continue
+                return
+        if not attempts:
             raise RuntimeError("no exposed, upright five-Cookie batch available")
-        self.current_cookie_index = self.batch_indices[0]
+        raise RuntimeError(f"no reachable five-Cookie batch available; tried {attempts[:3]}")
+
+    def _configure_batch(self, source: np.ndarray) -> None:
+        """Everything `_select_batch` does once a batch is chosen, minus the choice itself."""
+
         #: In `adopt` mode the column is chosen from occupancy at reset, not from the index;
         #: outside it there is no occupancy to read and the index is the whole story.
         #: `target_column` is what `_place_pose` reads -- the two have to agree, and before this
@@ -1117,6 +1136,31 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._pick_eef_nominal[2] = max(self._pick_eef_nominal[2], deepest)
         self._pick_eef = self._pick_eef_nominal.copy()
         self._high_eef = self._pick_eef + [0, 0, self.profile.grasp_clearance_m]
+        # **Ask the solver before committing.**  The source bin's usable band is the rows near
+        # its open end: with the first column taken, the next rows in it are outside what a
+        # vertical grasp can reach and the IK comes back 63 mm short.  That is not a fact any
+        # filter over Cookie positions can see, so it is asked once here -- and `_select_batch`
+        # turns the answer into "try the next candidate" instead of ending the episode.
+        # Three seeds, because the solver's answer is branch-dependent and the servo below will
+        # use yet another one (the measured pose): `q_transit` is the staging configuration, the
+        # measured pose is where the arm is, and the branch seed is where the expert was designed
+        # to come from.  Rejecting a row because one branch is 7 mm out would throw away episodes
+        # a different branch solves outright.
+        failures = []
+        for seed in (
+            np.asarray(self.q_transit, dtype=np.float64),
+            np.asarray(self.env.current_joint_action[:7], dtype=np.float64),
+            np.asarray(self.q_branch_seed, dtype=np.float64),
+        ):
+            try:
+                self._solve_l(self._high_eef, self._target_quat_canonical, seed)
+                break
+            except RuntimeError as exc:
+                failures.append(str(exc))
+        else:
+            raise RuntimeError(
+                f"approach pose unreachable for batch {self.batch_indices}: {failures[-1]}"
+            )
         if self.profile.joint_transit:
             # Seed from the measured deployment pose so the first motion stays on
             # the nearby mirrored IK branch instead of taking the transit branch

@@ -2127,3 +2127,47 @@ step+12: qvel_max=0.1  at L_SHOULDER_P[0]  command_jump=0.0055
 The command step is 20x smaller, the arm's own joints stay at 0.1, and the block's settling
 (21.8 m/s, one squeezed Cookie releasing) decays instead of tripping the limit.  That is the first
 time this seed has reached the expert's second batch at all.
+
+### 9.38 Two more takeover failures, and one of them is structural (10-22)
+
+**A grasp in the jaws is not something to open.**  A policy's second batch sometimes ends with the
+five *closed on* and never lifted: the jaws are on the row, the lift did not happen, and the
+episode stalls there.  Takeover used to open the jaws, which drags a squeezed row of five across
+its neighbours -- a failure the expert caused rather than inherited.  `adopt` now looks first at
+what is already held: `_cookies_in_jaws` tests the Cookie centres against the pad-to-pad axis and
+the jaw span, and when exactly five are in the jaws and the pads read ≥ 1 N the phase machine
+starts at `LIFT` with the batch adopted and the jaws left at their commanded opening.  Checked by
+construction -- one expert grasps a row, a *second* expert adopts that state: detects `[0..4]`,
+phase `LIFT`, lifts 47 mm in 90 steps, reaches `DESCEND_TO_PLACE`, no failure.  Fewer than five is
+deliberately not adopted: `_place_pose` carries the batch as a group whose offset is measured for
+five, so placing three with that geometry puts them beside the column.
+
+**The reachable band is the near end of the first two columns, and batch one consumes it.**  With
+the column choice and the row ranking both fixed, the gate's seed 7 still could not start a second
+batch.  Printing the candidates says why:
+
+```
+pristine [27..31] y=292.9 301.8 310.6 319.4 328.2
+pristine [40..44] y=231.1 239.9 248.8 257.6 266.4     <- near end, but column 3: IK 7.46 mm short
+loose    [15..19] y=363.6 372.4 381.2 390.1 398.9
+```
+
+`[20..24]` -- column 1's near end, the batch a *normal* collection takes second -- is not in the
+list at all: the policy displaced those five by more than even the loose 1 mm tolerance, by
+reaching over them.  Every remaining candidate is either deeper in a column (63 mm out of reach
+for a vertical grasp) or in a column the arm cannot reach at all (7.5-10.6 mm).  So the episode has
+no reachable five-Cookie row, and that is a property of the *task geometry plus the policy's own
+first batch*, not of the expert.
+
+Two consequences:
+
+* the expert's usefulness now has a ceiling that no amount of expert tuning lifts -- the near ends
+  of columns 0 and 1 are exactly what the policy's first batch uses and disturbs;
+* what would move it is a grasp that does not need five pristine neighbours in a row: two grasps
+  of three and two, or one Cookie at a time, which trades steps for reach and for tolerance.
+
+`_select_batch` now asks the solver per candidate (three IK seeds, since the branch it picks is
+seed-dependent) and moves to the next row when the approach pose is unreachable, remembering the
+failure so the retry ladder does not revisit it.  When nothing is reachable the episode ends in
+**two steps** with `no reachable five-Cookie batch available`, instead of three 421-step APPROACH
+timeouts -- which is the difference between a cheap "drop this episode" and a wasted eight minutes.
