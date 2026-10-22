@@ -76,6 +76,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: its approach from.
     ADOPT_CLEAR_HEIGHT_M = 0.060
 
+    #: A descent that has been stopped by the row for this many steps, this close to its target,
+    #: counts as arrived: the pads are on the Cookies, which is the state `CLOSE` wants.  Without
+    #: it a descent bottoms out 2.9 mm short of a 1.5 mm tolerance and waits out the phase limit.
+    DESCEND_CONTACT_ARRIVAL_M = 0.006
+    DESCEND_CONTACT_STEPS = 10
+
     #: How far an adopted grasp is lifted before the ordinary place flow takes it.  Above the
     #: row's neighbours and below the transit height, so the batch clears the source either way.
     ADOPT_GRASP_LIFT_M = 0.090
@@ -324,11 +330,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 }
             )
             return
-        # Which start an adopted episode gets.  `park` is the one this file argues for, `lift`
-        # is the Cartesian retreat that preceded it, and `none` is the historical behaviour --
-        # kept because it is the only configuration on record that has ever produced a tier-A
-        # takeover, and a video needs one of those.
-        self.adopt_start = os.environ.get("A3_ADOPT_START", "park")
+        # Which start an adopted episode gets.  **`lift` is the default because it is the only
+        # one measured not to move the source**: 70 untouched Cookies stay 70 after thirty steps,
+        # where `none` -- opening the jaws to the insertion width while the hand is still among
+        # them -- leaves 57.  `park` also leaves them alone but puts the arm where the remaining
+        # rows are 7.5-10.6 mm outside its vertical-grasp envelope, and `none` is kept only
+        # because it is the historical behaviour the recorded videos were made with.
+        self.adopt_start = os.environ.get("A3_ADOPT_START", "lift")
         if self.adopt_start == "park":
             self._adopt_park_left_arm()
         elif self.adopt_start == "lift":
@@ -1465,6 +1473,20 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 ),
             )
             if reached:
+                self._advance(CookiePhase.CLOSE)
+            elif (
+                float(max(self._total_pad_forces)) > 1.0
+                and insertion_distance < self.DESCEND_CONTACT_ARRIVAL_M
+                and self.phase_steps >= self.DESCEND_CONTACT_STEPS
+            ):
+                # **"Arrived" has to include "stopped by the row".**  The descent target puts the
+                # pads 10 mm above the Cookies' centres; if the jaws come down onto a row whose
+                # ends are a millimetre high, they stop ~3 mm short of it and never satisfy the
+                # 1.5 mm servo tolerance.  Measured on an adopted episode: the tool sat at z =
+                # 0.7591 against a target of 0.7638 with `cmd_vs_meas` at 0.0 mrad for 300 steps --
+                # pressing on the row, and reading as "still travelling".  Contact at a few
+                # millimetres with the pads reading force is the state `CLOSE` wants, so it is
+                # arrival rather than a stall.
                 self._advance(CookiePhase.CLOSE)
             return action
         if self.phase is CookiePhase.CLOSE:
