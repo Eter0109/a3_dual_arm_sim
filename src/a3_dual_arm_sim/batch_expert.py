@@ -79,6 +79,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: A descent that has been stopped by the row for this many steps, this close to its target,
     #: counts as arrived: the pads are on the Cookies, which is the state `CLOSE` wants.  Without
     #: it a descent bottoms out 2.9 mm short of a 1.5 mm tolerance and waits out the phase limit.
+    #: Steps an approach may spend without getting closer to its pose before the row is called
+    #: unreachable.  The phase limit is 420, and a row whose IK the servo cannot follow spends all
+    #: of them: measured on the gate's seed 1, the tool sat in `APPROACH` for the rest of the
+    #: episode without entering a phase at all.  The reachability probe ahead of time does not
+    #: catch it, because the solver answers per seed and the servo's seed is the measured pose.
+    APPROACH_PATIENCE_STEPS = 90
+
     DESCEND_CONTACT_ARRIVAL_M = 0.006
     DESCEND_CONTACT_STEPS = 10
 
@@ -131,6 +138,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self._clear_lift: tuple[np.ndarray, np.ndarray] | None = None
         self._clear_stage: str | None = None
         self._clear_opening = 1.0
+        #: Closest the tool has come to the approach pose, and the step it did so on.
+        self._approach_best: float | None = None
+        self._approach_best_step = 0
         #: Which column the *placement* aims at, when it is not simply the batch number.
         #: `_place_pose` used to read `self.batch_index` and nothing else, so an adopted episode
         #: that set only `target_slot_index` still carried its five into the column the policy had
@@ -771,7 +781,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: part of its row.  A row grasp puts one fingertip in each end groove, and A3's fingertip is
     #: 1.00 mm wide in a 2.50 mm groove -- 0.75 mm of slack a side -- so a Cookie that has been
     #: shoved more than about a millimetre is no longer part of the row the pads close on.
-    SOURCE_IN_PLACE_TOLERANCE_M = 0.001
+    #: How far a Cookie may have been nudged and still count as part of a graspable row.  Set by the
+    #: physical clearance rather than by taste: the source pitch is 8.83 mm against a 7.2 mm Cookie,
+    #: so 1.63 mm is what the pads can absorb, and a 1.1 mm nudge -- which is what a policy's own
+    #: grasp leaves on the row next door -- passes.  At 1.0 mm that single Cookie broke the run and
+    #: the reachable near end was never offered: measured on the gate's seed 1, where the whole
+    #: difference between "no reachable batch" and a grasp is cookie 24 sitting 1.1 mm out.
+    SOURCE_IN_PLACE_TOLERANCE_M = 0.0016
 
     #: The tolerance an *adopted* episode tries first.  A policy's own picks nudge the Cookies
     #: around them by 0.8-1.4 mm (measured: 0.1006 / 0.0986 / 0.0980 against a 0.0994 column),
@@ -875,7 +891,20 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     if any(index in self._failed_batches for index in group):
                         continue
                     ranked.append((column, int(outside == "displaced"), len(ranked), group))
-        for _column, _blocked, _order, group in sorted(ranked, key=lambda row: row[:3]):
+        # **Rank by how far the row is from where the arm parks, not by column index.**  Column
+        # order is a proxy for reach and a bad one: the source's first column lost its near rows to
+        # batch one, so its *far* end is what remains, and a vertical grasp there solves 63 mm
+        # short -- while column 1's near end is reachable.  Sorting by column tried the far rows
+        # first on every failing seed (1, 2, 7, 9) and spent the episode there.  Distance from the
+        # staging point puts the near rows of both columns ahead of any far row.
+        staging = np.asarray(self.fixed_transit_xy, dtype=np.float64)[:2]
+        source_xy = np.asarray(self.env.SOURCE_POSITIONS, dtype=np.float64)[:, :2]
+
+        def reach_rank(row: tuple[int, int, int, list[int]]) -> tuple[float, int, int]:
+            centre = source_xy[list(row[3])].mean(axis=0)
+            return (float(np.linalg.norm(centre - staging)), row[1], row[2])
+
+        for _column, _blocked, _order, group in sorted(ranked, key=reach_rank):
             yield group
 
     def _cookies_in_jaws(self) -> list[int]:
@@ -1079,9 +1108,11 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         # only knowable by asking the solver, so the selection loops over candidates and keeps
         # the first one it can actually reach.
         attempts = []
-        for tolerance in ((self.ADOPT_IN_PLACE_TOLERANCE_M if adopting else None), None):
-            if tolerance is None and attempts:
-                break
+        tolerances = []
+        if adopting:
+            tolerances.append(self.ADOPT_IN_PLACE_TOLERANCE_M)
+        tolerances.append(None)
+        for tolerance in tolerances:
             for batch in self._candidate_batches(tolerance=tolerance):
                 if len(batch) != 5:
                     continue
@@ -1415,6 +1446,21 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     # needs no IK, so it cannot fail that way.
                     self._clear_stage = "transit"
                 return action
+            approach_distance = float(
+                np.linalg.norm(np.asarray(self._high_eef, dtype=np.float64)
+                               - self.data.site_xpos[self._l_site])
+            )
+            if self._approach_best is None or approach_distance < self._approach_best - 0.002:
+                self._approach_best = approach_distance
+                self._approach_best_step = self.phase_steps
+            elif self.phase_steps - self._approach_best_step > self.APPROACH_PATIENCE_STEPS:
+                # Not converging: give up on this row so the retry ladder can pick another,
+                # instead of spending the phase limit on one unreachable pose.
+                self._fail(
+                    f"approach not converging: {approach_distance * 1000:.1f} mm from the pose "
+                    f"after {self.phase_steps} steps"
+                )
+                return self._stay_command()
             # Travel with the jaws fully open.  The target batch width is set
             # only once the tool is steady above the Cookies.
             if self.profile.joint_transit:
