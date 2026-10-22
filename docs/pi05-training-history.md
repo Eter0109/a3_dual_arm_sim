@@ -1874,3 +1874,54 @@ Two ways out, and the second is the one the numbers point at:
   expert cannot (the gate tried), so this is a scripted perturbation of the expert's own placement
   -- drop one Cookie beside the column before the second batch -- which is cheap to build and is the
   first data-side experiment here that does not depend on the policy's failures being expert-fixable.
+
+### 9.35 The fourth cell had to be built twice, and the first build was wrong (10-22)
+
+9.34's table says the block decides.  Variant A -- the expert-shaped block at the policy's own
+handover pose -- is the cell that would turn "the block decides" into "the pose does not", and it
+took two sweeps and one discarded conclusion to build.
+
+Three ways the construction lies, each of which produced a number that looked like a result:
+
+1. **The teleport can bury a Cookie.** The first version filled only the *free* slots with the
+   Cookies already in the box.  With a dirty block the loose Cookie sits exactly where the block
+   goes, so two Cookies ended up in one volume; the solver answered by ejecting them and seed 4
+   went from six in the box to one in a single step and terminated.  A block replacement has to
+   start from an emptied box.
+2. **A handover below five has no pose to keep.**  The arm then sits wherever the policy left it
+   after hundreds of idle steps, and phase 2 measures a stuck arm: seed 1 reached ten (`5 -> 5`),
+   adding nothing.
+3. **A clean block makes the cell a no-op.**  Seed 3 handed over at 226 with five in target and
+   five in slots; the replacement rewrote the same five Cookies into the same five slots, and the
+   run then stalled at five for another 674 steps -- the normal rollout, not a control.  The saved
+   positions say the block really was clean: x = 0.0680, y = 0.0795 / 0.0858 / 0.0922 / 0.0985 /
+   0.1049, pitch 6.33 mm (the slot pitch, against the source bin's 8.83), one height to 0.1 mm,
+   and no sixth Cookie anywhere in the box.
+
+Only a dirty block leaves the variant something to remove, and that is the rare handover: seeds 0,
+1 and 4 of the first sweep never reached five at all.
+
+**What the accepted sample said, and why it cannot be believed yet.**  Seed 6 handed over at 233
+with five in target and four in slots.  With the block replaced by five-in-five and the arm left
+where the policy put it, the policy added nothing for the remaining 667 steps (`5 -> 5`, 900
+steps).  Read alone that refutes 9.34: a clean block did not rescue the run.  But the two cells
+were not the same state.  Dumping the first request each cell hands the policy -- same seed,
+`prefill` against the same block with the arm parked -- gives: `observation.state` identical to
+the last digit, `right_wrist_view` identical, `front_view` 3.32 % of pixels different,
+`left_wrist_view` 10.54 % different.  The arm is provably in the same place; the scene is not.
+The replaced block is made of whichever five Cookies the policy happened to move, so the source
+grid's five gaps sit in different rows than prefill's, and the model is looking at a different bin.
+
+So at this point 9.34's conclusion is *not* refuted, A's failure is unexplained, and the cell has
+to be rebuilt so the scene matches prefill exactly: run the policy, then put every Cookie back
+where the episode started and lay down prefill's own five.  That is `prefill-after`.
+
+**Two silent bugs in `park_arm_at_home`, both worth the paragraph.**  `env.data.qpos[:] =
+home_qpos` restores the *bins* too -- they are free joints -- walking them back to the poses they
+held before `apply_scene` randomised them; the probe then reported five in target and *zero* in
+slots, which reads as a broken teleport and was a moved box.  And the reference was snapshotted
+after `reset` but before `apply_scene`, so restoring the untouched Cookies put them up to ten
+millimetres off inside an already-moved source bin (the saved poses show it: the source grid
+splits into 0.767 and 0.7685 heights where it should be one).  Both are fixed by snapshotting
+after `apply_scene` and copying hinge and slide joints only.  B''s single "0 progress in 517
+steps" sample came from the old `park_arm_at_home`, so it is being re-run as well.
