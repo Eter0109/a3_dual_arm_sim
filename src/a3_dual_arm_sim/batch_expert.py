@@ -6,6 +6,8 @@ must form a pad--Cookie contact chain, lift together, and be released into the b
 
 from __future__ import annotations
 
+import os
+
 import mujoco
 import numpy as np
 
@@ -74,6 +76,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: its approach from.
     ADOPT_CLEAR_HEIGHT_M = 0.060
 
+    #: How far an adopted grasp is lifted before the ordinary place flow takes it.  Above the
+    #: row's neighbours and below the transit height, so the batch clears the source either way.
+    ADOPT_GRASP_LIFT_M = 0.090
+
     def reset(self, context=None):
         super().reset(context)
         self.profile: BatchProfile = PROFILES[self.env.config.batch_expert_profile]
@@ -114,10 +120,10 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         #: Rows a grasp already failed on, so `_candidate_batches` cannot offer them again.
         self._failed_batches: set[int] = set()
         self.batch_retries: list[dict[str, object]] = []
-        #: Set by `adopt` when the hand is still inside the box's airspace: the tool is asked to
-        #: leave vertically, holding its current jaw opening, before the phase machine does
-        #: anything else.  See `_adopt_current_state` for the measurement that requires it.
+        #: Set by `adopt` when the hand is still inside the box's airspace.  Two stages, both
+        #: required and for different reasons -- see `_adopt_current_state`.
         self._clear_lift: tuple[np.ndarray, np.ndarray] | None = None
+        self._clear_stage: str | None = None
         self._clear_opening = 1.0
         #: Which column the *placement* aims at, when it is not simply the batch number.
         #: `_place_pose` used to read `self.batch_index` and nothing else, so an adopted episode
@@ -277,10 +283,16 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         here = np.asarray(self.data.site_xpos[self._l_site], dtype=np.float64).copy()
         rotation = np.asarray(self.data.site_xmat[self._l_site], dtype=np.float64).reshape(3, 3)
         self._clear_lift = (here + np.array([0.0, 0.0, self.ADOPT_CLEAR_HEIGHT_M]), rotation.copy())
-        self._clear_opening = float(np.clip(self.env.current_joint_action[7], 0.0, 1.0))
-        # The right arm is idle in a batch episode, so it holds whatever the policy was holding
-        # rather than snapping to the expert's own idle value.
-        self.right_gripper = float(np.clip(self.env.last_applied_action[15], 0.0, 1.0))
+        # **Start from the configuration the expert was built for.**  Everything the phase machine
+        # does after this -- the Cartesian approach, the jaw-depth clamp, the insertion alignment
+        # -- was measured and tuned starting from home, and an adopted hand is somewhere else
+        # entirely: over the box, holding a release opening, with a wrist the policy left at an
+        # arbitrary yaw.  Two attempts to talk it out of that pose failed in different places
+        # (`DESCEND` 27 mm short with no contact, then a grasp depth 13 mm too deep and a command
+        # equal to the measured pose), and each failure is one of the expert's own assumptions
+        # rather than a bug in it.  Parking the arm instead removes the whole class: the box and
+        # the source -- which is what the data is *about* -- are untouched, and the arm is in a
+        # pose a redeployed policy reaches too.
         free = self._free_slots_per_column(in_target)
         if max(free) < 5:
             # One grasp carries all five into a single column, so an empty column is not a
@@ -292,6 +304,37 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             self.adopt_infeasible = (
                 f"no column has five free slots (free per column: {free})"
             )
+        # **A grasp already in the jaws is not something to throw away.**  A policy's second
+        # batch often ends with the five closed on and not lifted: the jaws are on the row, the
+        # lift never happened, and the episode stalls there.  Taking over by *opening* is the
+        # worst thing the expert can do -- the jaws come off a squeezed row of five, and the
+        # snap throws the whole neighbourhood, which is a failure the expert caused rather than
+        # inherited.  So the first question at takeover is whether the hand is already holding
+        # the batch; if it is, the phase machine starts at LIFT and the grasp is used.
+        self.adopted_grasp = self._adopt_grasped_batch()
+        if self.adopted_grasp:
+            self.right_gripper = float(np.clip(self.env.last_applied_action[15], 0.0, 1.0))
+            self.batch_reports.append(
+                {
+                    "cookies": list(self.adopted_grasp),
+                    "lifted": len(self.adopted_grasp),
+                    "lift_heights_m": [0.0] * len(self.adopted_grasp),
+                    "released": False,
+                    "adopted_grasp": True,
+                }
+            )
+            return
+        # Which start an adopted episode gets.  `park` is the one this file argues for, `lift`
+        # is the Cartesian retreat that preceded it, and `none` is the historical behaviour --
+        # kept because it is the only configuration on record that has ever produced a tier-A
+        # takeover, and a video needs one of those.
+        self.adopt_start = os.environ.get("A3_ADOPT_START", "park")
+        if self.adopt_start == "park":
+            self._adopt_park_left_arm()
+        elif self.adopt_start == "lift":
+            self._clear_stage = "lift"
+            self._clear_opening = float(np.clip(self.env.current_joint_action[7], 0.0, 1.0))
+        self.right_gripper = float(np.clip(self.env.last_applied_action[15], 0.0, 1.0))
         self.batch_reports.append(
             {
                 "cookies": list(completed),
@@ -827,6 +870,121 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         for _column, _blocked, _order, group in sorted(ranked, key=lambda row: row[:3]):
             yield group
 
+    def _cookies_in_jaws(self) -> list[int]:
+        """Which Cookies are between the two finger pads right now.
+
+        Geometry, not bookkeeping: the expert has no record of a grasp it did not perform, and
+        the policy's own chunk never says what it is holding.  A Cookie counts when its centre is
+        within the jaw's span along the pad-to-pad axis and within a Cookie's radius of that axis,
+        which is where a squeezed row sits.
+        """
+
+        fingers = list(self.env._left_finger_geoms)
+        if len(fingers) != 2:
+            return []
+        first = np.asarray(self.data.geom_xpos[fingers[0]], dtype=np.float64)
+        second = np.asarray(self.data.geom_xpos[fingers[1]], dtype=np.float64)
+        axis = second - first
+        span = float(np.linalg.norm(axis))
+        if span < 1e-6:
+            return []
+        axis = axis / span
+        held = []
+        positions = np.asarray(self.env.cookie_positions, dtype=np.float64)
+        for index in range(len(positions)):
+            if self.env._cookie_inside_target(index):
+                continue
+            offset = positions[index] - first
+            along = float(offset @ axis)
+            if along < -0.002 or along > span + 0.002:
+                continue
+            radial = float(np.linalg.norm(offset - along * axis))
+            if radial <= 0.006:
+                held.append(index)
+        return held
+
+    def _adopt_grasped_batch(self) -> list[int]:
+        """Continue a grasp the policy already made, if it made one.
+
+        Returns the adopted Cookies (empty when there is nothing in the jaws).  The phase machine
+        is put straight into `LIFT`: the grasp is closed, so `CLOSE`'s force loop has nothing to
+        add, and re-running it would squeeze a row that is already squeezed.
+        """
+
+        if self.phase is CookiePhase.FAILED:
+            return []
+        held = self._cookies_in_jaws()
+        if len(held) != 5:
+            # Exactly five, because `_place_pose` carries the batch as a group and its offset is
+            # measured for five: placing three with that geometry would put them beside the
+            # column rather than in it.  Fewer than five is left to the ordinary path, which
+            # parks the arm and its jaws away from the block before anything else happens.
+            return []
+        self._contact_chain()
+        if float(max(self._total_pad_forces)) < 1.0:
+            # Between the pads but not gripped: a jaw that is open around a row is not a grasp,
+            # and lifting on it would drop the row on the way up.
+            return []
+        self.batch_indices = list(held)
+        self.current_cookie_index = int(held[0])
+        self._grip_reference = self._positions().copy()
+        self._lift_start_eef = np.asarray(
+            self.data.site_xpos[self._l_site], dtype=np.float64
+        ).copy()
+        self._pick_eef = self._lift_start_eef.copy()
+        self._pick_eef_nominal = self._lift_start_eef.copy()
+        self._high_eef = self._lift_start_eef + np.array(
+            [0.0, 0.0, self.ADOPT_GRASP_LIFT_M]
+        )
+        # The force the policy is applying is the opening to keep -- closing further would
+        # squeeze a row that is already at its limit.
+        self._opening = float(np.clip(self.env.last_applied_action[7], 0.0, 1.0))
+        self._advance(CookiePhase.LIFT)
+        return list(held)
+
+    def _adopt_park_left_arm(self) -> None:
+        """Put the left arm on the episode's home configuration, leaving every Cookie alone.
+
+        Only the arm's own joints are written, so the two bins and the block stay exactly where
+        the policy left them.  `qpos[:] = home` looks like the same thing and is not: the bins are
+        free joints, so it walks them back to the pose they had before `apply_scene` randomised
+        them, which moves the target box out from under the block.
+        """
+
+        import mujoco
+
+        home = np.r_[
+            np.asarray(self.env.config.home.left, dtype=np.float64),
+            float(self.env.config.home.grippers[0]),
+        ]
+        self.data.qpos[self._l_qpos] = home[:7]
+        self.data.qvel[self._l_dofs] = 0.0
+        mujoco.mj_forward(self.model, self.data)
+        applied = np.asarray(self.env.last_applied_action, dtype=np.float64).copy()
+        applied[:8] = home
+        self.env._last_applied_action = applied  # noqa: SLF001 - a known-good commanded pose
+        self._clear_stage = None
+        self._clear_opening = float(home[7])
+        self._servo_pos = None
+
+    def _clear_transit_command(self) -> np.ndarray:
+        """Step the left arm toward `q_transit` in joint space, holding the jaw opening."""
+
+        current = np.asarray(self.env.last_applied_action[:7], dtype=np.float64)
+        target = np.asarray(self.q_transit, dtype=np.float64)
+        limit = float(getattr(self, "transit_joint_step_rad", 0.03) or 0.03)
+        delta = target - current
+        biggest = float(np.max(np.abs(delta)))
+        step = delta * (limit / biggest) if biggest > limit else delta
+        action = np.zeros(16, dtype=np.float64)
+        action[:7] = current + step
+        action[7] = self._clear_opening
+        action[8:15] = self.q_r_hold
+        action[15] = self.right_gripper
+        if biggest <= 0.03:
+            self._clear_stage = None
+        return action
+
     def _jaw_lowest_offset(self) -> float:
         """Signed z, in the **tool** frame, of the lowest colliding point on either jaw.
 
@@ -1180,7 +1338,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             )
             return self._stay_command()
         if self.phase is CookiePhase.APPROACH:
-            if self._clear_lift is not None:
+            if self._clear_stage is not None:
                 # Straight up, at the opening the hand already has.  An adopted episode starts
                 # with the tool inside the box's airspace, and both of the expert's first
                 # instincts -- opening the jaws to their insertion width and travelling to the
@@ -1189,13 +1347,21 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 # block, a Cookie was at 7.5 m/s on the first step and 95 m/s by the eighth, and
                 # the environment's joint-velocity limit ended the episode.  Nothing about the
                 # block was wrong in that episode; the hand simply left through it.
+                if self._clear_stage == "transit":
+                    return self._clear_transit_command()
                 position, rotation = self._clear_lift
                 action, reached = self._servo(
                     position, rotation, self._clear_opening,
                     speed=self.profile.retract_m_per_step,
                 )
                 if reached:
-                    self._clear_lift = None
+                    # The hand is clear of the box; now put the arm on the configuration the
+                    # expert plans from.  Lifting alone is not enough: the Cartesian servo below
+                    # has to reach a pose 150 mm away, and from an adopted pose it did not -- the
+                    # gate's seed 7 held 27.3 mm short of the approach goal for 421 steps with no
+                    # contact anywhere (`qvel` 0.23, jaws touching nothing).  Joint interpolation
+                    # needs no IK, so it cannot fail that way.
+                    self._clear_stage = "transit"
                 return action
             # Travel with the jaws fully open.  The target batch width is set
             # only once the tool is steady above the Cookies.
