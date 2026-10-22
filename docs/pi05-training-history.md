@@ -1987,3 +1987,26 @@ episodes that stalled, because a fifth grasp that ends badly also nudges its nei
 `regrid` is the test: put back **only** the source grid, leave the box and the arm exactly as the
 policy left them.  If that finishes, the second batch's difficulty lives in the source bin and
 9.34's block explanation has to be dropped.
+
+**`regrid` closes the decomposition, and closes it the other way.**  Restoring only the source
+grid -- box and arm exactly as the policy left them -- gives **5 / 10** as well (seed 3, five in
+target and five in slots at handover, 0 added).  So every single-ingredient restore fails:
+box only `4 / 10`, arm only `5 / 10`, source only `5 / 10`, and only restoring *everything* to
+prefill's construction finishes (`10 / 10`, and it does so after a full policy rollout).
+
+The reading that fits all four is not "one object is in the way".  It is that the policy's margin
+at the second batch is thinner than the deviation its own first batch leaves behind, whichever
+component you look at: a source Cookie nudged 1.4 mm on a 1.63 mm clearance, a fifth placement
+that lands beside a slot instead of in it, an arm parked over the box.  Put back any one of the
+three and the other two are still outside the tolerance; put back all three and it runs.
+
+That is a different failure from the one 9.34 described, and it changes what to do about it:
+
+* 9.34's "the demonstrations never contain a loose Cookie" is still true, but a loose Cookie is
+  one of three deviations, not the deviation;
+* the pacing knob (9.31) moved the deviation and did not move the score, which is what a
+  tolerance problem looks like rather than a single-cause one;
+* and a handover is only viable if batch one leaves the scene within a millimetre of how the
+  demonstrations leave it -- so the experiment worth running is not "teach the policy to recover
+  from clutter" but "make batch one end where the demonstrations end", or drop the boundary and
+  train one policy for ten Cookies in one episode.
