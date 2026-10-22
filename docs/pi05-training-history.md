@@ -2171,3 +2171,31 @@ seed-dependent) and moves to the next row when the approach pose is unreachable,
 failure so the retry ladder does not revisit it.  When nothing is reachable the episode ends in
 **two steps** with `no reachable five-Cookie batch available`, instead of three 421-step APPROACH
 timeouts -- which is the difference between a cheap "drop this episode" and a wasted eight minutes.
+
+### 9.39 The expert's own first move was destroying the source (10-22)
+
+B-class failures -- batch one done, second batch never starts -- were being read as "the policy left
+no reachable row".  Part of that is true and structural (9.38), but a measurement on a recorded
+handover says the expert was also damaging the scene itself, exactly as suspected from the video.
+
+One state (seed 7's handover), three adopt starts, counting source Cookies still within 1 mm of
+their nominal position after 30 steps:
+
+| start | untouched | delta | what it does |
+|---|---|---|---|
+| `none` (open the jaws and travel, the historical behaviour) | 70 -> **57** | **-13** | opens to the 5-Cookie insertion width while the hand is still among the Cookies |
+| `lift` (vertical retreat, jaws held) | 70 -> 70 | 0 | leaves without touching the row |
+| `park` (home configuration) | 70 -> 70 | 0 | leaves without touching the row |
+
+Thirteen of seventy untouched source Cookies displaced by the first thirty steps.  That is the
+`SELECT_COOKIE: no exposed, upright five-Cookie batch available` failure being caused by the
+controller that reports it: it opens, the row it was about to use is no longer a row, and it
+concludes there is no batch.  The video makes the same point in the frame at the handover -- the
+panel reads `1 held`, i.e. the policy was holding *one* Cookie -- and the takeover opened on it.
+
+So the order of the two fixes matters: **never open at the takeover pose** comes first, and it is
+already what `lift` and `park` do.  What remains after that is geometry, not damage: with `lift`
+the expert reaches `DESCEND` and bottoms out **2.9 mm** above a target that is itself 4.7 mm below
+the Cookie centres (`_pick_eef.z = 0.7585` against a standing Cookie at 0.7685), and with `park`
+the columns it can still reach solve 7.5-10.6 mm short.  Both are separate from the disturbance and
+both are the next thing to fix.
