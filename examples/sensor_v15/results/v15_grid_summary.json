@@ -1,0 +1,129 @@
+{
+  "snapshot_utc": "2026-10-22T08:15:31.793110+00:00",
+  "description": "Completed V15 simulation grid snapshot; not a new rerun or a pi0.5 result.",
+  "grids": {
+    "2x5": {
+      "status": "completed",
+      "completed": 40,
+      "planned": 40,
+      "cells": [
+        {
+          "task": "2x5",
+          "profile": "medium",
+          "completed": 20,
+          "planned": 20,
+          "valid_episodes": 20,
+          "infrastructure_errors": 0,
+          "native_successes": 20,
+          "native_success_rate": 1.0,
+          "release_verified_successes": 20,
+          "release_verified_success_rate": 1.0,
+          "mean_final_count": 10.0,
+          "count_distribution": {
+            "10": 20
+          },
+          "failure_reasons": {}
+        },
+        {
+          "task": "2x5",
+          "profile": "advanced",
+          "completed": 20,
+          "planned": 20,
+          "valid_episodes": 20,
+          "infrastructure_errors": 0,
+          "native_successes": 20,
+          "native_success_rate": 1.0,
+          "release_verified_successes": 19,
+          "release_verified_success_rate": 0.95,
+          "mean_final_count": 10.0,
+          "count_distribution": {
+            "10": 20
+          },
+          "failure_reasons": {
+            "INSERT timed out": 1
+          }
+        }
+      ],
+      "protocol": {
+        "budgets": {
+          "2x5": 1500,
+          "2x10": 3000
+        },
+        "source_column": "1",
+        "first_grasp": 5,
+        "original_main_success_predicate": true,
+        "native_cameras_unchanged": true,
+        "action_source": "classic_three_rgbd_visual_expert",
+        "learned_policy_loaded": false,
+        "object_truth_for_control": false,
+        "source_commit": "29fe90e423259f388ebc061926c3ec860b9edc74"
+      }
+    },
+    "2x10": {
+      "status": "completed",
+      "completed": 40,
+      "planned": 40,
+      "cells": [
+        {
+          "task": "2x10",
+          "profile": "medium",
+          "completed": 20,
+          "planned": 20,
+          "valid_episodes": 20,
+          "infrastructure_errors": 0,
+          "native_successes": 9,
+          "native_success_rate": 0.45,
+          "release_verified_successes": 9,
+          "release_verified_success_rate": 0.45,
+          "mean_final_count": 17.15,
+          "count_distribution": {
+            "15": 9,
+            "20": 9,
+            "18": 1,
+            "10": 1
+          },
+          "failure_reasons": {
+            "Target region is occupied or not visibly empty": 9,
+            "INSERT timed out": 1,
+            "Visual release/previous-progress verification failed": 1
+          }
+        },
+        {
+          "task": "2x10",
+          "profile": "advanced",
+          "completed": 20,
+          "planned": 20,
+          "valid_episodes": 20,
+          "infrastructure_errors": 0,
+          "native_successes": 10,
+          "native_success_rate": 0.5,
+          "release_verified_successes": 10,
+          "release_verified_success_rate": 0.5,
+          "mean_final_count": 17.5,
+          "count_distribution": {
+            "15": 10,
+            "20": 10
+          },
+          "failure_reasons": {
+            "Target region is occupied or not visibly empty": 9,
+            "Visual release/previous-progress verification failed": 1
+          }
+        }
+      ],
+      "protocol": {
+        "budgets": {
+          "2x5": 1500,
+          "2x10": 3000
+        },
+        "source_column": "1",
+        "first_grasp": 5,
+        "original_main_success_predicate": true,
+        "native_cameras_unchanged": true,
+        "action_source": "classic_three_rgbd_visual_expert",
+        "learned_policy_loaded": false,
+        "object_truth_for_control": false,
+        "source_commit": "29fe90e423259f388ebc061926c3ec860b9edc74"
+      }
+    }
+  }
+}
