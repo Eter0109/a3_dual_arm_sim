@@ -225,6 +225,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.adopted_cookie_count = len(completed)
         if len(completed) >= 5:
             self.batch_index = 1
+        self.adopted_slot_column = self._free_slot_column(in_target)
         self.batch_reports.append(
             {
                 "cookies": list(completed),
@@ -234,6 +235,32 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 "adopted": True,
             }
         )
+
+    def _free_slot_column(self, in_target: tuple[bool, ...]) -> int:
+        """The slot column that is emptiest right now, so an adopted box is not re-filled.
+
+        `batch_index` is the wrong answer here, and the gate is what showed it: with the
+        policy's five already in one column, `batch_index = 1` sends the expert at the *other*
+        column by index -- which is right only if the policy happened to use column 0.  On the
+        seeds where the policy filled column 1 instead, the expert descended straight onto the
+        full column and stopped at 39.5 / 39.6 N with the pads on nothing, three times out of
+        four at `execute: 48`.
+
+        Occupancy is the thing that is actually known at takeover, so it is what decides.  A
+        tie goes to `batch_index`, which keeps the empty-box path byte-identical.
+        """
+        occupancy = self.env._target_slot_occupancy(in_target)  # noqa: SLF001 - the judge
+        slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
+        columns = np.unique(slots[:, 0])
+        taken = [
+            sum(1 for index, cookie in enumerate(occupancy)
+                if cookie >= 0 and np.isclose(slots[index, 0], column))
+            for column in columns
+        ]
+        fewest = min(taken)
+        candidates = [column for column, count in enumerate(taken) if count == fewest]
+        preferred = self.batch_index % len(columns)
+        return preferred if preferred in candidates else candidates[0]
 
     def _validate_target_workspace(self):
         """Reject unreachable table layouts before starting a physical grasp."""
@@ -689,7 +716,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         if len(self.batch_indices) != 5:
             raise RuntimeError("no exposed, upright five-Cookie batch available")
         self.current_cookie_index = self.batch_indices[0]
-        self.target_slot_index = self.batch_index
+        #: In `adopt` mode the column is chosen from occupancy at reset, not from the index;
+        #: outside it there is no occupancy to read and the index is the whole story.
+        self.target_slot_index = getattr(self, "adopted_slot_column", self.batch_index)
         positions = self._positions()
         self._pick_center = positions.mean(axis=0)
         pitch = float(np.median(np.diff(source[self.batch_indices, 1])))
