@@ -1832,3 +1832,45 @@ Two things follow, and they are not both training problems:
 The 18k checkpoints are kept at 2k, 16k and 18k (`pi05-runs/a3_b2_aligned_v3_18k`); the intermediate
 ones were deleted to keep the run inside the disk budget, since this lerobot has no
 `save_total_limit`.
+
+### 9.34 Which ingredient of the half-done state blocks the second batch (10-22)
+
+9.32's prefill probe left two candidates: the pose the arm is in at the handover, and the block the
+policy itself leaves in the box.  Three probes change exactly one of them at a time, all on the same
+checkpoint (4.05), same scene, `execute: 24`, same 900-step cap.
+
+| cell | block in the box | arm at handover | result |
+|---|---|---|---|
+| prefill (9.32) | expert-shaped, 5 / 5 in slots (teleported) | reset (home) | **10 / 10**, 243 / 247 steps, 2 / 2 |
+| C `expert-first` | the expert really grasped and placed it, 5 / 5 in slots | the expert's mid-episode pose | **10 / 10**, 224 / 225 more steps, 2 / 2 |
+| B' `block` | the policy's own, **6 in the box but 4 in slots** | reset (home) | **6 -> 6**, 517 further steps, 0 added |
+| normal rollout | the policy's own | the policy's own | stalls at 5, 13 / 20 |
+
+The pose is exonerated twice over: the expert's mid-episode pose works (C) and so does the reset pose
+(prefill).  What separates success from failure is **the block, and specifically the loose Cookie in
+it**: the expert's five land in five slots; the policy's six land with two of them inside the box but
+outside any slot, and those occupy exactly the space the second batch needs.
+
+B' is the clean version of that.  Its count timeline moves only at steps 357-362 -- the moment the
+block settles, with one Cookie flickering in and out of the box edge -- and then **nothing happens
+for the remaining 540 steps**.  Same arm pose as the prefill run that finished in 245.
+
+That also re-reads 9.27's gate: the expert was not failing on clutter in general, it was failing on
+the one or two loose Cookies the policy leaves behind, which is why it pushed at 39.5 N with nothing
+in its jaws and why it succeeded on the seed where the block happened to land clean.
+
+**Why more training could not have fixed this.**  Every demonstration in the dataset was recorded by
+the expert, and the expert's first batch leaves *no* loose Cookie -- by construction, since it places
+into slots.  "There is a Cookie in the box but not in a slot" is therefore a state the policy has
+never seen, and no amount of exposure to the same 1000 episodes puts it there.  That is a sharper
+statement than "covariate shift": the shift is a specific object configuration that the data
+generator cannot produce.
+
+Two ways out, and the second is the one the numbers point at:
+
+* make batch one slot properly so the loose Cookie never appears -- the pacing knob does move this
+  (0 / 5 slots at `execute: 16`, about 4 / 5 at 24) but 9.31 showed it alone does not lift the score;
+* train on states that contain loose Cookies, which needs a generator that produces them.  The
+  expert cannot (the gate tried), so this is a scripted perturbation of the expert's own placement
+  -- drop one Cookie beside the column before the second batch -- which is cheap to build and is the
+  first data-side experiment here that does not depend on the policy's failures being expert-fixable.
