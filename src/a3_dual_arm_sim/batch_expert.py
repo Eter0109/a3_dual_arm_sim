@@ -773,6 +773,13 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         1.4 mm nudge closed a 1.63 mm clearance and `DESCEND` stopped at 75.7 N on **one** pad
         with the other at 0.0 N -- a lateral hit, not a jam.  So runs are ranked by what bounds
         them, holes and column ends first, and the retry ladder walks down the ranking.
+
+        **Column before end.**  The source bin holds four columns of twenty, but a batch is only
+        ever taken from the first two: the rest are filler that the hand reaches with a tilted
+        approach, not the vertical grasp planned here.  Ranking by end-safety alone sent the
+        adopted episode of the gate's seed 7 at the *third* column -- the only one the policy had
+        left pristine -- and `APPROACH` then spent its full 421-step limit failing to arrive
+        there, twice.  So proximity to the box decides first and the end's safety second.
         """
         source = np.asarray(self.env.SOURCE_POSITIONS)
         actual = np.asarray(self.env.cookie_positions)
@@ -784,8 +791,8 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                 return "hole"
             return "displaced"
 
-        ranked: list[tuple[int, int, list[int]]] = []
-        for x in sorted(set(source[:, 0])):
+        ranked: list[tuple[int, int, int, list[int]]] = []
+        for column, x in enumerate(sorted(set(source[:, 0]))):
             indices = np.flatnonzero(np.isclose(source[:, 0], x))
             order = sorted(indices.tolist(), key=lambda i: source[i, 1])
             runs: list[tuple[list[int], str, str]] = []
@@ -809,15 +816,15 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     if any(index in self._failed_batches for index in whole):
                         continue
                     blocked = int(low == "displaced") + int(high == "displaced")
-                    ranked.append((blocked, len(ranked), list(whole)))
+                    ranked.append((column, blocked, len(ranked), list(whole)))
                     continue
                 # A longer run can be taken from either end, and only the end it is taken from has
                 # an outside neighbour that is not itself one of the five.
                 for group, outside in ((whole[:5], low), (whole[-5:], high)):
                     if any(index in self._failed_batches for index in group):
                         continue
-                    ranked.append((int(outside == "displaced"), len(ranked), group))
-        for _blocked, _order, group in sorted(ranked, key=lambda row: row[:2]):
+                    ranked.append((column, int(outside == "displaced"), len(ranked), group))
+        for _column, _blocked, _order, group in sorted(ranked, key=lambda row: row[:3]):
             yield group
 
     def _jaw_lowest_offset(self) -> float:
