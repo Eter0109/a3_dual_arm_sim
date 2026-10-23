@@ -2199,3 +2199,66 @@ the expert reaches `DESCEND` and bottoms out **2.9 mm** above a target that is i
 the Cookie centres (`_pick_eef.z = 0.7585` against a standing Cookie at 0.7685), and with `park`
 the columns it can still reach solve 7.5-10.6 mm short.  Both are separate from the disturbance and
 both are the next thing to fix.
+
+### 9.40 The grafted dataset, and 2000 steps on it (10-23)
+
+The gate said the state a policy's own first batch leaves behind is recoverable about half the
+time.  This is the run that turns that into data: 200 episodes where phase one is the 4.05 policy
+driving from the empty bench until it stops making progress on the source, and phase two is
+`A3CookieBatchExpert` in `adopt` mode finishing from exactly that state.  Both phases are one
+trajectory in one dataset, which is the whole point -- a pure-expert dataset never visits the state
+a policy produces, so it cannot teach the recovery.
+
+**Collection.**  Ten shards, 428 attempts, **200 accepted = 46.7%**, 4.3 hours wall (`collect_graft.py`;
+seed sweep interleaved per shard).  Tier split: **167 A** (the expert's five all reached slots),
+**33 policy_only** (the policy finished all ten itself), **0 B** -- a box that merely filled without
+slotting is refused, so nothing in the dataset teaches shoving.  140,302 frames, 702 per episode,
+1.5 GB, action space and |action| statistics within 1% of the v2 dataset (0.926 vs 0.929), same
+shadowed rendering (the `--fast-render` runs that failed earlier were the out-of-distribution
+appearance, not a broken scene).
+
+**One measurement that changes how every rate here should be read.**  The bridge is **stochastic**:
+the same observation, sent twice, returns actions differing by up to **0.086 rad**.  So the earlier
+gate's 50% and a later probe's 29% were two samples of one process, not a contradiction, and a
+single seed's outcome says nothing.  Ten-episode rows below are indicative, not decisive.
+
+**The arm.**  From 4.05 (`a3_b2_aligned_v3_4000/004000`), 2000 steps, batch 6, cosine 5e-06 ->
+2.5e-07, warmup 66, partial un-freeze 18 -- identical to 9.35's arm except the data.  42 minutes.
+2000 x 6 = 12000 samples against 140302 frames is **0.086 of an epoch**: about seventeen of the two
+hundred episodes, once.
+
+Main's benchmark, same 10 seeds, both checkpoints, this machine:
+
+| row | 4.05 | graft-2000 |
+|---|---|---|
+| A randomised (deployment) | **4.20** `{5x5, 10, 6, 1, 0x2}` | **5.10** `{10x2, 9, 5x4, 2, 0x2}` |
+| B frozen layout | 3.00 `{5x6, 0x4}` | 3.50 `{10, 5x5, 0x4}` |
+| main's strict judging | 0/10 | 0/10 |
+
+Per seed (row A), base -> graft: `0: 5->2`, `1: 10->0`, `2: 0->5`, `3: 1->10`, `4: 5->5`,
+`5: 0->5`, `6: 6->0`, `7: 5->9`, `8: 5->10`, `9: 5->5`; total **42 -> 51**.
+
+The shape of that is the whole result.  The gains are exactly the seeds that used to stop at five
+(3, 7, 8 -> 10, 9, 10) plus two that used to place nothing (2, 5 -> 5), which is the second batch
+being finished rather than attempted.  The three regressions are the other half of the same coin:
+the policy phase in this data is the model's own imperfect first batch, so 2000 steps of it also
+teaches some of that imperfection back -- seed 1 went from a complete ten to nothing.
+
+Strict success stays 0/10 on both, and that is a different axis: main's judge wants upright,
+exact slots, no wall contact and a five-step hold, and none of that is what the graft data was
+collected to fix.
+
+**Why the graft arm looks slower in a benchmark run.**  It is not the model.  Isolated, the same
+scene and 900 steps cost 249 ms/step on 4.05 and 282 ms/step on graft-2000, with inference at 5.8%
+and 5.2% of the step.  Within one checkpoint the per-step cost then varies by up to ten times
+across episodes (graftB seed 0: 260 ms, seed 9: 1430 ms; baseB seed 4: 749 ms), and it does not
+track score.  That is MuJoCo's contact solve getting expensive when the arm grinds the batch into
+the box wall and the pile, and the graft checkpoint spends more time in those states because it
+actually performs the insertion instead of parking at five.  4.05 has the same tail available; it
+visits it less often.
+
+**Next.**  The gain per sample was large because 0.086 epoch is nowhere near fitting, so the cheap
+experiment is more steps, not more data: `a3_graft_v1_15000`, 15000 steps = 0.64 epoch = 5.3 hours,
+with the evaluation chained to training (motion self-check, then rows A and B on the same seeds) so
+the comparison against this arm and 4.05 stays like-for-like.
+
