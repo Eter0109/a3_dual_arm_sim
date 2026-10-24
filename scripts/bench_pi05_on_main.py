@@ -545,14 +545,29 @@ def main() -> int:
         "--task-prompt",
         default=None,
         help=(
-            "Instruction to send instead of the benchmark's own.  Defaults to the task string "
-            "in the training dataset's meta/tasks.parquet, because a fine-tuned checkpoint "
-            "only knows the sentence it was trained on; with main's default prompt this one "
-            "scores 0/10 and moves nothing."
+            "Instruction to send instead of the benchmark's own.  The default is None, i.e. "
+            "whatever main's harness generates for that task: for 2x5 that is 'Transfer 10 "
+            "cookies from source column 1 into the target box in two batches of five.', and "
+            "for 2x10 the plan prompt.  That default is the acceptance condition -- a "
+            "checkpoint has to answer the sentence the benchmark actually sends -- so "
+            "overriding it turns an acceptance number into a measurement of some other "
+            "task.  Use it only to probe one specific instruction."
         ),
     )
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--selftest-steps", type=int, default=120)
+    parser.add_argument(
+        "--task",
+        choices=("2x5", "2x10"),
+        default="2x5",
+        help=(
+            "Which of main's two benchmarks to run.  2x5 is the ten-cookie box this line was "
+            "trained on and scores out of 10; 2x10 is the twenty-cookie box (ten per "
+            "column) and scores out of 20, with its own config and its own instruction.  A "
+            "checkpoint trained only on 2x5 is being asked, under 2x10, how far its first "
+            "batch transfers before anything was collected for the longer task."
+        ),
+    )
     parser.add_argument(
         "--diagnose",
         type=int, default=0,
@@ -586,14 +601,30 @@ def main() -> int:
             flush=True,
         )
 
-    task_prompt = args.task_prompt if args.task_prompt is not None else training_prompt()
-    print(f"[bench] instruction: {task_prompt!r}", flush=True)
-    check_prompt(task_prompt)
+    task_prompt = args.task_prompt
+    if task_prompt is None:
+        print(
+            "[bench] instruction: the benchmark's own (main generates it per task)",
+            flush=True,
+        )
+    else:
+        print(f"[bench] instruction: {task_prompt!r} (overridden)", flush=True)
+        check_prompt(task_prompt)
     # make_cookie_benchmark defaults: task 2x5, prompt_style "task", randomize_boxes=True
     # (+-1 cm), randomize_cookies=True (0.3 mm / 0.9 deg), hold 5, slots (15, 5) mm,
     # wall 30 mm.  These are main's benchmark parameters unless overridden here.
+    #
+    # 2x10 needs its own config: `required_cookies = 20` (so the score is out of 20) and
+    # `target_rows = 10`, and the episode runner refuses to start if the config does not
+    # declare ten rows.  A config_path from a scene shim never applies to 2x10, because
+    # that shim is built from the 2x5 arrangement.
+    if args.task == "2x10" and config_path is not None:
+        raise SystemExit(
+            "--training-scene is a 2x5 arrangement (ten slots, two rows); it cannot be "
+            "combined with --task 2x10"
+        )
     bench = make_cookie_benchmark(
-        task="2x5",
+        task=args.task,
         max_steps=args.max_steps,
         randomize_boxes=not args.no_randomize,
         randomize_cookies=not args.no_randomize,
