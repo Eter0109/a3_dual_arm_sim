@@ -2262,3 +2262,75 @@ experiment is more steps, not more data: `a3_graft_v1_15000`, 15000 steps = 0.64
 with the evaluation chained to training (motion self-check, then rows A and B on the same seeds) so
 the comparison against this arm and 4.05 stays like-for-like.
 
+
+### 9.41 Where the grafted arms plateau, and what the failure actually is (10-24)
+
+Four arms were trained on the 200-episode graft collection and two derived datasets.  All rows
+below are main's `CookieBatchBenchmark`, task 2x5, `randomize_boxes=True randomize_cookies=True`,
+ten seeds `0-9`, 900 steps, same instrument every earlier row used.
+
+| arm | data | steps | row A mean | per-seed | strict |
+|---|---|---|---|---|---|
+| 4.05 | `a3_b2_main_aligned_v2` | -- | 4.20 | 5,10,0,1,5,0,6,5,5,5 | 0/10 |
+| graft-2k | graft as recorded | 2 000 | **5.10** | 2,0,5,10,5,5,0,9,10,5 | 0/10 |
+| graft-15k | graft as recorded | 15 000 | 4.50 | 5,5,0,0,10,5,5,5,5,5 | 0/10 |
+| **mix-9k** | 50 whole + 167 handover-only | 9 000 | **5.80** | 5,5,2,5,6,5,10,10,5,5 | **1/10** |
+| mix-15k | same | 15 000 | 2.90 | 6,5,5,5,0,0,5,2,0,1 | 0/10 |
+| clean-9k | 167 prefix + 167 handover-only | 9 000 | 3.80 | 5,5,0,0,5,5,2,6,5,5 | 0/10 |
+
+**More steps is not more model.**  On the same data, 2k beat 15k (5.10 against 4.50), and on the
+mix 9k beat 15k by a wider margin (5.80 against 2.90, and 15k put three seeds at zero).  The 2k
+arm had seen 0.086 of an epoch and the 9k arm 0.59, so both are nowhere near fitting; what the
+extra steps buy past the peak is a better imitation of whatever dominates the data, not a better
+policy.  `mix-15k`'s distribution (`{5:4, 6, 2, 1, 0:3}`) is the same collapse the unmixed 15k
+arm showed, one iteration later.
+
+**The benchmark's own logs already separate the failure modes.**  Every episode records
+`cookies_in_source`, so "did it pick the second batch up" is answerable without a video: in
+mix-9k, eight of ten seeds took it (`in_source` 67-73 against 80) and only two did not (75).  Of
+the eight, two got all ten counted inside the box and one of those passed the strict contract.  So
+the bottleneck is neither the grasp nor the approach -- it is what happens after the batch is in
+the air.
+
+**The strays sit one layer too high.**  A replay that classifies all eighty Cookies at step 900
+(`/tmp/endgame_geometry.py`, same benchmark, same randomisation) puts the untouched five at
+`dz = +28.1 ± 0.4 mm` relative to the target bin, in the correct row (`dx = +32..+35` against a
+slot row at `+28` with a ±10 mm tolerance), at the correct spacing (the five `dy` values preserve
+the 6.3 mm slot pitch), and none of them between the jaws.  A correctly placed Cookie sits at
+`dz = +18.5`; the box rim is at `+26`.  So the batch is carried to the right place, in the right
+shape, and released **9.6 mm too high** -- above the rim, where nothing counts.
+
+**Why it is released too high, measured on the demonstrations.**  One detector (gripper-opening
+jump while the effector is over the box) applied to the collection:
+
+| phase of the demonstration | median release height | n |
+|---|---|---|
+| policy phase (4.05 attempting batch two) | **0.8468 m** | 537 |
+| expert phase | **0.7596 m** | 189 |
+
+The rim is at 0.7755.  The policy releases 71 mm above the rim; the expert descends 16 mm below it,
+to slot height.  And the hand *can* get there -- a probe on the mix-9k checkpoint measures its
+lowest effector height over the box at 0.7576-0.7598, within 1.7 mm of the expert's 0.7593-0.7596.
+The failure is the moment it lets go, not a reach it cannot make.
+
+**The state it leaves is fully recoverable.**  Taking over from exactly that state (same scene,
+same seed, `A3CookieBatchExpert` in `adopt`): 2 of 2 triggered seeds finished at **tier A** -- ten
+in the target, five slots gained.  So nothing about the scene, the row or the pile is blocking;
+only the policy's own release.
+
+**Removing the bad demonstration made it worse, and that is the informative result.**  Since
+every recorded episode contains the policy's own failed attempt (2.7 releases per episode, from
+0.8468), the `clean` dataset cut the anchor at the handover so that no segment shows a second
+batch released from above.  It scored 3.80 against the mix's 5.80, lost both 10/10 seeds, and its
+endgame replay cannot pick the second batch up at all (`in_source` 75/80).  What the whole-episode
+anchors were providing was not a bad habit to imitate but the **transition** -- finish batch one,
+reach for batch two, attempt the insert -- and cutting it left the model with two disconnected
+skills and no bridge between them.
+
+So "the data contains its own failures" is not the binding constraint.  The binding constraint is
+that the same release height is correct for an empty box (batch one lands fine from 0.8468, the box
+is 26 mm deep) and wrong for a half-full one, and the data has to teach *that distinction* rather
+than either height on its own.
+
+**Best checkpoint so far: `mix-9k`, A=5.80, strict 1/10** (`pi05-runs/a3_graftmix_15000/checkpoints/009000`,
+symlinked as `a3_graftmix_best`).
