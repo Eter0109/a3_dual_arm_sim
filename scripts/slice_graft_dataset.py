@@ -140,9 +140,21 @@ def main() -> int:
         type=int,
         default=50,
         help=(
-            "How many whole episodes to keep as the anchor.  Their frames are the only "
-            "first-batch samples in the result, so this is the knob that decides how "
-            "much the model is reminded of batch one."
+            "How many episodes contribute an anchor segment.  With --anchor full that is "
+            "the whole episode; with --anchor prefix it is the first batch only."
+        ),
+    )
+    parser.add_argument(
+        "--anchor",
+        choices=("full", "prefix"),
+        default="full",
+        help=(
+            "What the anchor segments contain.  `full` keeps whole episodes, which also keeps "
+            "the policy's own failed attempt at the second batch; `prefix` stops at the "
+            "handover (minus the margin), so the dataset contains no example of releasing "
+            "the second batch from above.  Measured: the policy releases at 0.8468 m and the "
+            "expert at 0.7596 m, an 87 mm difference, and a mix that kept whole episodes "
+            "still taught the higher one."
         ),
     )
     parser.add_argument(
@@ -189,7 +201,12 @@ def main() -> int:
     full = wanted[: args.full_episodes]
     plan: list[tuple[str, int, int, int, dict]] = []
     for index, policy_steps, frames, metrics in full:
-        plan.append(("full", index, 0, frames, metrics))
+        if args.anchor == "prefix":
+            # Stop before the policy's own attempt at the second batch: its release height
+            # is the behaviour being corrected, and leaving it in the data teaches it.
+            plan.append(("prefix", index, 0, max(1, policy_steps - args.margin), metrics))
+        else:
+            plan.append(("full", index, 0, frames, metrics))
     for index, policy_steps, frames, metrics in wanted:
         start = min(policy_steps + args.margin, frames - 1)
         plan.append(("expert", index, start, frames, metrics))
@@ -199,7 +216,7 @@ def main() -> int:
         # right frame.  A smoke test that only ran the first kind would say nothing
         # about the path the whole exercise is for.
         keep_full = args.smoke // 2
-        plan = [p for p in plan if p[0] == "full"][:keep_full] + [
+        plan = [p for p in plan if p[0] in ("full", "prefix")][:keep_full] + [
             p for p in plan if p[0] == "expert"
         ][: args.smoke - keep_full]
 
