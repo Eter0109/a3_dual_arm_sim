@@ -168,6 +168,22 @@ def main() -> int:
         help="Glob for the 20-cookie shards, e.g. '/path/a3_2x10_v1/shard_*'",
     )
     parser.add_argument(
+        "--two-by-ten-repeat",
+        type=int,
+        default=1,
+        help=(
+            "How many times each 2x10 shard is concatenated.  This is the sampling weight, "
+            "and it is the cheap knob: a 15000-step arm sees 90000 of the dataset's 853113 "
+            "frames -- 10.5%% -- so collecting more data cannot fix a composition problem.  "
+            "At repeat=1 the 2x10 frames are 33.7%% of the set, so two thirds of every batch "
+            "teaches the 2x5 behaviour, including its 'stop after two batches'; at repeat=2 "
+            "they are 50.4%%.  Duplicating is not free of consequence -- the same 280 "
+            "episodes are revisited rather than new ones added -- but the run never "
+            "completes one pass of the set, so this trades variety the model cannot reach "
+            "anyway for the balance it can actually learn from."
+        ),
+    )
+    parser.add_argument(
         "--two-by-five-prompt",
         default=TWO_BY_FIVE_PROMPT,
         help="Instruction to stamp on the 2x5 episodes; defaults to main's own.",
@@ -207,9 +223,14 @@ def main() -> int:
     for path in args.two_by_five:
         sources.append(("2x5", path.name, path))
     if args.two_by_ten:
-        for path in sorted(glob.glob(args.two_by_ten)):
-            sources.append(("2x10", Path(path).name, Path(path)))
-    print(f"{len(sources)} source dataset(s)")
+        for repeat in range(max(1, args.two_by_ten_repeat)):
+            for path in sorted(glob.glob(args.two_by_ten)):
+                # The repeat index is part of the name because the staging directory is keyed
+                # by it; two entries that resolved to the same directory would silently
+                # collapse into one copy of the same shard.
+                name = Path(path).name if repeat == 0 else f"{Path(path).name}r{repeat}"
+                sources.append(("2x10", name, Path(path)))
+    print(f"{len(sources)} source dataset(s), 2x10 repeat={max(1, args.two_by_ten_repeat)}")
 
     # Hard-link the sources so the task rewrite (which replaces files by rename) never
     # touches the datasets it read.  Videos are the bulk of every source and are linked,
