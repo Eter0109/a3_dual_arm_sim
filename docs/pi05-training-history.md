@@ -2334,3 +2334,65 @@ than either height on its own.
 
 **Best checkpoint so far: `mix-9k`, A=5.80, strict 1/10** (`pi05-runs/a3_graftmix_15000/checkpoints/009000`,
 symlinked as `a3_graftmix_best`).
+
+### 9.42 The instruction is the task, and every number before this was measured on ours (10-25)
+
+The acceptance target is one weight set that scores on **main's** 2x5 and **main's** 2x10.  Attempting
+it produced the sharpest measurement of this whole line, and it invalidates a reading I published in
+9.40-9.41.
+
+**The measurement.**  `mix-9k`, one scene, one seed, 3200 steps, changing only the sentence:
+
+| instruction sent | 2x10 score | `cookies_in_source` |
+|---|---|---|
+| our 2x5 sentence ("grasp five yellow blocks together ... fill all ten slots") | **7 / 20** | 73 |
+| main's 2x10 sentence ("Transfer 20 cookies into the 2x10 target box, ten per column.") | **0 / 20** | 78 |
+
+Two Cookies moved in 3200 steps under the sentence it has never seen, seven scored under the one it
+has.  Same weights, same scene, same budget.
+
+**So the 7/20 I reported earlier was not a 2x10 result.**  It was "a 2x5 checkpoint dropped into a
+larger box while being told to do 2x5", which is a transfer observation and not the benchmark.  The
+honest 2x10 baseline for a model that has never seen 2x10 data is **0**, and the same is true in the
+other direction: every 2x5 number in this document (4.20, 5.10, 5.80, 4.50, 2.90) was measured with
+our training sentence, so under main's own 2x5 string they are all 0 as well.  Those numbers remain
+valid *as a ranking of our checkpoints on our instruction* -- they are not acceptance numbers, and
+were never labelled as such.
+
+**Why it follows from the architecture rather than from a bug.**  pi0.5 here is `n_obs_steps = 1`:
+one observation, no history, no recurrent state.  The instruction is therefore the *entire*
+specification of which task the frames belong to -- there is no other channel.  A fine-tune on one
+sentence is a model of that sentence's task, and "answer the sentence main sends" is a property that
+has to be trained, not assumed.
+
+**What main actually sends**, which decided the data design:
+
+| benchmark | instruction | varies per seed? |
+|---|---|---|
+| 2x5 | "Transfer 10 cookies from source column 1 into the target box in two batches of five." | **no** -- `choose_column("1", seed)` returns 1 for every seed |
+| 2x10 | "Transfer 20 cookies from source column 1 into the 2x10 target box. Grasp *n* cookies first, then *10-n* to fill target column 1 with 10. Repeat: grasp *n*, then *10-n* to fill target column 2 with 10." | **yes** -- `randomization_2x10.yaml` says `first_grasp: random`, sampled per episode, so there are ten variants |
+
+The 2x5 correction is therefore one label, and the 2x10 coverage has to include all ten variants:
+training on one of them leaves the other nine seeds answering a sentence the model has never read.
+
+**The build.**  `scripts/build_multitask_dataset.py` relabels the 2x5 episodes to main's sentence
+and leaves the 2x10 instructions alone (the collector already writes main's plan prompt verbatim),
+then aggregates with one global task table.  The second half is not cosmetic: `task_index` is
+per-dataset, and `aggregate_datasets` unions the task tables while copying data rows verbatim, so
+merging two datasets whose index 0 means different sentences silently retrains one task on the
+other's instruction.  The builder rewrites every source to the global table, then verifies by
+resolving each row's index back through the column -- 1480 episodes, 853113 frames, 11
+instructions, 0 mismatched rows.
+
+**The dataset.**  2x5: 1200 episodes (1000 canonical + 200 grafted), relabelled.  2x10: 280 episodes
+collected with main's own expert (`A3Cookie2x10Expert`, plan `[n, 10-n, n, 10-n]`, four batches of
+five, 20/20 under its own judge, measured 386.9 s and 1071 steps per episode).  Post-collection the
+2x10 set is 287418 frames after quarantining one shard: `shard_00` died in
+`EGL.eglMakeCurrent` during teardown with eight processes sharing the card, leaving a parquet with
+14 episodes and a metadata file with 12, so it is excluded rather than repaired.
+
+**Still open: the acceptance eval is running.**  30000 steps from 4.05, 0.21 epoch, on the mixed
+set, then 2x5 and 2x10 evaluations with **main's own instructions** -- no `--task-prompt`, because
+the question is whether this checkpoint answers what the benchmark sends.  Until that lands, the
+only defensible statements are the two rows above.
+
