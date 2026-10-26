@@ -30,7 +30,8 @@ def _check_cookie_2x10_episode(episode: dict, collection_summary: dict) -> None:
     from a3_dual_arm_sim.tasks.cookie_2x10_plan import Cookie2x10Plan
 
     metadata = episode.get("randomization", {})
-    plan = Cookie2x10Plan.from_seed(collection_summary["first_grasp_mode"], episode["seed"])
+    mode = metadata.get("first_grasp_mode", collection_summary.get("first_grasp_mode", "random"))
+    plan = Cookie2x10Plan.from_seed(mode, episode["seed"])
     if (
         metadata.get("grasp_counts") != list(plan.batch_sizes)
         or metadata.get("first_grasp_count") != plan.first_grasp

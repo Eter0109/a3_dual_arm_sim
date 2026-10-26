@@ -44,9 +44,21 @@ def main() -> int:
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--complete-demonstrations", action="store_true", help="Front-camera bottom-first; require release, retreat and expert completion")
+    parser.add_argument(
+        "--placement-order",
+        choices=["canonical", "front_camera_bottom_first"],
+        default="canonical",
+        help="Target box column placement order (canonical: (0, 1), front_camera_bottom_first: (1, 0))",
+    )
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--max-attempts", type=int, default=None)
+    parser.add_argument(
+        "--seeds-file",
+        type=Path,
+        default=None,
+        help="JSON list of explicit episode seeds to attempt in order (overrides consecutive seeds)",
+    )
     parser.add_argument(
         "--randomization-config",
         type=Path,
@@ -67,6 +79,12 @@ def main() -> int:
         parser.error("--episodes must be positive")
     if args.max_attempts is not None and args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
+    seeds_list = None
+    if args.seeds_file is not None:
+        seeds_list = [int(s) for s in json.loads(args.seeds_file.read_text(encoding="utf-8"))]
+        if not seeds_list:
+            parser.error("--seeds-file must contain at least one seed")
+        args.seed_start = seeds_list[0]
 
     root = _from_project(args.root)
     root.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +107,7 @@ def main() -> int:
         profile=profile,
         source_column=source_column,
         randomization_settings=settings,
+        placement_order=args.placement_order,
     )
     # Record the same short instruction the summary and the evaluation CLIs declare;
     # the per-column "task" variant stays opt-in for explicit experiments.
@@ -100,7 +119,7 @@ def main() -> int:
     summary = {
         "schema_version": 2,
         "complete_demonstrations": args.complete_demonstrations,
-        "placement_order": "front_camera_bottom_first" if args.complete_demonstrations else "legacy",
+        "placement_order": args.placement_order if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
         "task_instruction": TASK,
         "prompt_style": "training",
@@ -177,6 +196,10 @@ def main() -> int:
         while recorder._episode_index < args.episodes:
             if args.max_attempts is not None and len(attempts) >= args.max_attempts:
                 break
+            if seeds_list is not None:
+                if len(attempts) >= len(seeds_list):
+                    break
+                seed = seeds_list[len(attempts)]
             try:
                 result = benchmark.run_episode("same_column", seed, env=None, recorder=recorder)
                 with attempts_path.open("a", encoding="utf-8") as stream:

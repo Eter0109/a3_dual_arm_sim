@@ -176,6 +176,27 @@ class ACTPolicyAdapter(LearnedPolicyAdapter):
         self.action_mode: ActionMode = "joint_position"
 
 
+class PI05PolicyAdapter(LearnedPolicyAdapter):
+    """Deploy a dual-arm π₀.₅ checkpoint in the Cookie benchmark."""
+
+    def __init__(self, checkpoint: str | Path, device: str | None = None,
+                 inference_seed: int = 0, n_action_steps: int | None = None,
+                 num_inference_steps: int | None = None):
+        import torch
+
+        from a3_dual_arm_sim.policies.pi05 import PI05PolicyPlugin
+
+        self.plugin = PI05PolicyPlugin(
+            resolve_policy_checkpoint(checkpoint),
+            device or ("cuda" if torch.cuda.is_available() else "cpu"),
+            inference_seed,
+            n_action_steps,
+            num_inference_steps,
+        )
+        self.name = "pi05"
+        self.action_mode: ActionMode = "joint_position"
+
+
 def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = None) -> Any:
     """Create a policy runner from a string name, spec, or object."""
     if isinstance(policy_or_spec, str):
@@ -199,6 +220,8 @@ def make_policy_adapter(policy_or_spec: Any, env: A3CookieTransferEnv | None = N
             return SmolVLAPolicyAdapter(ckpt)
         if spec.startswith("act:"):
             return ACTPolicyAdapter(policy_or_spec.split(":", 1)[1])
+        if spec.startswith("pi05:"):
+            return PI05PolicyAdapter(policy_or_spec.split(":", 1)[1])
         # Handle module:factory policy spec
         if ":" in policy_or_spec:
             mod_name, func_name = policy_or_spec.rsplit(":", 1)

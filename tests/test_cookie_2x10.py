@@ -286,8 +286,16 @@ def test_twenty_runner_scores_twenty_and_stores_joint_actions():
 def test_dataset_audit_checks_actual_plan_and_prompt(tmp_path, n):
     from a3_dual_arm_sim.data.audit import CAMERA_KEYS, audit_training_dataset
 
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     root = tmp_path / "dataset"
     (root / "meta").mkdir(parents=True)
+    (root / "meta/episodes").mkdir()
+    (root / "data").mkdir()
+    pq.write_table(pa.table({"episode_index": [0], "length": [12]}),
+                   root / "meta/episodes/part.parquet")
+    pq.write_table(pa.table({"episode_index": [0] * 12}), root / "data/part.parquet")
     features = {
         **{key: {"dtype": "video", "shape": [256, 256, 3]} for key in CAMERA_KEYS},
         "observation.state": {"shape": [16]},
@@ -330,6 +338,7 @@ def test_dataset_audit_checks_actual_plan_and_prompt(tmp_path, n):
         )
         offset += count
     report = {
+        "frames": 12,
         "seed": 0,
         "success": True,
         "task": plan.prompt(1),

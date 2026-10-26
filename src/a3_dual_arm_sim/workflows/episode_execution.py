@@ -61,9 +61,11 @@ class EpisodeExecution:
         success_hold_steps: int = 5,
         slot_tolerance_m: tuple[float, float] = (0.015, 0.005),
         wall_contact_tolerance_m: float = 0.030,
+        placement_order: str = "canonical",
     ):
         self.complete_demonstrations = complete_demonstrations
         self.strict_policy_completion = strict_policy_completion
+        self.placement_order = placement_order
         self.randomization_settings = load_randomization_config(
             randomization_config, config=randomization_settings
         )
@@ -232,15 +234,23 @@ class EpisodeExecution:
         }
 
         observation, info = env.reset(seed=seed, options=reset_options)
+        if getattr(self, "pi05_scene", None) is not None:
+            from a3_dual_arm_sim.workflows.pi05_scene import apply_after_reset
+            observation = apply_after_reset(env, self.pi05_scene, self.pi05_scene_protocol["mode"])
+            self.last_attempt_metadata["pi05_scene_protocol"] = self.pi05_scene_protocol
         self.last_attempt_metadata.update(getattr(env, "randomization_metadata", {}))
         self.last_attempt_metadata["reset_options"] = reset_options
         if self.complete_demonstrations or self.strict_policy_completion:
             from a3_dual_arm_sim.controllers.placement_order import front_camera_column_order
-            column_order = front_camera_column_order(env)
+
+            if getattr(self, "placement_order", "canonical") == "canonical":
+                column_order = (0, 1)
+            else:
+                column_order = front_camera_column_order(env)
             if self.complete_demonstrations:
                 env.demonstration_column_order = column_order
                 self.last_attempt_metadata.update(
-                    placement_order="front_camera_bottom_first",
+                    placement_order="canonical" if column_order == (0, 1) else "front_camera_bottom_first",
                     target_column_order=list(column_order),
                     completion_contract="released_retracted_expert_done_stable",
                 )

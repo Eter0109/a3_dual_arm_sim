@@ -25,6 +25,7 @@ from .episode_execution import EpisodeExecution as EpisodeExecution
 from .policy_adapters import ACTPolicyAdapter as ACTPolicyAdapter
 from .policy_adapters import BenchmarkPolicy as BenchmarkPolicy
 from .policy_adapters import ExpertPolicyAdapter as ExpertPolicyAdapter
+from .policy_adapters import PI05PolicyAdapter as PI05PolicyAdapter
 from .policy_adapters import SmolVLAPolicyAdapter as SmolVLAPolicyAdapter
 from .policy_adapters import make_policy_adapter as make_policy_adapter
 from .policy_adapters import resolve_smolvla_checkpoint as resolve_smolvla_checkpoint
@@ -39,7 +40,15 @@ class CookieBatchBenchmark(EpisodeExecution):
     prompt_style = "training"
     diagnostic_dir = None
 
+    ALIGNED_PI05_PROMPT = (
+        "grasp five yellow blocks together from the source bin, insert them upright into "
+        "the marked slots of the 2 by 5 box, then return to the source bin, grasp five "
+        "more, and fill all ten slots"
+    )
+
     def _episode_task(self, column, seed):
+        if self.prompt_style == "pi05_aligned":
+            return self.ALIGNED_PI05_PROMPT
         if self.prompt_style in ("training", "short"):
             return "transfer 10 cookies into target box"
         return super()._episode_task(column, seed)
@@ -249,8 +258,8 @@ def make_cookie_benchmark(task="2x5", *, prompt_style=None, first_grasp=None, **
         # Match the per-task CLI defaults: 2x5 evaluation and collection use the
         # short training instruction, 2x10 keeps its native plan prompt.
         prompt_style = "task" if task == "2x10" else "training"
-    if prompt_style not in ("task", "training", "short"):
-        raise ValueError("prompt_style must be task, training or short")
+    if prompt_style not in ("task", "training", "short", "pi05_aligned"):
+        raise ValueError("prompt_style must be task, training, short or pi05_aligned")
     if task == "2x10":
         benchmark = Cookie2x10Benchmark(first_grasp=first_grasp, **kwargs)
     else:

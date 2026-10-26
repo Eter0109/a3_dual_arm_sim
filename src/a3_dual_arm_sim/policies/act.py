@@ -40,10 +40,9 @@ class ACTPolicyPlugin:
         if config.type != "act":
             raise ValueError(f"Expected ACT checkpoint, got {config.type!r}")
         self._action_dim = config.output_features["action"].shape[0]
-        if self._action_dim not in (8, 16) or list(
-            config.input_features["observation.state"].shape
-        ) != [self._action_dim]:
-            raise ValueError("Expected matching 8-D left-only or 16-D dual-arm state/actions")
+        self._state_dim = config.input_features["observation.state"].shape[0]
+        if (self._action_dim, self._state_dim) not in ((8, 8), (8, 11), (16, 16)):
+            raise ValueError("Expected 8/8 or 11/8 left-arm, or 16/16 dual-arm state/action")
         if n_action_steps is not None:
             config.n_action_steps = n_action_steps
         if temporal_ensemble_coeff is not None:
@@ -86,10 +85,21 @@ class ACTPolicyPlugin:
     def predict_action(self, observation: dict[str, Any], task: str = "") -> np.ndarray:
         obs = {key: observation[key] for key in self._input_keys}
         state = np.asarray(obs["observation.state"])
-        allowed = ((8,), (16,)) if self._action_dim == 8 else ((16,),)
-        if state.shape not in allowed:
-            raise ValueError("State shape is incompatible with ACT checkpoint")
-        obs["observation.state"] = state[: self._action_dim].copy()
+        if self._state_dim == 11:
+            if state.shape == (16,):
+                pose = np.asarray(observation.get("observation.eef_pose"))
+                if pose.shape != (14,):
+                    raise ValueError("11-D inference requires the environment's 14-D EEF pose")
+                state = np.concatenate((state[:8], pose[:3]))
+            if state.shape != (11,) or not np.isfinite(state).all():
+                raise ValueError("11-D inference requires left joints, gripper and world EEF xyz")
+        elif self._action_dim == 8:
+            if state.shape not in ((8,), (16,)):
+                raise ValueError("Left-only inference requires 8-D or 16-D state")
+            state = state[:8]
+        elif state.shape != (16,):
+            raise ValueError("Dual-arm inference requires 16-D state")
+        obs["observation.state"] = state.copy()
         batch = self._preprocessor(
             self._prepare_observation(obs, self._device, task, "A3_dual_arm")
         )

@@ -114,6 +114,17 @@ def merge_cookie_datasets(
             },
         ],
     }
+    for key in (
+        "placement_order",
+        "complete_demonstrations",
+        "training_arm_mode",
+        "training_joint_order",
+        "environment_action_dim",
+        "training_state_contract",
+    ):
+        val5, val10 = summary5.get(key), summary10.get(key)
+        if val5 is not None and val5 == val10:
+            summary[key] = val5
     (output / "collection_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

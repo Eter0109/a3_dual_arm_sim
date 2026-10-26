@@ -45,6 +45,12 @@ def main() -> int:
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--complete-demonstrations", action="store_true")
+    parser.add_argument(
+        "--placement-order",
+        choices=["canonical", "front_camera_bottom_first"],
+        default="canonical",
+        help="Target box column placement order (canonical: (0, 1), front_camera_bottom_first: (1, 0))",
+    )
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument(
         "--first-grasp",
@@ -101,6 +107,7 @@ def main() -> int:
         profile=profile,
         source_column=source_column,
         randomization_settings=settings,
+        placement_order=args.placement_order,
     )
     if args.diagnostic_dir and not args.dry_run:
         benchmark.diagnostic_dir = _from_project(args.diagnostic_dir)
@@ -109,7 +116,7 @@ def main() -> int:
     summary = {
         "schema_version": 2,
         "complete_demonstrations": args.complete_demonstrations,
-        "placement_order": "front_camera_bottom_first" if args.complete_demonstrations else "legacy",
+        "placement_order": args.placement_order if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
         "task_instruction": TASK,
         "repo_id": args.repo_id,

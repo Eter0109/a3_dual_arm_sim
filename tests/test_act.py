@@ -16,6 +16,7 @@ def test_act_left_contract_and_episode_reset():
     p._torch = torch
     p._device = torch.device("cpu")
     p._action_dim = 8
+    p._state_dim = 8
     p._input_keys = ("observation.state",)
     p._prepare_observation = lambda obs, *args: obs
     p._preprocessor = p._postprocessor = lambda x: x
@@ -66,7 +67,7 @@ def test_act_dry_run_public_config(tmp_path, monkeypatch):
 
     from a3_dual_arm_sim.learning import act_training
 
-    monkeypatch.setattr(act_training, "audit_training_dataset", lambda *a, **kw: {"action_dim": 8})
+    monkeypatch.setattr(act_training, "audit_training_dataset", lambda *a, **kw: {"action_dim": 8, "state_dim": 8})
 
     def forbidden(*args, **kwargs):
         raise AssertionError("dry run must not train")
@@ -157,3 +158,24 @@ def test_public_act_reset_discards_previous_episode_predictions(ensemble):
     value[0] = 9.0
     plugin.reset(context)
     assert torch.all(policy.select_action({}) == 9)
+
+
+def test_act_left11_builds_world_eef_state():
+    p = ACTPolicyPlugin.__new__(ACTPolicyPlugin)
+    p._torch = torch
+    p._device = torch.device("cpu")
+    p._action_dim, p._state_dim = 8, 11
+    p._input_keys = ("observation.state",)
+    p._prepare_observation = lambda obs, *args: obs
+    p._preprocessor = p._postprocessor = lambda x: x
+    seen = []
+    def select(batch):
+        seen.append(batch["observation.state"].copy())
+        return torch.zeros((1, 8))
+    p._policy = SimpleNamespace(select_action=select)
+    state = np.arange(16, dtype=np.float32)
+    pose = np.arange(14, dtype=np.float32) / 100
+    p.predict_action({"observation.state": state, "observation.eef_pose": pose})
+    assert np.array_equal(seen[0], np.concatenate((state[:8], pose[:3])))
+    with pytest.raises(ValueError, match="14-D EEF"):
+        p.predict_action({"observation.state": state})

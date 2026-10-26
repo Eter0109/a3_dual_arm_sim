@@ -66,16 +66,17 @@ def train_act(
     from lerobot.configs.types import FeatureType, PolicyFeature
     from lerobot.policies.act.configuration_act import ACTConfig
 
-    dim = audit["action_dim"]
+    action_dim = audit["action_dim"]
+    state_dim = audit["state_dim"]
     policy = ACTConfig(
         device=device,
         push_to_hub=False,
         use_amp=False,
         input_features={
             **{key: PolicyFeature(FeatureType.VISUAL, (3, 256, 256)) for key in CAMERA_KEYS},
-            "observation.state": PolicyFeature(FeatureType.STATE, (dim,)),
+            "observation.state": PolicyFeature(FeatureType.STATE, (state_dim,)),
         },
-        output_features={"action": PolicyFeature(FeatureType.ACTION, (dim,))},
+        output_features={"action": PolicyFeature(FeatureType.ACTION, (action_dim,))},
         chunk_size=chunk_size,
         n_action_steps=n_action_steps,
         temporal_ensemble_coeff=temporal_ensemble_coeff,
@@ -94,7 +95,8 @@ def train_act(
         steps=steps,
         batch_size=batch_size,
         num_workers=num_workers,
-        eval_freq=0,
+        **{("env_eval_freq" if "env_eval_freq" in TrainPipelineConfig.__dataclass_fields__
+            else "eval_freq"): 0},
         log_freq=min(20, steps),
         save_freq=save_freq,
         save_checkpoint=True,
