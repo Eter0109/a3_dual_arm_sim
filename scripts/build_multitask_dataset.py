@@ -175,8 +175,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--two-by-ten",
+        nargs="+",
         default=None,
-        help="Glob for the 20-cookie shards, e.g. '/path/a3_2x10_v1/shard_*'",
+        help=(
+            "One or more globs for the 20-cookie shards, e.g. "
+            "'/path/a3_2x10_v1/shard_*' '/path/a3_2x10_n5/shard_*'.  More than one is normal "
+            "when the 2x10 data comes from two collections, e.g. one that drew the grasp "
+            "plan per episode and a later one that forced a single plan."
+        ),
     )
     parser.add_argument(
         "--two-by-ten-repeat",
@@ -246,13 +252,19 @@ def main() -> int:
     for path in args.two_by_five:
         sources.append(("2x5", path.name, path))
     if args.two_by_ten:
-        for repeat in range(max(1, args.two_by_ten_repeat)):
-            for path in sorted(glob.glob(args.two_by_ten)):
-                # The repeat index is part of the name because the staging directory is keyed
-                # by it; two entries that resolved to the same directory would silently
-                # collapse into one copy of the same shard.
-                name = Path(path).name if repeat == 0 else f"{Path(path).name}r{repeat}"
-                sources.append(("2x10", name, Path(path)))
+        for pattern in args.two_by_ten:
+            # The glob is expanded per repeat so a re-run cannot see a different file set
+            # between the copies, which would silently change the sampling weight.
+            matched = sorted(glob.glob(pattern))
+            if not matched:
+                raise SystemExit(f"--two-by-ten matched nothing: {pattern!r}")
+            for repeat in range(max(1, args.two_by_ten_repeat)):
+                for path in matched:
+                    # The repeat index is part of the name because the staging directory is
+                    # keyed by it; two entries resolving to one directory would collapse
+                    # into a single copy of the same shard.
+                    base = Path(path).name if repeat == 0 else f"{Path(path).name}r{repeat}"
+                    sources.append(("2x10", base, Path(path)))
     print(f"{len(sources)} source dataset(s), 2x10 repeat={max(1, args.two_by_ten_repeat)}")
 
     # Hard-link the sources so the task rewrite (which replaces files by rename) never
