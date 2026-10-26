@@ -54,6 +54,17 @@ TWO_BY_FIVE_PROMPT = (
     "Transfer 10 cookies from source column 1 into the target box in two batches of five."
 )
 
+#: main's `prompt_style="short"` pair: one constant sentence per task, no plan and no
+#: column.  The 2x10 plan prompt has eleven variants (n=1..9, a skip variant, and the short
+#: one), picked per episode by `first_grasp: random`, and covering all eleven to a useful
+#: standard is not realistic: measured on the collected shards, n=5 has 30 episodes and
+#: n=0 has 21, so a 15000-step arm would see a handful of each.  Two constant sentences
+#: make the instruction a task switch rather than a plan the model has to reproduce.
+SHORT_PROMPTS = {
+    "2x5": "transfer 10 cookies into target box",
+    "2x10": "transfer 20 cookies into target box",
+}
+
 
 def episode_tasks(root: Path) -> dict[int, str]:
     """``episode_index -> task string`` for one dataset, from its own metadata."""
@@ -194,6 +205,18 @@ def main() -> int:
         help="Do not relabel the 2x5 episodes (use the sentence already in the data).",
     )
     parser.add_argument(
+        "--short-prompts",
+        action="store_true",
+        help=(
+            "Relabel every episode to main's `prompt_style=\"short\"` sentence for its task: "
+            "'transfer 10 cookies into target box' for 2x5 and 'transfer 20 cookies into "
+            "target box' for 2x10.  Two instructions in total, constant across seeds.  The "
+            "evaluation must then use --prompt-style short as well, or it asks a sentence "
+            "the model never saw.  This replaces the per-seed plan prompt, which has eleven "
+            "variants for 2x10 and cannot be covered usefully at this data size."
+        ),
+    )
+    parser.add_argument(
         "--stage-dir",
         type=Path,
         default=None,
@@ -259,16 +282,20 @@ def main() -> int:
     plans: list[tuple[str, Path, dict[int, str]]] = []
     for kind, name, root in sources:
         local = episode_tasks(root)
-        relabel = kind == "2x5" and not args.keep_two_by_five_prompt
-        expected = {
-            episode: (args.two_by_five_prompt if relabel else task)
-            for episode, task in local.items()
-        }
+        if args.short_prompts:
+            target = SHORT_PROMPTS[kind]
+            expected = {episode: target for episode in local}
+            note = f" (relabelled to the short prompt {target!r})"
+        elif kind == "2x5" and not args.keep_two_by_five_prompt:
+            expected = {episode: args.two_by_five_prompt for episode in local}
+            note = " (relabelled to main's 2x5 string)"
+        else:
+            expected = dict(local)
+            note = ""
         plans.append((name, root, expected))
         print(
             f"  {kind}/{name}: {len(local)} episodes, "
-            f"{len(set(expected.values()))} distinct instruction(s)"
-            + (" (relabelled to main's 2x5 string)" if relabel else "")
+            f"{len(set(expected.values()))} distinct instruction(s){note}"
         )
 
     # The table is complete once every source has been interned, so the rewrite happens

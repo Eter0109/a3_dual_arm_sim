@@ -557,6 +557,21 @@ def main() -> int:
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--selftest-steps", type=int, default=120)
     parser.add_argument(
+        "--prompt-style",
+        choices=("task", "short"),
+        default="task",
+        help=(
+            "Which of main's instruction styles this benchmark should send.  'task' (the "
+            "default) is the per-seed plan prompt: for 2x10 that is one of eleven variants "
+            "('Grasp n cookies first, then 10-n ...' for n=1..9, plus a skip variant and a "
+            "short one), because `first_grasp: random` samples per episode.  'short' is "
+            "main's own one-liner -- 'transfer 10 cookies into target box' for 2x5 and "
+            "'transfer 20 cookies into target box' for 2x10, both constant across seeds.  "
+            "A checkpoint trained on the short prompt must be evaluated with this, or it is "
+            "being asked a sentence it never saw."
+        ),
+    )
+    parser.add_argument(
         "--task",
         choices=("2x5", "2x10"),
         default="2x5",
@@ -625,6 +640,7 @@ def main() -> int:
         )
     bench = make_cookie_benchmark(
         task=args.task,
+        prompt_style=args.prompt_style,
         max_steps=args.max_steps,
         randomize_boxes=not args.no_randomize,
         randomize_cookies=not args.no_randomize,
