@@ -233,8 +233,12 @@ class BridgeChunkPolicy:
     name = "pi05_b2_20k"
 
     def __init__(self, sock_path: str, *, chunk: int = 50, execute: int = 16,
-                 task_prompt: str | None = None):
+                 task_prompt: str | None = None, progress_channels: bool = False):
         self.action_mode = "joint_position"
+        #: Append the two progress entries the v5 datasets were trained with.  Off for every
+        #: other checkpoint: a 16-wide state against an 18-wide model is a shape error, and a
+        #: 16-wide model against an 18-wide sample is silently ignored padding.
+        self.progress_channels = progress_channels
         self.chunk = chunk
         self.execute = execute
         self.task_prompt = task_prompt
@@ -280,6 +284,51 @@ class BridgeChunkPolicy:
         self._episode += 1
         self._queue.clear()
         self._step = 0
+        self._deliveries = 0
+        self._inside = False
+        self._inside_frames = 0
+        self._gap = 10 ** 9
+
+    def _state_with_progress(self, observation: dict) -> np.ndarray:
+        """The 16 joint entries, plus the two progress channels the checkpoint was trained on.
+
+        The training data got these from the effector's own trajectory (see
+        `add_progress_channels.py`), and the same rule is applied here rather than reading the
+        environment's cookie count: a checkpoint trained on one definition and evaluated on
+        another is being fed a channel it has never seen.  Deriving it from `observation`
+        also keeps the policy free of privileged state.
+
+        The count is right-continuous to match training: entering the box increments before
+        the sample is taken.
+        """
+
+        state = np.asarray(observation[STATE_KEY], dtype=np.float32).reshape(-1)
+        if not self.progress_channels:
+            return state
+        eef = np.asarray(observation.get("observation.eef_pose", np.zeros(14)), dtype=float)
+        inside = bool(eef.shape[0] >= 2 and eef[1] < 0.18)
+        if inside:
+            self._inside_frames += 1
+            if not self._inside:
+                if self._gap >= 20:
+                    self._deliveries += 1
+                self._inside = True
+            self._gap = 0
+        else:
+            if self._inside and self._inside_frames < 5:
+                # A dip shorter than five frames is not a delivery; undo the increment so a
+                # brief crossing does not count, which is the rule the training data used.
+                self._deliveries -= 1
+            self._inside = False
+            self._inside_frames = 0
+            self._gap = min(self._gap + 1, 10 ** 9)
+        counts = float(self._deliveries)
+        cookies = min(counts * 5.0, 20.0)
+        return np.concatenate([
+            state,
+            np.array([(counts / 4.0) * 2.0 - 1.0, (cookies / 20.0) * 2.0 - 1.0],
+                     dtype=np.float32),
+        ])
 
     def act(self, observation: dict, task: str = "") -> np.ndarray:
         self._ensure_connected()
@@ -292,7 +341,7 @@ class BridgeChunkPolicy:
                 if image.shape[:2] != (224, 224):
                     image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
                 arrays[name] = image
-            arrays[STATE_KEY] = np.asarray(observation[STATE_KEY], dtype=np.float32).reshape(16)
+            arrays[STATE_KEY] = self._state_with_progress(observation)
             payload = proto.encode_request(
                 episode_id=f"mainbench-{self._episode}",
                 step=self._step,
@@ -325,7 +374,7 @@ class BridgeChunkPolicy:
 
 
 def make_bridge_policy(sock_path: str, *, chunk: int = 50, execute: int = 16,
-                       task_prompt: str | None = None):
+                       task_prompt: str | None = None, progress_channels: bool = False):
     """`module:factory` entry point for the workers of main's process pool.
 
     The pool is started with `spawn`, so this is imported by module name in each child; the
@@ -333,7 +382,8 @@ def make_bridge_policy(sock_path: str, *, chunk: int = 50, execute: int = 16,
     `BridgeChunkPolicy` cannot be sent to a worker -- it holds a socket -- which is the whole
     reason `worker_policy_spec` exists.
     """
-    return BridgeChunkPolicy(sock_path, chunk=chunk, execute=execute, task_prompt=task_prompt)
+    return BridgeChunkPolicy(sock_path, chunk=chunk, execute=execute, task_prompt=task_prompt,
+                             progress_channels=progress_channels)
 
 
 class HoldPolicy:
@@ -554,6 +604,16 @@ def main() -> int:
             "task.  Use it only to probe one specific instruction."
         ),
     )
+    parser.add_argument(
+        "--progress-channels",
+        action="store_true",
+        help=(
+            "Append the two progress entries (batches delivered, cookies placed) that the v5 "
+            "datasets were trained with.  Derived from the effector's own trajectory, the same "
+            "rule the training data used, so no privileged state is needed.  Must match the "
+            "checkpoint: 16-wide for every arm before v5, 18-wide for v5."
+        ),
+    )
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--selftest-steps", type=int, default=120)
     parser.add_argument(
@@ -651,7 +711,8 @@ def main() -> int:
         return verify_scene(bench, fingerprint)
 
     if args.diagnose:
-        policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt)
+        policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
+                                   progress_channels=args.progress_channels)
         try:
             return diagnose_motion(
                 policy,
@@ -683,13 +744,15 @@ def main() -> int:
             workers=args.workers,
             worker_policy_spec=spec,
             worker_policy_kwargs={"sock_path": args.socket, "execute": args.execute,
-                                  "task_prompt": task_prompt},
+                                  "task_prompt": task_prompt,
+                                  "progress_channels": args.progress_channels},
         )
         wall = time.monotonic() - t0
         print(f"[bench] {args.workers} workers | wall {wall / 60:.1f} min | {result}")
         policy.close()
     else:
-        policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt)
+        policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
+                                   progress_channels=args.progress_channels)
         t0 = time.monotonic()
         result = bench.evaluate(policy, num_episodes=args.episodes, seed_start=args.seed_start)
         wall = time.monotonic() - t0
