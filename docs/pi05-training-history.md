@@ -2648,9 +2648,11 @@ encoder alone at batch 6 for 3000 steps under the joint run's exact objective:
 
 **KL is not the limiter.**  Removing it entirely buys 0.005 of R^2 and quadruples the latent's
 scale -- it is doing its job (bounding the channel, which is what makes the token readable at
-inference) at essentially no cost in information.  The plateau at 3000 steps is the batch-size
-limit, not the regulariser, so the fix is not to re-tune weights: it is to let the run reach the
-samples it needs, which is what the remaining 12000 steps do.
+inference) at essentially no cost in information.  What looked like a plateau at 3000 steps is the
+batch-6 noise in the trajectory, not the regulariser (the 7500-step row below settles that), so the
+fix was not to re-tune weights: it was to let the run reach the samples it needs, which is what the
+remaining 12000 steps do.  The ablation's value is the refutation, not the diagnosis -- it cost
+twenty minutes and removed a weight-tuning branch from the plan.
 
 **The 7500-step verdict, at the same step count as the 0.011 measurement it is compared with:**
 
