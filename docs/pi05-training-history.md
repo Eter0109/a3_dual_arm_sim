@@ -2732,3 +2732,70 @@ one-batch stop (9.43) rest on behaviour that does not involve the projector.  Wh
 that the projector was never tested at all: v5's two progress scalars reached the model through a
 wider prompt and nothing else, so "the projection could not move because it was trained at 3e-06"
 (9.44) is only half the story -- it also was not there.
+
+### 9.46 What the v6 failures actually are, read off the traces (10-27)
+
+9.45 installed the launcher's modules before `from_pretrained`, which made the first honest v6
+benchmark possible.  Full results, main's instructions, `prompt_style="short"`, 8 seeds:
+
+| | 900 steps | 1000 steps (main's default) | acceptance |
+|---|---|---|---|
+| 2x5 | 5.00/10 | **4.50/10** | 3-4 |
+| 2x10 | 4.50/20 | — | 7-8 |
+
+**Adding the 100 steps changed nothing that mattered.**  Not one 2x5 failure converted: the same one
+seed completed (616 steps), the same seven ran out of budget.  Budget is therefore not the variable,
+which is worth having established rather than assumed -- the only successful seed used 809 of its 900
+steps, so "900 is tight" was a reasonable hypothesis and is now a rejected one.
+
+**The traces say the 2x5 failures are three different things, not one.**  `--diagnostic-dir` records
+the scorer's own `cookies_in_source_mask` / `cookies_in_target_mask` per step, so "moved but not
+scored" splits cleanly, and the distance from each unaccounted cookie to the effector at the last
+step says whether it is still in the jaw:
+
+| seed | in box | not in either | distance to effector | what it is |
+|---|---|---|---|---|
+| 0 | 5 | 0 | — | moved one batch, placed it, **stopped** |
+| 1 | 5 | 5 | 68-71 mm | **froze with the second batch in the jaw** |
+| 2 | 0 | 15 | 15-76 mm | **three batches in the jaw, none released** |
+| 3 | 0 | 5 | 256-280 mm | **dropped them 270 mm from the hand** |
+| 4 | 5 | 0 | — | moved one batch, placed it, **stopped** |
+| 5 | 6 | 4 | 72-73 mm | froze with the second batch in the jaw |
+| 6 | 5 | 5 | 66-68 mm | froze with the second batch in the jaw |
+| 7 | 10 | 0 | — | **completed** |
+
+The 68-72 mm cluster is the jaw: three seeds are holding a batch at the final step.  Seed 2 holds
+fifteen, which means it never released at all after the first success.  Seed 3 is the only genuine
+drop.  And two seeds (0, 4) did exactly what 9.43 described -- one batch, placed, then nothing.
+
+**"Froze" is not the policy output collapsing, and the distinction is load-bearing.**  The commanded
+actions have a standard deviation of ~1.0 rad over the last 200 steps, which looks like motion; but
+the *range* they span is 0.012-0.036 rad per joint and the effector travels **67-90 mm** in those 200
+steps, against 409-568 mm for the seeds that were still working.  The model is emitting a stable
+"hold this pose" command and the arm obeys it.  So the failure is a **decided stop**, not a policy
+that ran out of signal or a controller that stopped tracking -- and a decided stop is a behaviour
+that data can teach, whereas a collapsing policy is not.
+
+**2x10 fails differently again, and the trace rules out the obvious explanations.**  The expert
+demonstrations in the dataset are a median 1067 and at most 1095 frames, so 3200 steps is three
+times what the task needs -- this is not a budget problem, and it is not a placement problem either:
+
+| seed | in box | unaccounted | distance to effector | what it is |
+|---|---|---|---|---|
+| 0 | 5 | 0 | — | placed batch 1 at step 365, grabbed 3 more at 737-743, **put them back**, then toured the scene for 2400 steps without touching a cookie |
+| 2 | 7 | 8 | 259-308 mm | dropped 8, kept going |
+| 3 | 5 | 6 | 341-377 mm | dropped 6, kept going |
+
+Seed 0's timeline is the important one.  After returning the three cookies it picked up, the arm keeps
+moving -- about 800 mm of effector travel per 400 steps for the entire remainder -- between the source
+and the target without ever grasping again.  It is not frozen and not lost; it is **repeatedly
+approaching and not committing**.  That is a different mechanism from 2x5's decided stop, and it is
+the one the acceptance target actually needs fixed: 2x5 is at 4.50 against a 3-4 requirement, while
+2x10 is at 4.50 against 7-8.
+
+**What this changes about where to work next.**  The three 2x5 modes need three different fixes:
+"stopped after one batch" and "froze holding the second" are the same underlying question (does the
+instruction imply continuing?) but different failure points, and "dropped at 270 mm" is a separate
+grasp-robustness issue.  The 2x10 mode is not a stop at all, so more steps of the same data will not
+touch it -- it needs episodes where the approach leads to a grasp, which is what a DAgger pass on the
+2x10 seeds would supply and what another 15000 steps of the current mix would not.
