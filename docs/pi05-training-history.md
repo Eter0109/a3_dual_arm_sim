@@ -2396,3 +2396,85 @@ set, then 2x5 and 2x10 evaluations with **main's own instructions** -- no `--tas
 the question is whether this checkpoint answers what the benchmark sends.  Until that lands, the
 only defensible statements are the two rows above.
 
+### 9.43 Four arms toward one checkpoint for both benchmarks, and the one that stops after a batch (10-27)
+
+The acceptance target is one weight set that scores 3-4/10 on main's 2x5 and 7-8/20 on its 2x10.
+Four arms were trained against it.  All numbers below are on **main's own instructions** and
+`prompt_style="short"`, which is one constant sentence per task; the scores are not comparable with
+9.40-9.41, which used our training sentence (9.42).
+
+| arm | data | 2x5 | 2x10 | note |
+|---|---|---|---|---|
+| v1, 15k | mixed, 34% 2x10, plan prompts | -- | 4.50 | peak of three checkpoints |
+| v1, 22.5k | " | -- | **5.00** | zeros 1/6 -- the best 2x10 so far |
+| v1, 30k | " | 3.38 | 4.33 | more steps is worse |
+| v2, 15k | 2x10 weighted to 50% | **5.00** | 3.25 | best 2x5 so far; 4 zeros on 2x10 |
+| v4, 15k | 2x10 filtered to the n=5 plan, 52% | 3.50 | 3.75 | moved-out equals scored |
+| v5, 15k | v4 plus two progress channels | 3.88 | 3.12 | first arm to move out 15 |
+
+**The step budget is closed off.**  15k -> 4.50, 22.5k -> 5.00, 30k -> 4.33 on the same six seeds,
+so the peak sits below 20k and the earlier single-seed 9/20 at 30k was noise.  The reason more steps
+cannot help is arithmetic: a 15000-step arm at batch 6 sees 90000 of the set's 853113 frames, 10.5%,
+about 156 of 1480 episodes once.  A full epoch would be 142185 steps and 47.8 hours.  The data is
+9.5x the training budget, which is why the fix had to be composition and not collection.
+
+**What the failures look like, which is the useful part.**  v4's per-episode `cookies_in_source`
+shows the shape exactly:
+
+```
+v4 2x10  moved-out = [5, 5, 0, 0, 5, 5, 5, 5]
+v4 2x10  scored    = [5, 5, 0, 0, 5, 5, 5, 5]
+```
+
+Moved-out equals scored in every episode, so whatever it picks up it places -- no drops, no partial
+inserts -- but it moves **one batch of five** on a task that needs four.  Comparing the task pairs:
+
+| | batches needed | batches done | dropped in transit |
+|---|---|---|---|
+| 2x5 | 2 | 2 (moves 10-11) | yes, the second batch |
+| 2x10 | 4 | **1** (moves 5) | **no** |
+
+So batch picking and insertion are solved to the standard this benchmark measures, and the missing
+behaviour is "keep going until the task is done".
+
+**The progress-channel arm (v5) is a probe, not a deliverable.**  Two entries were appended to
+`observation.state` -- batches delivered / 4 and cookies placed / 20 -- derived from the effector's
+y coordinate (the two boxes are 215 mm apart; the rule labels 570 of 570 20-cookie episodes as
+exactly four deliveries, against 700/500 episodes of two/one on the 2x5 side, the latter being the
+302-frame episodes that genuinely contain one batch).  The gripper channel was rejected first and
+the rejection is measured: the jaw sits at 0.31 for most of an episode and only reaches 0.49-0.58 on
+release, so 0.62 found three deliveries of four and 0.45 found a median of six.
+
+The arm moved the number that matters: **v4 moved out 5/5/0/0/5/5/5/5, v5 moved out
+5/0/5/0/15/5/6/5.**  Fifteen Cookies is the first time any arm exceeded one batch, which is direct
+evidence that the history channel carries information the frame alone does not.  But the mean fell
+(3.75 -> 3.12) and the spread widened (zeros 2 -> 3), and one episode that moved 15 scored 0.
+
+Two reasons it cannot be shipped.  First, the channel is **privileged**: "cookies placed" is a fact
+about the world, not something the observations contain, so it is legitimate as a probe of whether
+history helps and not as an input at acceptance time.  Second, the attribution is **not clean**,
+because pi0.5 gives the state two paths and this arm moved both:
+
+* the **text path** -- the state is discretised into 256 bins and written into the prompt
+  (`Task: ..., State: 128 45 ...;Action:`), so 18 numbers appear where 16 did, which the language
+  tower has to re-adapt to;
+* the **learned projection** -- this launcher adds `Linear(32 -> 2048)` as one extra prefix token
+  (pi0.5 ships without a state projector), and the two new entries sit on input dimensions 16-17,
+  which were **identically zero in every earlier arm**.  Measured on the checkpoint, `|dW|` over
+  15000 steps is 0.00033 on those dimensions against 0.00028-0.00043 for the original sixteen and
+  exactly 0.0 for the zero-padded dimensions 18-31: the new columns did receive gradient, but from a
+  `std=0.02` random initialisation and only to 1.7% of it.  So the scalars reach the model mostly
+  through the prompt, and what v5 measured is "more numbers in the prompt" as much as "the model can
+  read progress".
+
+**Where that leaves the architecture question.**  The evidence supports the premise of a recurrent
+state and does not yet show that two scalars are enough.  What the scalars encode is *how many*
+batches landed; what the failures need is also *how well* they landed -- an episode that moves 15 and
+scores 0 is one where the count was right and the placement was not.  That is the covariate-shift
+half of the problem, and a scalar cannot express it.
+
+**Best checkpoints, by benchmark:** 2x5 `a3_multitask_v2_15000/015000` at **5.00/10** (acceptance
+needs 3-4); 2x10 `a3_multitask_15000/022500` at **5.00/20** (acceptance needs 7-8).  No single
+checkpoint is at both.
+
+
