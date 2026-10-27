@@ -2607,7 +2607,30 @@ object, different list.  Reading through `scheduler.optimizer.param_groups` is t
 follows what the trainer actually steps.  **A diagnostic that holds a reference is not a diagnostic
 of the thing; it is a diagnostic of the reference.**
 
+**The effect at the checkpoint, same data and same probe as the 7500-step measurement above:**
+
+| | 7500 steps @ 3e-06 | 1500 steps @ 1e-04 |
+|---|---|---|
+| R^2 vs progress | **+0.011** | **+0.295** |
+| corr(batches) | 0.360 | 0.551 |
+| latent per-dim std | 0.0055 | **0.0638** |
+| latent \|mu\| mean | 0.1132 | 0.0968 |
+| projection token std | 1.3261 | 2.4102 |
+| distinct predicted values | 68 | 1522 |
+
+Three things are worth reading off that table.  The latent's spread grew **11.6x** while its mean
+magnitude stayed the same, which is the signature of a representation using its dimensions rather
+than emitting a constant -- the KL term pins the mean, and what changed is what the dimensions carry.
+The projection token is now **2.41** against image tokens at ~4.2 and language at ~9.6, i.e. inside
+the range attention can see, where the broken runs had it at 0.34 and 1.33.  And 1522 distinct
+predicted values against a 2-D target means the head is reading the latent continuously rather than
+saturating near a per-batch mean.
+
+It is **not** the 0.954 that the encoder reaches when trained alone, and it should not be: standalone
+had no flow gradient competing for the same parameters and no KL pulling the latent toward zero.  The
+remaining gap between 0.295 and the standalone number is the joint-training cost, which is the thing
+this arm is actually testing.
+
 **Status.**  v6 is training from 4.05 with `A3_NEW_MODULE_LR=1e-04` and the peaks recorded before
-`build`, verified correct at steps 1/50/250/500.  The 1500-step checkpoint is checked with
-`check_history_latent.py` before any evaluation, and the arm is only worth a benchmark if R^2 clears
-0.5 there.
+`build`, verified correct at steps 1/50/250/500.  The 7500-step checkpoint is the direct comparison
+with the 0.011 above; the arm goes to a benchmark only if the curve is still climbing there.
