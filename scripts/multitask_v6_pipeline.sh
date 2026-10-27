@@ -62,6 +62,7 @@ else
     env A3_PI05_BASE="$BASE" A3_UNFREEZE_LLM_LAYERS=18 A3_UNFREEZE_VISION=1 A3_STATE_PROJECTOR=1 \
         A3_HISTORY_ENCODER=1 A3_HISTORY_STEPS=10 A3_HISTORY_PROGRESS_WEIGHT=0.1 \
         A3_HISTORY_KL_WEIGHT=0.05 A3_HISTORY_DROPOUT=0.1 \
+        A3_NEW_MODULE_LR=1e-04 \
         bash scripts/train_pi05_a3.sh \
           "$DATA" "$OUT" "$STEPS" 6 "a3_multitask_v6_${STEPS}" \
           --policy.optimizer_lr=3e-06 \

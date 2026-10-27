@@ -2478,3 +2478,87 @@ needs 3-4); 2x10 `a3_multitask_15000/022500` at **5.00/20** (acceptance needs 7-
 checkpoint is at both.
 
 
+
+### 9.44 A newly initialised layer at 3e-6 is a layer that is frozen with extra steps (10-27)
+
+v6 added a recurrent state -- a 128-wide latent of the robot's own last ten frames of `[q, q_dot,
+a_prev]`, with an auxiliary head that predicts progress and a KL term toward `N(0, I)` (the design
+note is at the top of `scripts/multitask_v6_pipeline.sh`).  The reason for the design is that the
+encoder sees **no images**: the bottleneck is the input modality, so it cannot represent "the
+Cookies look messy", only "where the arm has been and what it did", which is where task progress
+lives.
+
+At 7500 steps the check said the module had learned nothing:
+
+```
+$a3_multitask_v6_15000/007500
+MSE 0.29368   Var(target) 0.29705   R^2 +0.011
+corr(batches) 0.360   latent |mu| 0.1132   per-dim std 0.0055
+projection token std 1.3261   distinct predicted batch values: 68
+VERDICT: the latent does not carry progress
+```
+
+An R^2 of 0.011 against a two-dimensional target means the head is emitting roughly the batch mean.
+The same checkpoint's training log agreed from the other side: `progress` hovered near 0.33, which
+is the target's own mean, and `z|mu|` sat at 0.024 from step 1 to step 7500 without moving.
+
+**The input was fine, and so was the initialisation.**  Reading the actual windows out of the
+dataset, `std = 0.8222` over all 480 channels, no dead columns.  Training the same encoder *alone*
+on the same data reached `R^2 = +0.967` from a `std=0.02` init and `+0.974` from kaiming in 500
+steps, so neither the architecture nor the init explains it.
+
+**The learning rate did.**  Three runs of the standalone recipe, identical except for the step size,
+each 1500 steps at batch 6:
+
+| encoder lr | R^2 vs progress | latent per-dim std |
+|---|---|---|
+| 3e-06 | **-0.010** | 0.00548 |
+| 1e-04 | **+0.954** | 0.0783 |
+| 1e-03 | +0.940 | 0.0400 |
+
+The 3e-06 row reproduces the real run's numbers almost digit for digit (0.011 / 0.0055).  That is
+not a coincidence to explain away: `make_optimizer_and_scheduler` feeds `policy.parameters()` to a
+single AdamW at `--policy.optimizer_lr`, and that flag is **3e-06**, because it is the right step
+size for nudging a fine-tuned 3B model.  The new module -- 630018 parameters over 14 tensors -- was
+handed the same 3e-06.  Fresh weights have to travel much further than fine-tuned ones, and at 3e-06
+they do not travel at all.
+
+**This is not new, it is 9.43 in hindsight.**  The v5 arm added two progress entries and measured
+`|dW| = 0.00033` against a `std = 0.02` initialisation after 15000 steps -- **1.7% of the initial
+weight scale**.  That was read at the time as "the new columns received gradient but weakly, so the
+scalars reach the model mostly through the prompt".  The correct reading is that the projection was
+also being trained at 3e-06 and could not have moved.  **Every arm in this line -- v1's plan tokens,
+v4's simplified prompts, v5's scalars, v6's latent -- added a new module and trained it at the
+fine-tuning learning rate**, so each of them measured "a frozen random projection plus whatever the
+prompt path could carry".  The arms that improved did so through the text path.
+
+**The fix** is a separate parameter group, in `train_pi05_launcher.py`:
+
+* `_patch_optimizer_param_groups` splits `policy.named_parameters()` on `.history_encoder.` and
+  `.history_proj.`, builds `cfg.optimizer` on the inherited parameters so `param_groups[0]["lr"]`
+  keeps meaning what the trainer logs and the scheduler steps, then **appends** the fresh group at
+  `A3_NEW_MODULE_LR`;
+* because `LRScheduler.build` takes `param_groups[0]["lr"]` as the peak and scales every group by
+  the same factor, `base_lrs` is restated per group after construction -- otherwise the new group is
+  dragged back onto the fine-tuning schedule by the first step;
+* it patches both `lerobot.optim.factory.make_optimizer_and_scheduler` and the module attribute in
+  `lerobot.scripts.lerobot_train`, because the trainer did `from ... import` and rebinding only the
+  first leaves the second pointing at the original.
+
+Confirmed at startup, which is the line to look for before trusting any new-module arm:
+
+```
+new-module lr       : 1e-04 on 630018 params (14 tensors: history encoder + projection);
+                      3090175760 on the fine-tuning schedule
+```
+
+**The rule.**  A module created by the launcher is a module being trained from scratch, and its
+learning rate is a property of *that module*, not of the run.  3e-06 is not a small learning rate for
+a 3B fine-tune, it is a small learning rate for a 3B fine-tune; applied to a random layer it is a
+freeze with extra steps, and the failure is silent -- no NaN, no divergence, a loss that looks
+plausible because the flow term is doing all the work.  Two diagnostics catch it cheaply: the
+auxiliary head's R^2 against its own label (`scripts/check_history_latent.py`, target > 0.5), and
+`|dW|` on the new module's tensors compared with its initialisation scale.
+
+**Status.**  v6 was restarted from 4.05 with `A3_NEW_MODULE_LR=1e-04`; the 7500-step check re-runs
+before any evaluation, and the arm is only worth a benchmark if R^2 clears 0.5 there.

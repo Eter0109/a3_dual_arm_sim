@@ -515,6 +515,94 @@ def _patch_partial_unfreeze() -> None:
 _ENV_FUSED_ADAMW = "A3_FUSED_ADAMW"
 
 
+#: Learning rate for parameters that were **created by this launcher** rather than loaded
+#: from the checkpoint.  A fresh random module and a fine-tuned 3B model cannot share one
+#: learning rate, and this is the reason several arms looked like "the new channel does
+#: nothing".
+#:
+#: Measured on the history encoder with its own data: trained alone at 3e-6 it reaches
+#: R^2 = -0.010 against the progress label, with the latent's per-dimension std stuck at
+#: 0.0055; at 1e-4 the same code reaches R^2 = 0.954.  The real v6 run reproduced the first
+#: pair almost exactly (R^2 = 0.011, std = 0.0055) after 7500 steps.  `state_proj` shows the
+#: same signature in hindsight: 1.7% of its initial weight scale moved in 15000 steps
+#: (9.43).  A newly initialised layer at 3e-6 is a layer that is frozen with extra steps.
+_NEW_MODULE_LR = "A3_NEW_MODULE_LR"
+
+
+def _new_module_lr() -> float:
+    """Learning rate for parameters this launcher adds; 0 (off) unless asked for."""
+
+    raw = os.environ.get(_NEW_MODULE_LR, "").strip()
+    return float(raw) if raw else 0.0
+
+
+def _patch_optimizer_param_groups() -> None:
+    """Give modules created here their own learning rate.
+
+    `make_optimizer_and_scheduler` feeds `policy.parameters()` to one AdamW at the
+    fine-tuning learning rate.  That is right for weights that came out of the checkpoint --
+    3B parameters being nudged -- and wrong for a few hundred thousand freshly initialised
+    ones, which have to travel much further before they carry anything.
+
+    Splitting the groups leaves the checkpointed parameters on exactly the schedule they had,
+    so everything that was already trained keeps its trajectory.  The new group is *appended*
+    so `param_groups[0]` keeps meaning what the trainer logs and the scheduler steps.
+    """
+
+    lr = _new_module_lr()
+    if lr <= 0.0:
+        print("new-module lr       : off (every parameter on the fine-tuning schedule)",
+              flush=True)
+        return
+
+    from lerobot.optim import factory as optim_factory
+
+    original = optim_factory.make_optimizer_and_scheduler
+
+    def make_optimizer_and_scheduler(cfg, policy):
+        # Named, not positional: the policy wraps its modules in a `model` attribute, and a
+        # name is the only way to tell "came from the checkpoint" from "built by the
+        # `_attach_*` functions in this process".
+        fresh, inherited = [], []
+        for name, parameter in policy.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if ".history_encoder." in name or ".history_proj." in name:
+                fresh.append(parameter)
+            else:
+                inherited.append(parameter)
+        if not fresh:
+            return original(cfg, policy)
+        if cfg.optimizer is None:
+            raise ValueError("optimizer config is required")
+        optimizer = cfg.optimizer.build(inherited)
+        optimizer.add_param_group({"params": fresh, "lr": lr})
+        lr_scheduler = cfg.scheduler.build(optimizer, cfg.steps) if cfg.scheduler else None
+        if lr_scheduler is not None:
+            # `LRScheduler.build` takes `param_groups[0]["lr"]` as the peak and scales every
+            # group by the same factor, which would drag the fresh group back onto the
+            # fine-tuning schedule.  Restating each group's base after construction is what
+            # keeps the ratio the caller asked for.
+            lr_scheduler.base_lrs = [group["lr"] for group in optimizer.param_groups]
+        print(
+            f"new-module lr       : {lr:.0e} on {sum(p.numel() for p in fresh)} params "
+            f"({len(fresh)} tensors: history encoder + projection); "
+            f"{sum(p.numel() for p in inherited)} on the fine-tuning schedule",
+            flush=True,
+        )
+        return optimizer, lr_scheduler
+
+    optim_factory.make_optimizer_and_scheduler = make_optimizer_and_scheduler
+    # `lerobot_train` did `from ... import make_optimizer_and_scheduler`, so the module
+    # attribute is not the only binding that has to change.
+    try:
+        from lerobot.scripts import lerobot_train
+
+        lerobot_train.make_optimizer_and_scheduler = make_optimizer_and_scheduler
+    except Exception:  # noqa: BLE001 - the import alias is the only reason to touch it
+        pass
+
+
 def _patch_fused_adamw() -> None:
     """Force AdamW onto its fused kernel, which is the only variant that fits.
 
@@ -599,6 +687,7 @@ def main() -> int:
     _register_legacy_step_names()
     _patch_state_projector()
     _patch_history_encoder()
+    _patch_optimizer_param_groups()
     _patch_partial_unfreeze()
     _patch_fused_adamw()
     # Printed here, once, rather than from `_apply_unfreeze`, which the training loop calls
