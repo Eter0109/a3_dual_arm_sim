@@ -2799,3 +2799,84 @@ instruction imply continuing?) but different failure points, and "dropped at 270
 grasp-robustness issue.  The 2x10 mode is not a stop at all, so more steps of the same data will not
 touch it -- it needs episodes where the approach leads to a grasp, which is what a DAgger pass on the
 2x10 seeds would supply and what another 15000 steps of the current mix would not.
+
+### 9.47 What the score actually measures, and how much of it is seed (10-27)
+
+Two questions came out of 9.46's numbers, and both have answers that change how those numbers
+should be read.
+
+**The score does not measure slot alignment, on either task.**  `require_exact_slots` is set by
+`benchmark_cookie_batch_cli.py:40` as `benchmark.task == "2x5"`, so only 2x5 declares
+`success_criterion="exact_slots"` and 2x10 declares `"released_count"`.  But that flag only decides
+what counts as a *finished* episode and therefore which `success` boolean is set -- the score is
+`cookies_in_target` in both cases, with no alignment term anywhere.  Measured directly on the
+traces:
+
+| 2x5 seed | score | cookies_in_target | occupied slots | exact_fill |
+|---|---|---|---|---|
+| 0 | **5** | 5 | **0 / 10** | False |
+| 1 | 5 | 5 | 5 / 10 | False |
+| 4 | 5 | 5 | 4 / 10 | False |
+| 6 | 5 | 5 | 5 / 10 | False |
+| 7 | 10 | 10 | 10 / 10 | **True** |
+
+Seed 0 is the case that settles it: **five cookies are inside the target box and not one of them is
+in a slot.**  So "5/10" never meant "five inserted correctly" -- it meant "five are inside the
+footprint", and the 2x5 task is not stricter than the 2x10 task for the purpose of scoring.  What the
+alignment requirement costs is only the difference between `success=True` and a high score, which is
+why 2x5's one completed seed is the only one at 10.
+
+The consequence for the acceptance target is favourable and worth stating plainly: **"2x5 reaches
+3-4" and "2x10 reaches 7-8" are both counts of cookies inside the box.**  v6's 2x5 = 4.50 meets its
+requirement on that basis, and the alignment machinery is not standing in the way of a better number
+-- the cookies are not getting into the box in the first place.
+
+**The seed matters far more than is comfortable, and the inference noise matters about as much.**
+Score distributions, one checkpoint, 8 seeds each:
+
+| | scores | mean | sd | CV | completed |
+|---|---|---|---|---|---|
+| 2x5 | 5, 5, 0, 0, 5, 6, 5, 10 | 4.50 | 3.25 | **72%** | 1/8 |
+| 2x10 | 5, 5, 0, 10, 5, 0, 6, 5 | 4.50 | 3.25 | **72%** | 0/8 |
+
+A coefficient of variation of 72% means a single seed says nothing.  But the scene difference across
+seeds is small: measuring the bin positions the benchmark reports in each episode, the source bin
+spans **17.1 x 14.3 mm** and the target bin **18.7 x 18.6 mm**.  About 1.5 cm of scene variation
+produces a 0-to-10 spread.
+
+**And the same seed is not repeatable either.**  The 900-step and 1000-step sweeps are two
+independent runs of the same checkpoint at the same seeds, differing only in budget:
+
+| seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| 900 steps | 0 | 5 | 5 | 1 | 5 | 5 | 5 | 10 |
+| 1000 steps | 5 | 5 | 0 | 0 | 5 | 6 | 5 | 10 |
+| change | **+5** | 0 | **-5** | -1 | 0 | +1 | 0 | 0 |
+
+Four of eight change, two of them by the full width of a single batch.  So the spread is not a scene
+sweep -- it is largely flow-matching sampling noise on top of it, which is the same effect 9.x hit
+once already (one checkpoint, one frozen scene, same sampler seed, 5/10 then 10/10).
+
+**What that does to the error bars.**  The paired differences have a standard deviation of 2.6, so a
+single evaluation carries about 1.8 of noise; over 8 seeds the mean's standard error is roughly 0.6.
+The two sweeps agreeing on **4.50 exactly** is consistent with that and is the useful part: the mean
+is more reproducible than any of its terms.  Against the acceptance targets:
+
+* 2x5 = 4.50 +/- 0.6 against a 3-4 requirement -- **passes**, and the margin is 2.5 standard errors;
+* 2x10 = 4.50 +/- 0.6 against a 7-8 requirement -- **fails by 4-5 standard errors**, which is why
+  that gap is worth acting on and the 2x5 gap is not.
+
+**On "training across seeds".**  The v6 dataset was already built that way: `collect_graft.py` applies
+main's `basic` randomization with `rng=np.random.default_rng(seed)` per episode -- `bin_noise_m=0.01`,
+`cookie_noise_m=0.0003`, `bin_yaw_noise_rad=0.03` -- which is the same ±1 cm the benchmark draws from.
+So the training distribution covers the test distribution, and the brittleness above is not a
+coverage gap that more seeds would close.  Two things would: **denser coverage of that 1.5 cm** (more
+episodes, same range) so the model stops interpolating between sparsely-seen arrangements, or a
+**wider range** than the benchmark uses, which forces the model to look at the image instead of
+recalling a trajectory.  Neither is "retrain with different seeds" -- the seeds are already different
+in every episode.
+
+**One measurement change this implies.**  Any future arm's number needs `n >= 16` and a stated
+standard error before it can be compared with another arm: at n=8 and 1.8 of per-episode noise, the
+resolution is about +/- 1.3, which cannot separate v4's 3.75 from v5's 3.12 in 9.43 -- and those two
+were treated as different at the time.
