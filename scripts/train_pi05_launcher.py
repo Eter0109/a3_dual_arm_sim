@@ -38,6 +38,12 @@ import math
 import os
 import sys
 
+# Loaded next to this file rather than from the installed package: it is part of this
+# launcher's contract, not of the simulator.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import history_encoder as history  # noqa: E402
+
 
 def _register_legacy_step_names() -> None:
     """Teach this lerobot the step name the checkpoint was saved with."""
@@ -348,6 +354,134 @@ def _patch_state_projector() -> None:
     M.PI05Policy.predict_action_chunk = predict_action_chunk
 
 
+def _patch_history_encoder() -> None:
+    """Give the model a latent of its own recent trajectory, and teach it task progress.
+
+    See `history_encoder.py` for why the encoder is blind to images, why the extra token
+    goes in the prefix, and why no DAgger pass is needed.  What lives here is only the
+    wiring: build the module before the optimizer is constructed, append its token to the
+    prefix, and add the two auxiliary terms to the returned loss.
+
+    The auxiliary loss is added to the returned scalar rather than to a hook, because
+    `PI05Policy.forward` returns exactly the tensor the trainer backpropagates.  Keys are
+    added to its `loss_dict` so the two terms stay visible in the log; a run whose
+    progress loss never falls is a run whose latent is not carrying progress, and that has
+    to be readable without re-running it.
+    """
+
+    if not history.enabled():
+        print("history encoder    : off", flush=True)
+        return
+
+    import torch
+    import torch.nn.functional as F
+    from lerobot.policies.pi05 import modeling_pi05 as M
+
+    s = history.settings()
+    original_init = M.PI05Pytorch.__init__
+    original_embed_prefix = M.PI05Pytorch.embed_prefix
+    original_policy_forward = M.PI05Policy.forward
+    original_policy_chunk = M.PI05Policy.predict_action_chunk
+
+    def __init__(self, config, *args, **kwargs):
+        original_init(self, config, *args, **kwargs)
+        if getattr(self, "history_encoder", None) is not None:
+            return
+        hidden = (
+            self.paligemma_with_expert.paligemma.model.multi_modal_projector.linear.out_features
+        )
+        self.history_encoder = history.build(self.config, hidden)
+        self.history_proj = history.project(torch.zeros(s["width"]), hidden)
+        # Consumed by the next `embed_prefix` and cleared, so a second call inside one
+        # forward cannot append two tokens.
+        self._a3_history = None
+        self._a3_history_latent = None
+        for parameter in list(self.history_encoder.parameters()) + list(
+            self.history_proj.parameters()
+        ):
+            parameter.requires_grad = True
+
+    def embed_prefix(self, images, img_masks, tokens, masks):
+        embs, pad_masks, att_masks = original_embed_prefix(self, images, img_masks, tokens, masks)
+        window = getattr(self, "_a3_history", None)
+        if window is None:
+            return embs, pad_masks, att_masks
+        self._a3_history = None
+
+        # Sampling only in training: at inference the mean keeps the rollout reproducible,
+        # and the bridge is already stochastic through the flow-matching noise (measured
+        # 0.086 rad between two calls on one observation), so a second source of randomness
+        # would make one seed unrepeatable.
+        mu, logvar = self.history_encoder(window.to(embs.dtype), dropout=s["dropout"])
+        latent = self.history_encoder.latent(mu, logvar, sample=bool(self.training and s["sample"]))
+        self._a3_history_latent = (mu, logvar, latent)
+
+        token = self.history_proj(latent)[:, None, :] * math.sqrt(embs.shape[-1])
+        batch = embs.shape[0]
+        embs = torch.cat([embs, token], dim=1)
+        pad_masks = torch.cat(
+            [pad_masks, torch.ones(batch, 1, dtype=pad_masks.dtype, device=pad_masks.device)],
+            dim=1,
+        )
+        att_masks = torch.cat(
+            [att_masks, torch.zeros(batch, 1, dtype=att_masks.dtype, device=att_masks.device)],
+            dim=1,
+        )
+        return embs, pad_masks, att_masks
+
+    def _stash(policy, batch):
+        window = batch.get("observation.history")
+        if window is not None:
+            policy.model._a3_history = window
+
+    def policy_forward(self, batch, reduction="mean"):
+        _stash(self, batch)
+        loss, loss_dict = original_policy_forward(self, batch, reduction=reduction)
+        cached = getattr(self.model, "_a3_history_latent", None)
+        target = batch.get("observation.progress")
+        if cached is None or target is None or reduction != "mean":
+            return loss, loss_dict
+        mu, logvar, latent = cached
+        progress_prediction = self.model.history_encoder.progress(latent)
+        progress_loss = F.mse_loss(progress_prediction.float(), target.to(latent.device).float())
+        # KL to N(0, I): the capacity constraint.  Without it the latent is free to encode
+        # whatever lowers the flow loss, which includes the visual state of the pile that
+        # the encoder cannot even see but can still infer from the trajectory.
+        kl = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
+        total = loss + s["progress_weight"] * progress_loss + s["kl_weight"] * kl
+        loss_dict["loss_flow"] = loss_dict.get("loss")
+        loss_dict["loss_history_progress"] = float(progress_loss.detach())
+        loss_dict["loss_history_kl"] = float(kl.detach())
+        loss_dict["loss"] = float(total.detach())
+
+        # Printed rather than left to the trainer's log, which only emits `loss`: the two
+        # auxiliary terms are the whole question this run asks, and a run whose progress term
+        # never falls is a latent that is not carrying progress.  Sparse on purpose -- every
+        # step would bury the training line.
+        self.model._a3_history_steps = getattr(self.model, "_a3_history_steps", 0) + 1
+        if self.model._a3_history_steps in (1, 50) or self.model._a3_history_steps % 500 == 0:
+            print(
+                f"[history] step {self.model._a3_history_steps:6d} "
+                f"flow={float(loss.detach()):.5f} "
+                f"progress={float(progress_loss.detach()):.5f} "
+                f"kl={float(kl.detach()):.5f} "
+                f"| z|mu|={float(mu.detach().abs().mean()):.4f} "
+                f"pred={progress_prediction.detach().mean(dim=0).cpu().numpy().round(3).tolist()} "
+                f"target={target.detach().mean(dim=0).cpu().numpy().round(3).tolist()}",
+                flush=True,
+            )
+        return total, loss_dict
+
+    def predict_action_chunk(self, batch, **kwargs):
+        _stash(self, batch)
+        return original_policy_chunk(self, batch, **kwargs)
+
+    M.PI05Pytorch.__init__ = __init__
+    M.PI05Pytorch.embed_prefix = embed_prefix
+    M.PI05Policy.forward = policy_forward
+    M.PI05Policy.predict_action_chunk = predict_action_chunk
+
+
 def _patch_partial_unfreeze() -> None:
     """Apply the un-freeze after every place lerobot re-applies the freeze.
 
@@ -464,6 +598,7 @@ def _patch_drop_n_last_frames() -> int:
 def main() -> int:
     _register_legacy_step_names()
     _patch_state_projector()
+    _patch_history_encoder()
     _patch_partial_unfreeze()
     _patch_fused_adamw()
     # Printed here, once, rather than from `_apply_unfreeze`, which the training loop calls
@@ -475,6 +610,8 @@ def main() -> int:
            if _state_projector_enabled() else "off"),
         flush=True,
     )
+    if history.enabled():
+        print(history.summary(), flush=True)
     dropped = _patch_drop_n_last_frames()
     if dropped:
         # Printed because it is otherwise invisible: the effect is a smaller training set,

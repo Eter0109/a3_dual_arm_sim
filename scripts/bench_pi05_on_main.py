@@ -233,12 +233,20 @@ class BridgeChunkPolicy:
     name = "pi05_b2_20k"
 
     def __init__(self, sock_path: str, *, chunk: int = 50, execute: int = 16,
-                 task_prompt: str | None = None, progress_channels: bool = False):
+                 task_prompt: str | None = None, progress_channels: bool = False,
+                 history_window: bool = False):
         self.action_mode = "joint_position"
         #: Append the two progress entries the v5 datasets were trained with.  Off for every
         #: other checkpoint: a 16-wide state against an 18-wide model is a shape error, and a
         #: 16-wide model against an 18-wide sample is silently ignored padding.
         self.progress_channels = progress_channels
+        #: Send the 480-wide proprioceptive history window the v6 checkpoints were trained
+        #: with.  Accumulated here rather than read from the environment: the window is the
+        #: robot's own past trajectory, and the driver sees every step even though it only
+        #: forwards one in `execute`.
+        self.history_window = history_window
+        self._history: list[np.ndarray] = []
+        self._last_action: np.ndarray | None = None
         self.chunk = chunk
         self.execute = execute
         self.task_prompt = task_prompt
@@ -288,6 +296,37 @@ class BridgeChunkPolicy:
         self._inside = False
         self._inside_frames = 0
         self._gap = 10 ** 9
+        self._history = []
+        self._last_action = None
+
+    def _history_vector(self, observation: dict) -> np.ndarray:
+        """The last 10 frames of ``[q, q_dot, a_previous]``, oldest first.
+
+        The layout and the padding are the training data's (`add_history_window.py`): ten
+        frames of 48, leading frames repeated from the first rather than zero-filled, and
+        ``a_previous`` being the action the policy actually emitted one step earlier.  A
+        window built any other way is a channel the checkpoint has never seen, which is the
+        same trap the progress channels had.
+
+        This runs every step, not every `execute`: the policy is only asked for a chunk
+        once per `execute` steps, but the window has to advance with the environment or the
+        encoder would see a trajectory sampled at a different rate than in training.
+        """
+
+        state = np.asarray(observation[STATE_KEY], dtype=np.float32).reshape(-1)[:16]
+        velocity = np.asarray(observation.get("observation.velocity", np.zeros(16)),
+                              dtype=np.float32).reshape(-1)[:16]
+        previous = (self._last_action if self._last_action is not None
+                    else np.zeros(16, dtype=np.float32))
+        frame = np.concatenate([state, velocity,
+                                np.asarray(previous, dtype=np.float32).reshape(-1)[:16]])
+        self._history.append(frame.astype(np.float32))
+        if len(self._history) > 10:
+            del self._history[0]
+        frames = list(self._history)
+        while len(frames) < 10:
+            frames.insert(0, frames[0])
+        return np.concatenate(frames)
 
     def _state_with_progress(self, observation: dict) -> np.ndarray:
         """The 16 joint entries, plus the two progress channels the checkpoint was trained on.
@@ -342,6 +381,8 @@ class BridgeChunkPolicy:
                     image = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
                 arrays[name] = image
             arrays[STATE_KEY] = self._state_with_progress(observation)
+            if self.history_window:
+                arrays["history"] = self._history_vector(observation)
             payload = proto.encode_request(
                 episode_id=f"mainbench-{self._episode}",
                 step=self._step,
@@ -363,7 +404,9 @@ class BridgeChunkPolicy:
             # checkpoint is chunk 50 / execute 16 / dt 0.05, and control_hz 20 matches.
             self._queue = list(actions[: self.execute])
         self._step += 1
-        return self._queue.pop(0)
+        action = self._queue.pop(0)
+        self._last_action = np.asarray(action, dtype=np.float32).copy()
+        return action
 
     def close(self) -> None:
         if self.sock is None:  # never connected: the parent's policy is only a name holder
@@ -614,6 +657,16 @@ def main() -> int:
             "checkpoint: 16-wide for every arm before v5, 18-wide for v5."
         ),
     )
+    parser.add_argument(
+        "--history-window",
+        action="store_true",
+        help=(
+            "Send the 480-wide proprioceptive history window that the v6 checkpoints were "
+            "trained with: ten frames of [q, q_dot, previous action].  Must match the "
+            "checkpoint -- every arm before v6 has no history encoder and ignores the key, "
+            "but the bridge would still be sending it, so pair this flag with the weights."
+        ),
+    )
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--selftest-steps", type=int, default=120)
     parser.add_argument(
@@ -712,7 +765,8 @@ def main() -> int:
 
     if args.diagnose:
         policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
-                                   progress_channels=args.progress_channels)
+                                   progress_channels=args.progress_channels,
+                                   history_window=args.history_window)
         try:
             return diagnose_motion(
                 policy,
@@ -745,14 +799,16 @@ def main() -> int:
             worker_policy_spec=spec,
             worker_policy_kwargs={"sock_path": args.socket, "execute": args.execute,
                                   "task_prompt": task_prompt,
-                                  "progress_channels": args.progress_channels},
+                                  "progress_channels": args.progress_channels,
+                                  "history_window": args.history_window},
         )
         wall = time.monotonic() - t0
         print(f"[bench] {args.workers} workers | wall {wall / 60:.1f} min | {result}")
         policy.close()
     else:
         policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
-                                   progress_channels=args.progress_channels)
+                                   progress_channels=args.progress_channels,
+                                   history_window=args.history_window)
         t0 = time.monotonic()
         result = bench.evaluate(policy, num_episodes=args.episodes, seed_start=args.seed_start)
         wall = time.monotonic() - t0
