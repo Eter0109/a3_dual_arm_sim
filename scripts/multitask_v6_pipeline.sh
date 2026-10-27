@@ -58,6 +58,12 @@ else
     say "1/3 train: ${STEPS} steps from 4.05, history encoder on"
     pkill -f a3_bridge_server.py 2>/dev/null
     pkill -f train_pi05_launcher 2>/dev/null
+    pkill -f "prune_checkpoints.py $OUT" 2>/dev/null
+    # 21 GB per checkpoint and no `save_total_limit` in this lerobot: at a 1500-step
+    # interval the run wants 210 GB out of a ~130 GB gap, so a watcher keeps the earliest
+    # checkpoint (the anchor the auxiliary-loss curve starts from) and the newest two.
+    setsid nohup "$PY" scripts/prune_checkpoints.py "$OUT" \
+        > /root/autodl-tmp/logs/prune_$(basename "$OUT").log 2>&1 < /dev/null &
     sleep 8
     env A3_PI05_BASE="$BASE" A3_UNFREEZE_LLM_LAYERS=18 A3_UNFREEZE_VISION=1 A3_STATE_PROJECTOR=1 \
         A3_HISTORY_ENCODER=1 A3_HISTORY_STEPS=10 A3_HISTORY_PROGRESS_WEIGHT=0.1 \
