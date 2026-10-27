@@ -2652,8 +2652,26 @@ inference) at essentially no cost in information.  The plateau at 3000 steps is 
 limit, not the regulariser, so the fix is not to re-tune weights: it is to let the run reach the
 samples it needs, which is what the remaining 12000 steps do.
 
-**Status.**  v6 is training from 4.05 with `A3_NEW_MODULE_LR=1e-04` and the peaks recorded before
-`build`, verified correct at steps 1/50/250/500.  R^2 goes 0.011 (7500 steps, broken lr) -> 0.295
-(1500) -> 0.310 (3000) and is still climbing against a same-condition ceiling of 0.44 at that step
-count; 7500 is the direct comparison with the 0.011 and the point at which the arm either earns a
-benchmark or does not.
+**The 7500-step verdict, at the same step count as the 0.011 measurement it is compared with:**
+
+| | 7500 @ 3e-06 | 1500 @ 1e-04 | 3000 | **7500** |
+|---|---|---|---|---|
+| R^2 vs progress | +0.011 | +0.295 | +0.310 | **+0.573** |
+| corr(batches) | 0.360 | 0.551 | 0.573 | **0.757** |
+| latent per-dim std | 0.0055 | 0.0638 | 0.0489 | **0.0759** |
+| projection token std | 1.3261 | 2.4102 | 2.3778 | **3.9531** |
+
+The curve was not plateauing after all.  1500 -> 3000 moved only 0.015, which is what prompted the
+KL ablation above, but 3000 -> 7500 moved **0.263**, and the latent's spread recovered from the
+dip (0.0489 -> 0.0759) instead of being crushed.  The lesson is that a single 1500-step interval is
+not enough evidence to call a plateau: at batch 6 the R^2 trajectory is dominated by which batches
+happened to be seen, and the probe reads the training set.
+
+The projection token at **3.95** is the number to watch when reading the benchmark numbers that
+come next.  Image tokens enter the prefix at ~4.2 and language at ~9.6, so the history token is now
+a first-class citizen of the sequence rather than a faint one -- compare 0.34 in the first broken
+run and 1.33 in the second, where attention had the least possible reason to use it.
+
+**Status.**  v6 reached R^2 = +0.573 at 7500 steps, past the 0.5 bar that makes a history channel
+worth having, so it earns a 2x5/2x10 benchmark.  Training continues to 15000; the benchmark runs on
+the final checkpoint, and 7500 is kept as the mid-run reference point.
