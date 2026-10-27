@@ -383,6 +383,13 @@ def _patch_history_encoder() -> None:
     original_policy_forward = M.PI05Policy.forward
     original_policy_chunk = M.PI05Policy.predict_action_chunk
 
+    # Identities of every encoder this process has built.  More than one means a model was
+    # constructed after the optimizer was, and the optimizer is stepping the first one while
+    # the second one -- freshly initialised, and the one actually in the forward pass -- never
+    # moves.  That is indistinguishable from "the module learns slowly" unless the ids are
+    # printed, which is why they are.
+    built: list[int] = []
+
     def __init__(self, config, *args, **kwargs):
         original_init(self, config, *args, **kwargs)
         if getattr(self, "history_encoder", None) is not None:
@@ -419,6 +426,12 @@ def _patch_history_encoder() -> None:
             (f"proj.{n}", p) for n, p in self.history_proj.named_parameters()
         ]:
             parameter.register_hook(record(name))
+        built.append(id(self.history_encoder))
+        print(
+            f"[history] built encoder #{len(built)} id={id(self.history_encoder)} "
+            f"training={self.training}",
+            flush=True,
+        )
 
     def embed_prefix(self, images, img_masks, tokens, masks):
         embs, pad_masks, att_masks = original_embed_prefix(self, images, img_masks, tokens, masks)
@@ -487,16 +500,42 @@ def _patch_history_encoder() -> None:
             # the loss keeps looking plausible, and no amount of waiting fixes it.
             grad_norm = sum(v * v for v in self.model._a3_grad_norms.values()) ** 0.5
             seen = len(self.model._a3_grad_norms)
+            # Split by module: the projection into the 2048-wide prefix is 262k parameters and
+            # the recurrent core is 368k, so one total says nothing about where the gradient
+            # went -- and "the token is learning, the encoder is not" and "neither is" need
+            # different fixes.
+            encoder_grad = sum(
+                v * v for k, v in self.model._a3_grad_norms.items() if not k.startswith("proj.")
+            ) ** 0.5
+            proj_grad = sum(
+                v * v for k, v in self.model._a3_grad_norms.items() if k.startswith("proj.")
+            ) ** 0.5
+            head_grad = self.model._a3_grad_norms.get("progress.weight", float("nan"))
+            # Read the learning rates from the *scheduler's* optimiser, not from a list
+            # captured in the factory.  `accelerator.prepare` replaces
+            # `optimizer.param_groups` with a new list, so a reference taken before that
+            # point keeps reporting the values from `_initial_step` forever -- which looks
+            # exactly like a scheduler that never advances, and cost a day of chasing a
+            # learning rate that had in fact been set correctly all along.  The staleness
+            # was verified with `is`: same optimiser object, different list.
+            sched = getattr(self, "_a3_scheduler", None)
+            live_groups = getattr(getattr(sched, "optimizer", None), "param_groups", None) or []
+            lrs = [f"{g['lr']:.1e}" for g in live_groups]
+            probe = self.model.history_encoder.to_mu.weight
+            in_opt = any(p is probe for g in live_groups[-1:] for p in g["params"])
+            sched_info = f"{type(sched).__name__}@{getattr(sched, 'last_epoch', '?')}"
+            weight_fingerprint = float(self.model.history_encoder.gru.to_gates.weight.abs().mean())
             print(
                 f"[history] step {self.model._a3_history_steps:6d} "
                 f"flow={float(loss.detach()):.5f} "
                 f"progress={float(progress_loss.detach()):.5f} "
                 f"kl={float(kl.detach()):.5f} "
-                f"| gn={grad_norm:.2e} ({seen}/14 tensors) "
-                f"z|mu|={float(mu.detach().abs().mean()):.4f} "
+                f"| gn enc={encoder_grad:.2e} proj={proj_grad:.2e} head={head_grad:.2e} "
+                f"({seen}/14) in_opt={int(in_opt)} lrs={lrs} sched={sched_info} "
+                f"w|to_gates|={weight_fingerprint:.5f} "
+                f"pbias={float(self.model.history_encoder.progress.bias.detach().mean()):+.2e} "
                 f"mu_std={float(mu.detach().std()):.4f} "
-                f"pred={[round(float(v), 4) for v in progress_prediction.detach().mean(dim=0)]} "
-                f"target={[round(float(v), 3) for v in target.detach().mean(dim=0)]}",
+                f"pred={[round(float(v), 4) for v in progress_prediction.detach().mean(dim=0)]}",
                 flush=True,
             )
         return total, loss_dict
@@ -606,17 +645,37 @@ def _patch_optimizer_param_groups() -> None:
             raise ValueError("optimizer config is required")
         optimizer = cfg.optimizer.build(inherited)
         optimizer.add_param_group({"params": fresh, "lr": lr})
+        # Recorded **before** the scheduler is built.  `LRScheduler.__init__` takes an initial
+        # step, so by the time `build` returns, `param_groups[*]["lr"]` already holds
+        # `peak / (warmup + 1)` -- reading it then and calling that "the peak" silently
+        # divides every group's learning rate by the warmup length.  That is exactly what the
+        # first version of this patch did: the new module was asked for 1e-04 and got
+        # 9.1e-06, a third of a decade above the fine-tuning rate rather than two, which is
+        # why the latent stayed dead for another 1500 steps.
+        peaks = [group["lr"] for group in optimizer.param_groups]
         lr_scheduler = cfg.scheduler.build(optimizer, cfg.steps) if cfg.scheduler else None
         if lr_scheduler is not None:
-            # `LRScheduler.build` takes `param_groups[0]["lr"]` as the peak and scales every
-            # group by the same factor, which would drag the fresh group back onto the
-            # fine-tuning schedule.  Restating each group's base after construction is what
-            # keeps the ratio the caller asked for.
-            lr_scheduler.base_lrs = [group["lr"] for group in optimizer.param_groups]
+            # `LRScheduler.build` derives its lambda from `param_groups[0]["lr"]` through the
+            # config's `peak_lr`, so every group is scaled by the same factor and the fresh
+            # group is dragged back onto the fine-tuning schedule.  Restating each group's
+            # base with the pre-warmup peak is what keeps the ratio the caller asked for.
+            lr_scheduler.base_lrs = peaks
         print(
             f"new-module lr       : {lr:.0e} on {sum(p.numel() for p in fresh)} params "
             f"({len(fresh)} tensors: history encoder + projection); "
-            f"{sum(p.numel() for p in inherited)} on the fine-tuning schedule",
+            f"{sum(p.numel() for p in inherited)} on the fine-tuning schedule; "
+            f"base_lrs={ [f'{p:.1e}' for p in peaks] }",
+            flush=True,
+        )
+        # Exposed so the training log can prove, step by step, that the module in the forward
+        # pass is a member of the group the optimiser steps.  Without that check a second
+        # model instance built after this point looks exactly like a module that is not
+        # learning.
+        policy._a3_optimizer_groups = optimizer.param_groups
+        policy._a3_scheduler = lr_scheduler
+        policy._a3_optimizer = optimizer
+        print(
+            f"new-module wiring   : encoder id={id(getattr(policy.model, 'history_encoder', None))}",
             flush=True,
         )
         return optimizer, lr_scheduler
