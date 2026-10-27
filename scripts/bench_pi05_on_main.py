@@ -711,6 +711,20 @@ def main() -> int:
         default="/tmp/bench_diag",
         help="Where --diagnose writes diag_front/left_wrist/right_wrist.png",
     )
+    parser.add_argument(
+        "--diagnostic-dir",
+        type=Path, default=None,
+        help=(
+            "Record a full trace of every episode into this directory (created, so it must "
+            "not exist yet): one mp4 per camera, a per-step trace.jsonl with the cookie "
+            "positions and slot occupancy, and success_diagnostics.json with the conditions "
+            "at the last step.  This is what separates 'the gripper is still holding a batch "
+            "when the budget ran out' from 'the batch was dropped somewhere' -- a distinction "
+            "the score and the source-box count cannot make, because both look like 'moved "
+            "but not scored'.  Single-worker only: the parallel path builds its env per "
+            "worker and has nowhere to put the traces."
+        ),
+    )
     args = parser.parse_args()
 
     fingerprint = None
@@ -759,6 +773,19 @@ def main() -> int:
         randomize_cookies=not args.no_randomize,
         config_path=config_path,
     )
+
+    if args.diagnostic_dir is not None:
+        if args.workers > 1:
+            raise SystemExit(
+                "--diagnostic-dir needs --workers 1: the parallel path creates an env per "
+                "worker and the traces have no single owner."
+            )
+        # Absolute, and `mkdir(exist_ok=False)` inside EpisodeDiagnostic, so a directory that
+        # already holds a trace is an error rather than a silent overwrite of the evidence
+        # this flag exists to preserve.
+        bench.diagnostic_dir = args.diagnostic_dir.resolve()
+        bench.diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[bench] diagnostic traces -> {bench.diagnostic_dir}", flush=True)
 
     if args.verify_scene:
         return verify_scene(bench, fingerprint)
