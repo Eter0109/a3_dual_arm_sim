@@ -2880,3 +2880,60 @@ in every episode.
 standard error before it can be compared with another arm: at n=8 and 1.8 of per-episode noise, the
 resolution is about +/- 1.3, which cannot separate v4's 3.75 from v5's 3.12 in 9.43 -- and those two
 were treated as different at the time.
+
+### 9.48 The data disagrees with its own instruction, and that is the "stop" (10-27)
+
+9.46 left three 2x5 failure modes and one 2x10 mode with no explanation for *why* a model that
+places whatever it picks up would stop.  The explanation is in the dataset, and it is arithmetic.
+
+**41.7% of the 2x5 episodes end after one batch, under an instruction that asks for ten cookies.**
+Every 2x5 episode carries the same sentence (`transfer 10 cookies into target box`), and the lengths
+split into two populations with nothing in between:
+
+| frames | episodes | batches delivered at the last frame |
+|---|---|---|
+| 302-303 | **500** (41.7%) | **1** |
+| 506-1176 | 700 (58.3%) | **2** |
+
+The batch count is not inferred from the length -- it is read out of `observation.progress`, which
+`add_history_window.py` wrote from the effector's trajectory: every one of the 500 short episodes
+ends at exactly `batches = 1.0`, and every one of the 700 long ones at exactly `2.0`.  So the model
+was shown, 500 times, a demonstration that says "this sentence, when the cookies are in the box,
+means stop" and 700 times one that says "keep going".  **Nine of the eight 2x5 seeds landing on one
+or two batches is that ratio coming back out.**
+
+**The 2x10 side has no such defect, which makes it worse rather than better.**  All 570 episodes are
+1043-1095 frames and end at `batches = 4.0`, exactly complete.  Yet v6 scored 4.50/20 and stopped at
+five cookies.  The most economical explanation is cross-task transfer of the prior the 2x5 half
+taught: the model has learned "five cookies in the box is a finished task", and that prior does not
+carry a task label.  If that is right, removing the contradiction fixes both benchmarks at once,
+which is the reason to do it first rather than collect more 2x10 data.
+
+**The training loss said nothing about this, and that is the lesson.**  At 15000 steps the flow loss
+is 0.00256 and the progress head is at 0.04987 with `R^2 = +0.590` -- the model fits the data it was
+given very well.  A loss cannot detect that half the data contradicts its own label; it can only
+report that the contradiction was learned.  **Every one of the forty thousand steps in this line was
+spent fitting a distribution whose mode was the wrong behaviour.**
+
+**The fix is a sampler setting, not a data rebuild.**  `EpisodeAwareSampler` already accepts
+`episode_indices_to_use`, and episode length separates the two populations with a gap of two hundred
+frames, so `_patch_episode_filter` in the launcher drops everything below `A3_MIN_EPISODE_FRAMES`
+(400) and prints what it did:
+
+```
+episode filter     : keep 1270 of 1770 episodes (>= 400 frames, 1022689 frames); 500 dropped as short
+```
+
+The alternative -- rebuilding the set without those episodes -- means re-encoding 12 GB of video,
+about two hours, to reach the same gradient.  The threshold is a length only because the sampler
+sees frame ranges; any value in (303, 506) gives the same partition, and that is worth writing down
+so 400 is not later read as a tuned constant.
+
+`A3_DROP_N_LAST_FRAMES=49` rides along: 11.3% of the action rows inside a 50-step chunk were the
+"repeat the last action" padding (9.x), and dropping them costs 6% of the frames.
+
+**v7 is the test.**  Same data, same hyper-parameters, same 15000 steps, same base -- the only
+difference is that the sampler never sees the 500 contradictory episodes and the padded chunk tails
+are excluded.  If the prior hypothesis is right, 2x5 should stop landing on one batch and 2x10 should
+get past five cookies; if neither moves, the contradiction was not the binding constraint and the
+next thing to try is 2x10 data weight or a DAgger pass rather than more steps.

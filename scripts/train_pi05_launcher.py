@@ -732,6 +732,79 @@ def _patch_fused_adamw() -> None:
 _ENV_DROP_TAIL = "A3_DROP_N_LAST_FRAMES"
 
 
+#: Episodes shorter than this many frames are excluded from training.  0 uses every
+#: episode, which is what every run before this one did.
+_ENV_MIN_EPISODE_FRAMES = "A3_MIN_EPISODE_FRAMES"
+
+
+def _patch_episode_filter() -> int:
+    """Train on a chosen subset of the episodes, without rebuilding the dataset.
+
+    41.7% of the 2x5 episodes in `a3_multitask_v6` are 302 frames long and end with **one**
+    batch delivered, while the instruction on all 1200 of them says ten cookies.  The model
+    reads that as "this sentence sometimes means five", and 9.46 shows exactly that: five of
+    eight 2x5 seeds either stop after one batch or freeze holding the second.  The numbers
+    line up -- 41.7% of the data says "stop", and about that fraction of the rollouts do.
+
+    Rebuilding the set to drop them means re-encoding 12 GB of video, which costs about two
+    hours.  `EpisodeAwareSampler` already takes `episode_indices_to_use`, and episode length
+    separates the two populations perfectly (302-303 frames against 506-1176), so the filter
+    belongs in the sampler and costs nothing.
+
+    The threshold has to be a length rather than a task because the sampler sees only frame
+    ranges.  That is enough here and is worth stating so nobody later reads 400 as a tuned
+    constant: every 2x10 episode is ~1067 frames and every 2x5 episode is either ~302 or
+    >= 506, so any value in (303, 506) gives the same partition.
+    """
+
+    minimum = int(os.environ.get(_ENV_MIN_EPISODE_FRAMES, "0") or 0)
+    if minimum <= 0:
+        return 0
+
+    from lerobot.datasets import sampler as S
+
+    original = S.EpisodeAwareSampler.__init__
+
+    def __init__(
+        self,
+        dataset_from_indices,
+        dataset_to_indices,
+        episode_indices_to_use=None,
+        drop_n_first_frames=0,
+        drop_n_last_frames=0,
+        shuffle=False,
+    ):
+        lengths = [
+            int(end) - int(start)
+            for start, end in zip(dataset_from_indices, dataset_to_indices, strict=True)
+        ]
+        keep = [index for index, length in enumerate(lengths) if length >= minimum]
+        if not keep:
+            raise RuntimeError(
+                f"A3_MIN_EPISODE_FRAMES={minimum} excludes every episode; the longest is "
+                f"{max(lengths) if lengths else 0} frames."
+            )
+        kept_frames = sum(lengths[index] for index in keep)
+        print(
+            f"episode filter     : keep {len(keep)} of {len(lengths)} episodes "
+            f"(>= {minimum} frames, {kept_frames} frames); {len(lengths) - len(keep)} "
+            f"dropped as short",
+            flush=True,
+        )
+        original(
+            self,
+            dataset_from_indices,
+            dataset_to_indices,
+            episode_indices_to_use=keep,
+            drop_n_first_frames=drop_n_first_frames,
+            drop_n_last_frames=drop_n_last_frames,
+            shuffle=shuffle,
+        )
+
+    S.EpisodeAwareSampler.__init__ = __init__
+    return minimum
+
+
 def _patch_drop_n_last_frames() -> int:
     """Let ``PI05Config`` carry ``drop_n_last_frames``, so the padded chunk tail is not trained on.
 
@@ -789,6 +862,13 @@ def main() -> int:
     )
     if history.enabled():
         print(history.summary(), flush=True)
+    minimum_episode = _patch_episode_filter()
+    if minimum_episode:
+        print(
+            f"min episode frames : {minimum_episode} (shorter episodes excluded -- a run "
+            f"whose episodes disagree with their own instruction cannot be fixed by steps)",
+            flush=True,
+        )
     dropped = _patch_drop_n_last_frames()
     if dropped:
         # Printed because it is otherwise invisible: the effect is a smaller training set,
