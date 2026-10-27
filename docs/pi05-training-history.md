@@ -2677,3 +2677,58 @@ run and 1.33 in the second, where attention had the least possible reason to use
 **Status.**  v6 reached R^2 = +0.573 at 7500 steps, past the 0.5 bar that makes a history channel
 worth having, so it earns a 2x5/2x10 benchmark.  Training continues to 15000; the benchmark runs on
 the final checkpoint, and 7500 is kept as the mid-run reference point.
+
+### 9.45 Every arm's benchmark was run without the module its training created (10-27)
+
+Found while preparing v6's evaluation, and it changes how 9.43's table should be read.
+
+`PI05Policy.from_pretrained` cannot build `state_proj` or `history_encoder`, because pi0.5 does not
+have them.  It reacts to the first in a way that is very easy to miss:
+
+```python
+if key.startswith("state_proj."):
+    logging.warning(f"Skipping state_proj key in pi05 mode: {key}")
+```
+
+One warning, scrolling past inside a four-minute model load.  And nothing on the evaluation side
+re-installed the launcher's patches: `multitask_v5_pipeline.sh` exports `A3_STATE_PROJECTOR=1` as a
+prefix to the **training** command, and `env A=B cmd` applies to that command only -- the bridge
+server started on a later line inherits nothing.
+
+**So the state projector has never been active at evaluation.**  Every number in 9.43 -- 4.50, 5.00,
+3.38, 3.25, 3.50, 3.88, 3.12 -- came from a plain pi0.5 whose proprioception reached the model
+through the prompt bins alone.  That is consistent with what 9.43 concluded ("the scalars reach the
+model mostly through the prompt") but for a stronger reason than it gave: the projection was not
+merely untrained and weak, it was **absent from the forward pass**.  The `|dW| = 1.7%` measurement
+in 9.43 was reading a tensor in the checkpoint file, not a tensor in any model that produced a
+score.
+
+**For v6 this would not have produced an error, it would have produced a number.**  An unpatched
+forward pass ignores `observation.history` completely -- the adapter dutifully packs the 480-float
+window, the server ships it, and nothing reads it.  A v6 benchmark run before this fix would have
+reported a score for an arm that was never run, and the honest reading would have been "the history
+channel does not help", which is exactly the conclusion the whole arm exists to test.  **A silently
+dropped input is more dangerous than a crash, because a crash cannot become a result.**
+
+**The fix** is `scripts/apply_launcher_patches.py`, called from the adapter before `from_pretrained`:
+
+* it reads the checkpoint's own key list, so a projector is created only when `model.state_proj.*`
+  is present, and a stock `lerobot/pi05_base` is untouched;
+* the history encoder's `width` and `per_step` are read off the stored GRU (`from_hidden.weight` is
+  `(3*width, width)`, `to_gates.weight` is `(3*width, per_step)`), so a mismatch fails loudly rather
+  than loading into the wrong shape;
+* the number of steps is the one thing the weights cannot record -- the recurrence is
+  length-agnostic -- so it comes from `history_dims` and is divided by `per_step` and checked; and
+* `A3_HISTORY_SAMPLE=0`, because inference wants the mean: the bridge is already stochastic through
+  the flow-matching noise, and a second source of randomness would make one seed unrepeatable.
+
+Verified on the 7500-step checkpoint: `state_proj`, `history_encoder` and `history_proj` all exist,
+the load reports "All keys loaded successfully", and `embed_prefix` returns **776 -> 778** tokens
+with the history token at `|.| = 0.68`.
+
+**What this does not retroactively change.**  The arms in 9.43 were all measured the same way, so
+their relative ordering still holds and the conclusions about step budget, data composition and the
+one-batch stop (9.43) rest on behaviour that does not involve the projector.  What it does change is
+that the projector was never tested at all: v5's two progress scalars reached the model through a
+wider prompt and nothing else, so "the projection could not move because it was trained at 3e-06"
+(9.44) is only half the story -- it also was not there.
