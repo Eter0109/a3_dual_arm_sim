@@ -2538,9 +2538,9 @@ prompt path could carry".  The arms that improved did so through the text path.
   `.history_proj.`, builds `cfg.optimizer` on the inherited parameters so `param_groups[0]["lr"]`
   keeps meaning what the trainer logs and the scheduler steps, then **appends** the fresh group at
   `A3_NEW_MODULE_LR`;
-* because `LRScheduler.build` takes `param_groups[0]["lr"]` as the peak and scales every group by
-  the same factor, `base_lrs` is restated per group after construction -- otherwise the new group is
-  dragged back onto the fine-tuning schedule by the first step;
+* because `LRScheduler`'s constructor takes an initial step, `param_groups[*]["lr"]` already holds
+  `peak / (warmup + 1)` by the time `build` returns, so the peaks have to be **recorded before**
+  `build` is called and restated afterwards -- see the next paragraph for what happens otherwise;
 * it patches both `lerobot.optim.factory.make_optimizer_and_scheduler` and the module attribute in
   `lerobot.scripts.lerobot_train`, because the trainer did `from ... import` and rebinding only the
   first leaves the second pointing at the original.
@@ -2549,8 +2549,43 @@ Confirmed at startup, which is the line to look for before trusting any new-modu
 
 ```
 new-module lr       : 1e-04 on 630018 params (14 tensors: history encoder + projection);
-                      3090175760 on the fine-tuning schedule
+                      3090175760 on the fine-tuning schedule; base_lrs=['3.0e-06', '1.0e-04']
 ```
+
+The `base_lrs=[...]` tail is the part that matters and it is only there because the first version
+of this patch got it wrong.  That version restated `base_lrs` from `param_groups` **after**
+`build`, which reads back the already-warmup-stepped values: the peaks became `6.0e-09` and
+`2.0e-07` instead of `3.0e-06` and `1.0e-04`, both divided by the warmup length of 500.  The
+checkpoint at 1500 steps that read `R^2 = -0.311` was therefore not an experiment about
+`1e-04` at all -- **both** groups, the fine-tuning one included, ran 500x slow, so it was a
+slightly randomised 3.05.  A separate bug hid this for a while: the diagnostic read
+`optimizer.param_groups` from a list captured in the factory, and `accelerator.prepare` replaces
+that list, so the captured reference kept printing the values from `_initial_step` forever.  It
+looked exactly like a scheduler that never advances -- same optimiser object, different list,
+verified with `is`.  The log now reads through `scheduler.optimizer.param_groups`.
+
+With the peaks recorded correctly, the schedule is right at every point that was checked:
+`['6.0e-09', '2.0e-07']` at step 1, `['3.0e-07', '1.0e-05']` at 50, `['1.5e-06', '5.0e-05']` at
+250, and `['3.0e-06', '1.0e-04']` at 500 -- the two peaks, in the ratio that was asked for.
+The module responded within the warmup: `mu_std` 0.0310 -> 0.0314 -> 0.0473 -> **0.1091**, the
+progress head's bias 0 -> -1.95e-04 -> -4.63e-03 -> **-1.01e-02**, `kl` 0.0007 -> **0.0060**, and
+the weight fingerprint of one GRU matrix 0.01611 -> **0.01621**.  Nothing about that is visible
+at 3e-06, where the same quantities are flat to their printed precision for 7500 steps.
+
+**Two false alarms on the way to that conclusion, both worth remembering.**  The first: the new
+module looked frozen even after the learning rate was fixed, because the log printed
+`pred=[0.006, 0.003]` identically at steps 1, 50 and 500.  Three decimals is coarse enough to hide
+a real drift -- `0.0060 -> 0.0064` prints the same at 3 dp -- so the log now prints four, and
+`mu_std` beside it.
+
+The second is sharper.  Reading `p.grad` from inside the forward hook reported `gn=0.00e+00`, which
+looks like a module that was concatenated into the sequence but never differentiated.  It is
+not: the trainer calls `optimizer.zero_grad(set_to_none=True)` **before** the forward pass, so the
+gradient buffers are empty at exactly the moment the log runs, and a perfectly trained module is
+indistinguishable from a dead one.  Capturing the norms with `parameter.register_hook` during
+backward gives the real answer -- `gn=1.91e+00` over 12 of 14 tensors on the same model, the two
+silent ones being biases of gates that never fired -- so the graph was connected the whole time.
+Instrument placement is a correctness question here, not a style one.
 
 **The rule.**  A module created by the launcher is a module being trained from scratch, and its
 learning rate is a property of *that module*, not of the run.  3e-06 is not a small learning rate for
@@ -2560,5 +2595,19 @@ plausible because the flow term is doing all the work.  Two diagnostics catch it
 auxiliary head's R^2 against its own label (`scripts/check_history_latent.py`, target > 0.5), and
 `|dW|` on the new module's tensors compared with its initialisation scale.
 
-**Status.**  v6 was restarted from 4.05 with `A3_NEW_MODULE_LR=1e-04`; the 7500-step check re-runs
-before any evaluation, and the arm is only worth a benchmark if R^2 clears 0.5 there.
+**A third false alarm, the expensive one: the learning rate was measured from a stale list.**  For
+most of a day the encoder was believed to be running at `9.1e-06` when it had been asked for
+`1e-04`, because the diagnostic printed `optimizer.param_groups` from a reference captured inside
+`make_optimizer_and_scheduler`.  `accelerator.prepare` swaps that list for a new one, so the captured
+reference kept reporting the values `LRScheduler.__init__` had written during `_initial_step` and
+never changed again.  The tell was that `scheduler.last_epoch` advanced normally (0, 49, 249, 499)
+while the printed lr did not, and that `scheduler.get_lr()` disagreed with `param_groups` -- a real
+scheduler cannot produce two different answers for the same step.  `is` settled it: same optimiser
+object, different list.  Reading through `scheduler.optimizer.param_groups` is the only version that
+follows what the trainer actually steps.  **A diagnostic that holds a reference is not a diagnostic
+of the thing; it is a diagnostic of the reference.**
+
+**Status.**  v6 is training from 4.05 with `A3_NEW_MODULE_LR=1e-04` and the peaks recorded before
+`build`, verified correct at steps 1/50/250/500.  The 1500-step checkpoint is checked with
+`check_history_latent.py` before any evaluation, and the arm is only worth a benchmark if R^2 clears
+0.5 there.
