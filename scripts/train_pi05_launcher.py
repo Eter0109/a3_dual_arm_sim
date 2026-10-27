@@ -401,6 +401,25 @@ def _patch_history_encoder() -> None:
         ):
             parameter.requires_grad = True
 
+        # Gradient norms have to be recorded *during* backward.  Reading `.grad` from a
+        # forward hook always sees None: the trainer calls `optimizer.zero_grad()`
+        # (`set_to_none=True`) before the forward pass, so the buffers are empty exactly
+        # when the log runs, and a module that is being trained perfectly looks identical
+        # to one that was never in the graph.
+        self._a3_grad_norms = {}
+
+        def record(key):
+            def hook(grad):
+                self._a3_grad_norms[key] = float(grad.detach().norm())
+                return grad
+
+            return hook
+
+        for name, parameter in list(self.history_encoder.named_parameters()) + [
+            (f"proj.{n}", p) for n, p in self.history_proj.named_parameters()
+        ]:
+            parameter.register_hook(record(name))
+
     def embed_prefix(self, images, img_masks, tokens, masks):
         embs, pad_masks, att_masks = original_embed_prefix(self, images, img_masks, tokens, masks)
         window = getattr(self, "_a3_history", None)
@@ -459,15 +478,25 @@ def _patch_history_encoder() -> None:
         # never falls is a latent that is not carrying progress.  Sparse on purpose -- every
         # step would bury the training line.
         self.model._a3_history_steps = getattr(self.model, "_a3_history_steps", 0) + 1
-        if self.model._a3_history_steps in (1, 50) or self.model._a3_history_steps % 500 == 0:
+        if self.model._a3_history_steps in (1, 50) or self.model._a3_history_steps % 250 == 0:
+            # `gn` is the gradient norm the optimiser will actually see, recorded by the
+            # backward hooks above during the *previous* step -- the trainer calls
+            # `loss.backward()` after this forward returns.  It is the cheap way to tell
+            # "the module is learning slowly" from "the module is not in the graph": a new
+            # token that is concatenated but never differentiated shows `gn=0.0e+00` while
+            # the loss keeps looking plausible, and no amount of waiting fixes it.
+            grad_norm = sum(v * v for v in self.model._a3_grad_norms.values()) ** 0.5
+            seen = len(self.model._a3_grad_norms)
             print(
                 f"[history] step {self.model._a3_history_steps:6d} "
                 f"flow={float(loss.detach()):.5f} "
                 f"progress={float(progress_loss.detach()):.5f} "
                 f"kl={float(kl.detach()):.5f} "
-                f"| z|mu|={float(mu.detach().abs().mean()):.4f} "
-                f"pred={progress_prediction.detach().mean(dim=0).cpu().numpy().round(3).tolist()} "
-                f"target={target.detach().mean(dim=0).cpu().numpy().round(3).tolist()}",
+                f"| gn={grad_norm:.2e} ({seen}/14 tensors) "
+                f"z|mu|={float(mu.detach().abs().mean()):.4f} "
+                f"mu_std={float(mu.detach().std()):.4f} "
+                f"pred={[round(float(v), 4) for v in progress_prediction.detach().mean(dim=0)]} "
+                f"target={[round(float(v), 3) for v in target.detach().mean(dim=0)]}",
                 flush=True,
             )
         return total, loss_dict

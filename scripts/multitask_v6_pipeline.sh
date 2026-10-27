@@ -69,7 +69,7 @@ else
           --policy.scheduler_decay_lr=2e-07 \
           --policy.scheduler_warmup_steps=$(( STEPS / 30 )) \
           --policy.scheduler_decay_steps="$STEPS" \
-          --save_freq=$(( STEPS / 2 )) \
+          --save_freq="${SAVE_FREQ:-1500}" \
           --dataset.video_backend=pyav \
           > "$TRAIN_LOG" 2>&1
     STATUS=$?
