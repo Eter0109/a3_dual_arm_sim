@@ -2626,11 +2626,34 @@ the range attention can see, where the broken runs had it at 0.34 and 1.33.  And
 predicted values against a 2-D target means the head is reading the latent continuously rather than
 saturating near a per-batch mean.
 
-It is **not** the 0.954 that the encoder reaches when trained alone, and it should not be: standalone
-had no flow gradient competing for the same parameters and no KL pulling the latent toward zero.  The
-remaining gap between 0.295 and the standalone number is the joint-training cost, which is the thing
-this arm is actually testing.
+**The 0.954 above is not the comparison it looks like, and the correction matters more than the
+number.**  That figure came from training the encoder on the **whole 40k-frame sample at once** --
+full-batch gradient descent, i.e. one optimiser step per pass over the data.  The VLA trains at
+batch 6 and takes one step per six frames.  Reproducing the standalone recipe at batch 6 over 3000
+steps (the same number of optimiser steps as the joint run, and 18000 frames seen against 38400)
+gives **R^2 = +0.439**, not 0.954.  So the joint run's 0.310 at 3000 steps is 70% of what the same
+encoder reaches with no VLA at all, and the remaining 0.13 is the flow gradient competing for the
+same weights.  Nothing about that requires an architecture change; it requires the same thing the
+whole line needs, which is more samples per optimiser step than batch 6 provides.
+
+Which raises the obvious alternative explanation -- that the KL term is the ceiling, since
+`scripts/check_history_latent.py` shows the latent's spread *falling* between 1500 and 3000 steps
+(0.0638 -> 0.0489) while R^2 stalls.  `scripts/probe_kl_ceiling.py` settles it by training the
+encoder alone at batch 6 for 3000 steps under the joint run's exact objective:
+
+| kl_weight | R^2 | latent mu_std |
+|---|---|---|
+| 0.05 (the run's setting) | **+0.439** | 0.2562 |
+| 0.00 | **+0.434** | 0.5887 |
+
+**KL is not the limiter.**  Removing it entirely buys 0.005 of R^2 and quadruples the latent's
+scale -- it is doing its job (bounding the channel, which is what makes the token readable at
+inference) at essentially no cost in information.  The plateau at 3000 steps is the batch-size
+limit, not the regulariser, so the fix is not to re-tune weights: it is to let the run reach the
+samples it needs, which is what the remaining 12000 steps do.
 
 **Status.**  v6 is training from 4.05 with `A3_NEW_MODULE_LR=1e-04` and the peaks recorded before
-`build`, verified correct at steps 1/50/250/500.  The 7500-step checkpoint is the direct comparison
-with the 0.011 above; the arm goes to a benchmark only if the curve is still climbing there.
+`build`, verified correct at steps 1/50/250/500.  R^2 goes 0.011 (7500 steps, broken lr) -> 0.295
+(1500) -> 0.310 (3000) and is still climbing against a same-condition ceiling of 0.44 at that step
+count; 7500 is the direct comparison with the 0.011 and the point at which the arm either earns a
+benchmark or does not.
