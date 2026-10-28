@@ -66,8 +66,18 @@ SHORT_PROMPTS = {
 }
 
 
-def episode_tasks(root: Path) -> dict[int, str]:
-    """``episode_index -> task string`` for one dataset, from its own metadata."""
+def episode_tasks(root: Path, *, plan_prompts: bool = False) -> dict[int, str]:
+    """``episode_index -> task string`` for one dataset, from its own metadata.
+
+    With ``plan_prompts`` the 2x10 plan sentence is read from
+    ``randomization.task_instruction`` instead of the ``task`` column.  That distinction
+    matters because a previous build **rewrote the source's own ``task`` column in
+    place** to a single short sentence, so the plan that each episode was actually
+    collected under survives only in the metadata.  Nothing else can recover it: the
+    plan is ``[n, 10-n, n, 10-n]`` and ``n`` was drawn per episode from the seed, so the
+    sentence is a property of the episode rather than of the task.
+    """
+
     path = root / "a3_episode_metadata.jsonl"
     if not path.is_file():
         raise SystemExit(f"{root} has no a3_episode_metadata.jsonl; cannot know its tasks")
@@ -76,7 +86,12 @@ def episode_tasks(root: Path) -> dict[int, str]:
         if not line.strip():
             continue
         record = json.loads(line)
-        out[int(record["episode_index"])] = str(record["task"])
+        text = str(record["task"])
+        if plan_prompts:
+            recorded = (record.get("randomization") or {}).get("task_instruction")
+            if recorded:
+                text = str(recorded)
+        out[int(record["episode_index"])] = text
     return out
 
 
@@ -211,6 +226,19 @@ def main() -> int:
         help="Do not relabel the 2x5 episodes (use the sentence already in the data).",
     )
     parser.add_argument(
+        "--plan-prompts",
+        action="store_true",
+        help=(
+            "For 2x10, take each episode's instruction from the plan recorded in its own "
+            "metadata (`randomization.task_instruction`) instead of its `task` column.  The "
+            "plan sentence names the batch schedule -- 'Grasp 5 cookies first, then 5 to "
+            "fill target column 1 with 10. Repeat: grasp 5, then 5 to fill target column 2 "
+            "with 10.' -- so it tells the model how many batches remain, which the short "
+            "sentence does not.  This is the sentence main's `--prompt-style task` produces "
+            "for the same seed, so training and evaluation agree by construction."
+        ),
+    )
+    parser.add_argument(
         "--short-prompts",
         action="store_true",
         help=(
@@ -258,13 +286,14 @@ def main() -> int:
             matched = sorted(glob.glob(pattern))
             if not matched:
                 raise SystemExit(f"--two-by-ten matched nothing: {pattern!r}")
+            # Two globs routinely match the same leaf name -- every shard of every
+            # collection is called `shard_NN` -- and the staging directory is keyed by
+            # name, so the pattern's parent has to be part of the key.
+            origin = Path(pattern).parent.name or "root"
             for repeat in range(max(1, args.two_by_ten_repeat)):
                 for path in matched:
-                    # The repeat index is part of the name because the staging directory is
-                    # keyed by it; two entries resolving to one directory would collapse
-                    # into a single copy of the same shard.
-                    base = Path(path).name if repeat == 0 else f"{Path(path).name}r{repeat}"
-                    sources.append(("2x10", base, Path(path)))
+                    suffix = "" if repeat == 0 else f"r{repeat}"
+                    sources.append(("2x10", f"{origin}_{Path(path).name}{suffix}", Path(path)))
     print(f"{len(sources)} source dataset(s), 2x10 repeat={max(1, args.two_by_ten_repeat)}")
 
     # Hard-link the sources so the task rewrite (which replaces files by rename) never
@@ -293,7 +322,7 @@ def main() -> int:
 
     plans: list[tuple[str, Path, dict[int, str]]] = []
     for kind, name, root in sources:
-        local = episode_tasks(root)
+        local = episode_tasks(root, plan_prompts=(args.plan_prompts and kind == "2x10"))
         if args.short_prompts:
             target = SHORT_PROMPTS[kind]
             expected = {episode: target for episode in local}
