@@ -2937,3 +2937,58 @@ difference is that the sampler never sees the 500 contradictory episodes and the
 are excluded.  If the prior hypothesis is right, 2x5 should stop landing on one batch and 2x10 should
 get past five cookies; if neither moves, the contradiction was not the binding constraint and the
 next thing to try is 2x10 data weight or a DAgger pass rather than more steps.
+
+### 9.49 Reproducing 4.05 on main's own pi0.5 path: three traps, and it is the scene (10-28)
+
+main added a dedicated π0.₅ path in `80e8a7a` (`policies/pi05.py`,
+`--policy pi05:<ckpt>` which requires `--task 2x5 --prompt-style pi05_aligned`).  Reproducing
+4.05 through it, on main's code, gave **0/10** -- and the reason is not the model.
+
+**Trap 1: the loader deletes what our checkpoint needs, and `from_pretrained` hides it.**
+main's `PI05PolicyPlugin` comments say older checkpoints "saved a state projection that π₀.₅ never
+reads" and drop `model.state_proj.{weight,bias}` as obsolete.  On this machine's lerobot 0.5.1 the
+method main calls (`_convert_openpi_state_dict`) does not exist -- same version number, different
+build -- so the file raises `AttributeError` before it can drop anything.  Switching to
+`from_pretrained(checkpoint, config=config)` gets a different failure with the same origin:
+
+```
+Unexpected key(s) in state_dict: "model.state_proj.bias", "model.state_proj.weight".
+```
+
+lerobot's converter skips `state_proj.*` **only without the `model.` prefix**; our launcher saved the
+tensors prefixed, so they survive and `strict=True` raises.  `from_pretrained` **catches the
+exception**, prints that one line, and returns the model with **randomly initialised weights**.  The
+run then proceeds for 900 steps and scores 0/10 while looking healthy.  Teaching the converter to
+skip the prefixed form makes the load succeed and lets lerobot say `All keys loaded successfully!`,
+which is the only end-to-end evidence that the weights are in the model.
+
+**Trap 2: main's budget is 500 steps, and 2x10 cannot finish inside it.**  Measured on main's own
+code: the 2x5 expert completes in **407** steps (10/10), the 2x10 expert hits the 500-step wall at
+**10/20**.  main's docs say so ("不保证专家或模型完成四次抓取"), which means a 2x10 number taken at
+500 is not comparable with one taken at 3200.
+
+**Trap 3, the one that mattered: the score is entirely scene-dependent.**  Same checkpoint, same
+prompt, same seed handling, only the scene differs:
+
+| main's path | score |
+|---|---|
+| default (randomised boxes, main's cameras) | **0/10** |
+| `--pi05-scene <fingerprint> --pi05-scene-mode cameras` | **0/10** |
+| `--pi05-scene <fingerprint> --pi05-scene-mode full` | **5/10** |
+
+So changing the cameras alone does nothing and rebuilding the arrangement recovers the number.
+That is consistent with what our own harness has always done (`bench_pi05_on_main.py` installs the
+training scene on every reset) and inconsistent with "the checkpoint transfers to a fresh layout".
+The initial *state* is not the variable -- every seed, 0-5 and 13000 alike, resets to the same arm
+pose, differing from the training q01 by at most 0.05 rad on one joint -- so the difference is where
+the boxes and the 80 cookies sit.
+
+**What this means for the handover.**  Our `HANDOVER.md` says the number is 4.05 and lists the
+prompt and the 900-step budget as the two things that matter.  It does not say that the measurement
+requires the training scene, because the driver we shipped installs it automatically and the
+document described the driver's flags rather than its implicit behaviour.  A reader following the
+README's "replace the policy and run" instructions lands on main's randomised layout and gets 0/10,
+which is exactly what happened.  The missing sentence is worth more than the flags we documented.
+
+**Reproduced, for the record.**  On main's code, with the load fixed and the scene installed, 2x5
+seed 0 scores **5/10** -- the same value 4.05 has in the 9.41 table for that seed.
