@@ -303,6 +303,21 @@ def main() -> int:
         if args.policy.startswith("pi05:"):
             if args.task != "2x5" or args.prompt_style != "pi05_aligned":
                 parser.error("pi05: requires --task 2x5 --prompt-style pi05_aligned")
+            # Not a parser error: the checkpoint can be *loaded* on any scene, and
+            # `--pi05-scene-mode cameras` is a legitimate comparison. But this
+            # adapter's numbers are only comparable with the published ones when the
+            # training arrangement is rebuilt, and the failure is silent -- the policy
+            # parks and scores 0 instead of raising. Measured on this code: 5/10 with
+            # `full`, 0/10 without it and 0/10 with `cameras` only.
+            if args.pi05_scene is None or args.pi05_scene_mode != "full":
+                print(
+                    "[benchmark] pi05: WARNING -- a π₀.₅ checkpoint is scene-specific and\n"
+                    "            this run does NOT rebuild its training arrangement.\n"
+                    "            For numbers comparable with the published ones pass\n"
+                    "            --pi05-scene <fingerprint.json> --pi05-scene-mode full.\n"
+                    "            Measured: full 5/10, default scene 0/10, cameras-only 0/10.",
+                    flush=True,
+                )
             policy = adapter(
                 checkpoint, device=args.device, inference_seed=args.inference_seed or 0,
                 n_action_steps=args.n_action_steps, num_inference_steps=args.num_steps,
