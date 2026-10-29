@@ -3,9 +3,16 @@
 #
 #   bash scripts/bench_arm.sh <checkpoint_dir> [seeds] [--history] [--prompt-style P] [--tag NAME]
 #
-# `--prompt-style` must match what the checkpoint was trained on: a pi0.5 fine-tune
-# answers the sentence it saw and nothing else, so `short` against a plan-prompt arm (or
-# the reverse) measures the sentence, not the policy.
+# `--prompt-style` and `--source-column` must both match what the checkpoint was trained
+# on.  A pi0.5 fine-tune answers the sentence it saw and nothing else, so the wrong pair
+# measures the sentence rather than the policy:
+#
+#   --prompt-style short                        -> 'transfer 10 cookies into target box'
+#   --prompt-style task --source-column 1       -> 'Transfer 10 cookies from source column 1
+#                                                   into the target box in two batches of five.'
+#
+# Defaults are main's own: 1000 steps for 2x5, 3200 for 2x10.  Override with STEPS_2X5 /
+# STEPS_2X10 in the environment when comparing against older rows that used 900.
 #
 # Exists because the pipeline's evaluation stage is welded to a training run: it serves the
 # checkpoint the run just produced and nothing else.  Two things need more than that:
@@ -27,11 +34,13 @@ SEEDS="${2:-8}"
 shift 2 2>/dev/null || shift 1
 HISTORY=0
 PROMPT_STYLE="short"
+SOURCE_COLUMN=""
 TAG="arm"
 while [ $# -gt 0 ]; do
     case "$1" in
         --history) HISTORY=1 ;;
         --prompt-style) PROMPT_STYLE="${2:?--prompt-style needs a value}"; shift ;;
+        --source-column) SOURCE_COLUMN="${2:?--source-column needs a value}"; shift ;;
         --tag) TAG="${2:?--tag needs a name}"; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -81,13 +90,13 @@ fi
 
 for start in $(seq 0 $(( SEEDS - 1 ))); do
     "$PY" scripts/bench_pi05_on_main.py --socket "$SOCK" \
-        --task 2x5 --prompt-style "$PROMPT_STYLE" "${WINDOW_ARGS[@]}" \
-        --episodes 1 --seed-start "$start" --max-steps 900 \
+        --task 2x5 --prompt-style "$PROMPT_STYLE" "${WINDOW_ARGS[@]}" ${SOURCE_COLUMN} \
+        --episodes 1 --seed-start "$start" --max-steps "${STEPS_2X5:-1000}" \
         --output "$LOGS/${TAG}_2x5_${start}.json" \
         > "$LOGS/${TAG}_2x5_${start}.log" 2>&1 &
     "$PY" scripts/bench_pi05_on_main.py --socket "$SOCK" \
         --task 2x10 --prompt-style "$PROMPT_STYLE" "${WINDOW_ARGS[@]}" \
-        --episodes 1 --seed-start "$start" --max-steps 3200 \
+        --episodes 1 --seed-start "$start" --max-steps "${STEPS_2X10:-3200}" \
         --output "$LOGS/${TAG}_2x10_${start}.json" \
         > "$LOGS/${TAG}_2x10_${start}.log" 2>&1 &
 done

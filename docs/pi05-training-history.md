@@ -2992,3 +2992,155 @@ which is exactly what happened.  The missing sentence is worth more than the fla
 
 **Reproduced, for the record.**  On main's code, with the load fixed and the scene installed, 2x5
 seed 0 scores **5/10** -- the same value 4.05 has in the 9.41 table for that seed.
+
+### 9.50 A clean base: expert-only, balanced, openpi's recipe, from the untouched pi0.5 (10-29)
+
+Nine arms had been fine-tuned from 4.05, and 4.05 itself came from 4000 steps over 5.6 % of its
+set -- about 56 episodes' worth of gradient.  Each arm then had 15000 steps (10 % of its own set)
+to learn two tasks on top of that.  Every one of them equilibrated to a **trade**: v7 held 2x5 at
+6.25 and lost 2x10 to 2.50, v8 did the reverse, and neither could be added to.  This arm starts
+over, on the untouched release, with data that has none of the properties the earlier ones had to
+work around.
+
+**The dataset.**  `a3_clean_v9`, built by `scripts/build_clean_v9.py` (400 episodes, 312470 frames):
+
+| | episodes | instruction |
+|---|---|---|
+| 2x5 | 200 | `Transfer 10 cookies from source column 1 into the target box in two batches of five.` |
+| 2x10 | 200 | each episode's own plan, **20 per plan, all ten plans equal** |
+
+Three properties, each of which was a defect somewhere earlier:
+
+* **Whole two-batch 2x5 demonstrations only.**  `/a3_b2_main_aligned_v2_merged` has 1000 episodes
+  with a 200-frame gap in the length distribution: 500 run 302-303 frames and deliver **one**
+  batch under an instruction asking for two (9.48), the other 500 run 548-550.  Only the long
+  half is used, 200 of it taken at even spacing so the selection spans the seed range rather than
+  one shard.
+* **The 2x10 plan prompts are balanced.**  In the raw collection 190 of 440 episodes carry the
+  `n=5` plan and the rarest has 20, so a uniform `first_grasp: random` benchmark tests nine plans
+  that were barely trained.  20 per plan fixes the training side of that mismatch.
+* **Expert only.**  `a3_graft_v1_merged` is excluded: 55 % of its frames are the policy imitating
+  its own stopping behaviour, which is precisely the behaviour this line is trying to remove.
+
+50 : 50 by episode; **32 : 68 by frame**, because a 2x10 episode is 1067 frames against 549.  The
+two cannot both be equal and the counts were the requirement, so this is the shape to expect from
+any arm on this set.
+
+**The recipe is openpi's, unmodified.**  `configuration_pi05.py` defaults are peak `2.5e-05`,
+floor `2.5e-6`, warmup 1000, decay 30000 -- and 30000 is the step budget, so no auto-scaling
+engages and the run is the shape openpi intends.  Nothing is tuned: the point of this arm is to be
+a reference, so the only departures from stock are the two modules this line adds -- state
+projector and history encoder, the latter at `A3_NEW_MODULE_LR=1e-04` -- and the batch size the
+card allows.
+
+```
+base        : lerobot/pi05_base          <- untouched, not a local checkpoint
+budget      : 30000 steps x 6 = 180000 frames = 58 % of an epoch, 230 episodes' worth
+final       : step 30K  loss 0.006  lr 2.5e-06  grad_norm 0.522
+```
+
+**The latent is the story, and this is the first time it has worked properly.**  Same probe, same
+data, across the four arms that have a history encoder:
+
+| arm | R^2 | corr(batches) | latent per-dim std | `A3_NEW_MODULE_LR` | trunk lr |
+|---|---|---|---|---|---|
+| v6 | +0.535 | 0.735 | 0.0619 | **absent** (all params at 3e-06) | 3e-06 |
+| v7 | +0.535 | 0.735 | 0.0619 | 1e-04 | 3e-06 |
+| v8 | +0.510 | 0.735 | 0.0607 | 1e-04 | 3e-06 |
+| **v9** | **+0.853** | **0.927** | 0.0576 | 1e-04 | **2.5e-05** |
+
+v9 differs from v8 in four ways at once (data hygiene, data balance, from-scratch start, openpi's
+learning rate), so this is not an attribution.  What it does establish is that **R^2 = 0.85 is
+reachable**, and that 0.51-0.54 was not a property of the task or the encoder.  The mechanism most
+likely responsible is the trunk rate: 9.44 found that fresh modules trained at 3e-06 do not move,
+and the encoder's *input* is the trunk's state -- at 3e-06 the trunk was barely changing, so a
+history of it was barely informative.  Encoder and trunk now train at rates that suit each.
+
+Results, main's benchmark, `profile=basic`, boxes and Cookies randomised, 8 seeds:
+
+| arm | 2x5 (target 3-4) | 2x10 (target 7-8) | note |
+|---|---|---|---|
+| v6 | 4.50 ±1.07 | 4.50 ±1.15 | no-op module at the fine-tuning lr |
+| v7 | **6.25** ±1.03 | 2.50 ±0.94 | 2x5 up, 2x10 down |
+| v8 | 2.88 ±0.85 | 5.43 ±2.07 | the reverse |
+| **v9** | **4.88 ±0.64** | **11.14 ±1.78** | **both targets met, first arm to do so** |
+
+**9.51 carries the protocol correction that produced v9's 2x5 number**; the 5.38 measured before
+it was taken with the wrong instruction and is superseded.
+
+**What 2x10's 11.14 means.**  Three seeds landed 20/20 (`[4, 8, 11, 10, 12, 14, 19]`), so the arm
+can complete four batches, which nothing before this line could.  Two things are worth separating:
+the balanced plan prompts teach the batch schedule through the instruction, and the 0.853 latent
+tells the model where in that schedule it is.  The earlier arms had neither, which is why they
+stopped at five Cookies regardless of how many steps they were given (9.46).
+
+**What 2x5's 4.88 ±0.64 still needs.**  The per-seed scores are `[2, 3, 5, 6, 5, 8, 5, 5]` and the
+moved-out counts are `[12, 11, 10, 11, 10, 10, 10, 9]` -- mean **10.4, standard deviation 0.9**.
+The arm moves exactly what the task asks for and then fails to place all of it.  That is a
+different failure from every earlier arm, all of which stopped at five: **the "how much" question
+is answered and the remaining gap is placement precision.**  It is the first time in this line that
+the 2x5 shortfall is downstream of the picking decision rather than identical to it.
+
+### 9.51 `--prompt-style task` does not mean what its name says on 2x5 (10-29)
+
+Found while checking whether v9's benchmark followed main's standard, and it invalidates the 2x5
+number of every arm from v8 onward.
+
+main's 2x5 instruction has two forms and the switch between them is **`source_column`**, not
+`prompt_style`:
+
+```python
+def _episode_task(self, column, seed):
+    return (
+        "transfer 10 cookies into target box"                       # column is None
+        if column is None
+        else f"Transfer 10 cookies from source column {column} into the target box in two batches of five."
+    )
+```
+
+`column` comes from `--source-column`, and **our driver did not have that flag at all**.  So
+`--prompt-style task` -- a name that reads as "use main's own sentence" -- produced, on 2x5, the
+short string regardless.  Verified by reading it back out of the result JSON rather than trusting
+the flag:
+
+```
+2x5   prompt_style = task
+      task_instruction = 'transfer 10 cookies into target box'   <- short, not the task sentence
+2x10  prompt_style = task
+      task_instruction = 'Transfer 20 cookies from source column 1 ... Grasp 4 cookies first ...'
+```
+
+**So v8 and v9 were measured on a sentence neither was trained on.**  Both were trained on
+`Transfer 10 cookies ... in two batches of five.` and both were evaluated on the one-liner.  9.42
+established that this line's checkpoints answer the sentence they saw and nothing else, so those
+2x5 numbers measure the sentence rather than the policy.
+
+**The fix and the measurement.**  `--source-column` is now a driver flag, passed to
+`make_cookie_benchmark` because `EpisodeExecution` assigns `self.source_column` in `__init__` --
+setting it on the benchmark afterwards does nothing, which is how the first attempt at this fix
+failed silently.  Re-running v9's eight seeds with the correct sentence and main's own 1000-step
+budget:
+
+| protocol | 2x5 scores | mean | moved out |
+|---|---|---|---|
+| short sentence, 900 steps | `[9, 3, 1, 4, 7, 6, 6, 7]` | 5.38 ±0.91 | mean 12.9, sd **1.9** |
+| **task sentence, 1000 steps** | `[2, 3, 5, 6, 5, 8, 5, 5]` | **4.88 ±0.64** | mean **10.4**, sd **0.9** |
+
+**The mean went down and the behaviour got better, and the second fact is the important one.**
+Moved-out counts collapse onto the task's own number: mean 12.9 -> 10.4, standard deviation 1.9 ->
+0.9.  The short sentence let the arm over-move and occasionally over-score; the task sentence pins
+it to "two batches of five", which is what the sentence says.  The score did not rise because the
+extra Cookies were never being placed either -- the arm has been failing at **placement**, not at
+the decision of how much to move, and that only became visible once the instruction stopped
+scrambling the decision.
+
+**Two smaller protocol gaps, both closed.**  Our 2x5 budget was 900 steps against main's CLI
+default of 1000, and the driver had no `--inference-seed`, so the flow-matching sampler was
+unseeded and one seed's score could drift (9.47 measured 5/10 and 10/10 on the same frozen scene).
+`bench_arm.sh` now defaults to 1000 / 3200 and accepts `--source-column`; `STEPS_2X5` and
+`STEPS_2X10` override when comparing against older rows.
+
+**The rule, stated so it is checkable.**  A checkpoint's evaluation must send the exact string its
+dataset sent.  On this benchmark that string depends on **two** flags, not one, and the one that
+matters -- `source_column` -- is not the one whose name says "prompt".  Read the sentence back out
+of the result JSON after a run; `prompt_style` alone does not determine it.

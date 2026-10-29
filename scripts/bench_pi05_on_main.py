@@ -685,6 +685,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--source-column",
+        type=int, default=None,
+        choices=(1, 2, 3, 4),
+        help=(
+            "Which source column main's 2x5 episode runner reports, and therefore which "
+            "instruction it generates.  Omitted, `column` is None and main produces the "
+            "short sentence 'transfer 10 cookies into target box'; passing 1 produces "
+            "'Transfer 10 cookies from source column 1 into the target box in two batches "
+            "of five.'  A checkpoint trained on one and evaluated on the other is being "
+            "asked a sentence it never saw, which is indistinguishable from a policy that "
+            "cannot do the task.  Ignored for 2x10, whose sentence comes from the plan."
+        ),
+    )
+    parser.add_argument(
         "--task",
         choices=("2x5", "2x10"),
         default="2x5",
@@ -772,6 +786,19 @@ def main() -> int:
         randomize_boxes=not args.no_randomize,
         randomize_cookies=not args.no_randomize,
         config_path=config_path,
+        # `source_column` decides which 2x5 instruction main generates, and the two are
+        # not interchangeable:
+        #
+        #   None -> "transfer 10 cookies into target box"
+        #   1    -> "Transfer 10 cookies from source column 1 into the target box in two
+        #           batches of five."
+        #
+        # A pi0.5 fine-tune answers the sentence it was trained on and nothing else, so this
+        # has to match the dataset or the benchmark measures the sentence rather than the
+        # policy.  It is a constructor argument of the episode runner (`EpisodeExecution`
+        # assigns `self.source_column` in `__init__`), which is why it is passed here and
+        # not set on the benchmark afterwards.
+        source_column=str(args.source_column) if args.source_column is not None else None,
     )
 
     if args.diagnostic_dir is not None:
