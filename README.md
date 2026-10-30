@@ -9,6 +9,8 @@ SmolVLA基座：[`lerobot/smolvla_base`](https://huggingface.co/lerobot/smolvla_
 
 ACT模型：[`Eter0109/a3-cookie-2x5-act-20k`](https://huggingface.co/Eter0109/a3-cookie-2x5-act-20k)
 
+π0.5双场景模型：[`yunsx114/a3-dual-arm-cookie-pi05-2x5-2x10`](https://www.modelscope.cn/models/yunsx114/a3-dual-arm-cookie-pi05-2x5-2x10)
+
 π0.5模型：[`yunsx114/a3-dual-arm-cookie-pi05-aligned`](https://www.modelscope.cn/models/yunsx114/a3-dual-arm-cookie-pi05-aligned)
 
 多任务示范数据集：[`Eter0109/a3-cookie-multi-tasks`](https://huggingface.co/datasets/Eter0109/a3-cookie-multi-tasks)
