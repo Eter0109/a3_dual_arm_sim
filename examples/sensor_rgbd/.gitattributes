@@ -1,2 +1,2 @@
 # Frozen files must retain their exact bytes on Windows and Linux.
-bundles/** -text
+bundles/** -text whitespace=cr-at-eol
