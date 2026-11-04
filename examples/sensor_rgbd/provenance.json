@@ -1,0 +1,25 @@
+{
+  "default_variant": "v7",
+  "optional_variant": "v9",
+  "simulator_commit": "29fe90e423259f388ebc061926c3ec860b9edc74",
+  "learned_policy_loaded": false,
+  "object_truth_for_control": false,
+  "right_arm_fixed": true,
+  "action_dimensions": 8,
+  "bundles": {
+    "v7": {
+      "name": "a3_sensor_robust_20261027_v7",
+      "files": 68,
+      "manifest_sha256": "529176b77de2bc7316444d76ed59c7d16331ad29d2ff3ed11a6eee8783fa2b2d",
+      "artifact_digest_sha256": "6651c666efd481bd633479259e79567e7510ff819665752195a25f2306e42672",
+      "code_snapshot_sha256": "4a34cb88770ad2cf778299717d8c39080b003bca97f2c52eb200d870021d4886"
+    },
+    "v9": {
+      "name": "a3_sensor_release_20261028_v9",
+      "files": 72,
+      "manifest_sha256": "842531e579a3603236604cc072b695f32d2da185415c877cf8777534c55683eb",
+      "artifact_digest_sha256": "8c315484e417f39d677788d1dbc582aacbae45cab49fbe5d8ca45435c4118d58",
+      "code_snapshot_sha256": "eb4b11c32334c6815ee31358f447b582c82008b3eaf446090b0490d687de1ae3"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "release": "a3_sensor_robust_20261027_v7",
+  "parent": "a3_sensor_placement_20261024_v6",
+  "snapshot_sha256": "4a34cb88770ad2cf778299717d8c39080b003bca97f2c52eb200d870021d4886",
+  "tests": 150,
+  "tests_returncode": 0,
+  "policy_uses_benchmark_seed": false,
+  "right_arm_fixed": true,
+  "object_truth_for_control": false,
+  "learned_policy_loaded": false,
+  "scoring_unchanged": true,
+  "episode_budgets": {
+    "2x5": 1500,
+    "2x10": 3000
+  },
+  "performance_claim": false
+}

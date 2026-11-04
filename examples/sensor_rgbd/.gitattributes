@@ -1,0 +1,2 @@
+# Frozen files must retain their exact bytes on Windows and Linux.
+bundles/** -text

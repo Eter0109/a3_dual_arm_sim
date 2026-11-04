@@ -1,0 +1,20 @@
+{
+  "release": "a3_sensor_release_20261028_v9",
+  "parent": "a3_sensor_robust_20261027_v7",
+  "snapshot_sha256": "eb4b11c32334c6815ee31358f447b582c82008b3eaf446090b0490d687de1ae3",
+  "tests": 168,
+  "tests_returncode": 0,
+  "research_variable": "measured narrow release and detach-before-full-open sequence",
+  "release_gap_increment_m": 0.002,
+  "min_swept_pad_vertical_clearance_m": 0.002,
+  "object_truth_for_control": false,
+  "right_arm_fixed": true,
+  "learned_policy_loaded": false,
+  "evaluation_scope": "fixed-five RGB-D on pinned main29fe90e",
+  "episode_budgets": {
+    "2x5": 1500,
+    "2x10": 3000
+  },
+  "scoring_unchanged": true,
+  "performance_claim": false
+}
