@@ -585,8 +585,20 @@ class SimConfig:
         # would compile a source bin with nothing in it, which is a typo, not a scene.
         if not self.cookie_transfer.cookie_source_positions_m:
             raise ValueError("cookie_transfer must contain at least one source position")
-        if len(self.cookie_transfer.target_slots_local_m) != 10:
-            raise ValueError("cookie_transfer must contain exactly 10 target slots")
+        # **The grid is the scene's, not a constant.**  It used to be pinned at ten, which
+        # made the two-by-ten box (twenty slots) unrepresentable and therefore the 2x10
+        # recovery scene impossible to collect on.  What the rest of the package actually
+        # requires is a *grid*: the columns are the distinct x values and each column's
+        # size is its own count (`_column_sizes`, `_free_slots_per_column`,
+        # `_target_slot_occupancy` all derive both), so any even, non-empty list is a
+        # layout.  An odd list is refused because it is not two columns of anything, and
+        # a single slot is refused because a "column" of one cannot hold a batch.
+        slots = self.cookie_transfer.target_slots_local_m
+        if len(slots) < 4 or len(slots) % 2:
+            raise ValueError(
+                "cookie_transfer.target_slots_local_m must list an even number of at least "
+                f"four target slots (two columns of at least two), got {len(slots)}"
+            )
         spare_position = self.cookie_transfer.spare_target_bin_world_position_m
         if spare_position is not None and len(spare_position) != 3:
             raise ValueError("spare_target_bin_world_position_m must contain three values")

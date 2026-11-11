@@ -99,6 +99,9 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         self.batch_index = 0
         self.batch_indices = []
         self.batch_reports = []
+        #: Default here so `_select_batch` can read it on every path, including the
+        #: non-adopted ones that never reach the assignment in `_adopt_current_state`.
+        self.adopt_strict_row = self.ADOPT_STRICT_ROW
         self._canonical = np.empty(9)
         mujoco.mju_quat2Mat(self._canonical, self._target_quat_canonical)
         self._canonical = self._canonical.reshape(3, 3)
@@ -320,6 +323,32 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             self.adopt_infeasible = (
                 f"no column has five free slots (free per column: {free})"
             )
+        elif self.adopt_infeasible is None:
+            # **Free slots are not the same as a clear way down.**  See `_corridor_blocked`:
+            # a policy that puts Cookies in the box without slotting them leaves an occupancy
+            # that reads empty and a box that is full.  Checked on every column that has five
+            # free slots, and refused only when *none* of them is clear, so this can only
+            # remove states that were going to fail 400 steps later under a misleading name.
+            blocked = {}
+            for column, count in enumerate(free):
+                if count < 5:
+                    continue
+                columns = np.unique(np.asarray(self.env.TARGET_SLOTS_LOCAL)[:, 0])
+                rows = tuple(range(self._column_sizes(columns)[column]))
+                blocker = self._corridor_blocked(column, rows)
+                if blocker is None:
+                    blocked = {}
+                    break
+                blocked[column] = blocker
+            else:
+                if blocked:
+                    occupancy = self.env._target_slot_occupancy(in_target)  # noqa: SLF001
+                    slotted = sum(1 for index in occupancy if index >= 0)
+                    self.adopt_infeasible = (
+                        "every column with five free slots has a Cookie lying in it "
+                        f"(blockers by column: {blocked}, in target: {len(completed)}, "
+                        f"slotted: {slotted})"
+                    )
         # **A grasp already in the jaws is not something to throw away.**  A policy's second
         # batch often ends with the five closed on and not lifted: the jaws are on the row, the
         # lift never happened, and the episode stalls there.  Taking over by *opening* is the
@@ -347,6 +376,12 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         # rows are 7.5-10.6 mm outside its vertical-grasp envelope, and `none` is kept only
         # because it is the historical behaviour the recorded videos were made with.
         self.adopt_start = os.environ.get("A3_ADOPT_START", "lift")
+        # Read here rather than in `_select_batch` so one episode cannot be half-strict: the
+        # decision is per takeover and the flag is per process, but a mid-episode env change
+        # would make the two disagree.
+        self.adopt_strict_row = self.ADOPT_STRICT_ROW or os.environ.get(
+            "A3_ADOPT_STRICT_ROW", ""
+        ).strip().lower() in ("1", "true", "yes")
         if self.adopt_start == "park":
             self._adopt_park_left_arm()
         elif self.adopt_start == "lift":
@@ -420,6 +455,50 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
             )
             free.append(int(size - taken))
         return free
+
+    def _corridor_blocked(self, column_index: int, rows: tuple[int, ...]) -> int | None:
+        """A Cookie lying where the group has to descend, or ``None`` if the way is clear.
+
+        **Free slots are a bookkeeping answer, and the box does not work that way.**  `adopt`
+        used to decide feasibility from occupancy alone, which is correct for a state a policy
+        reaches by *slotting* Cookies and wrong for the state it usually leaves: measured on
+        v9's 2x5 takeover states, three of five triggered episodes had ``slots_at_takeover``
+        of 0, 0 and 2 with 6, 6 and 7 Cookies *in the box*.  Occupancy read "ten slots free"
+        while the box held a loose block of six, so the expert planned a five-group into a
+        corridor a Cookie was already lying across -- and found out in `LIFT` (pad forces
+        2.86 / 2.88 N, opening 0.185) or `DESCEND_TO_PLACE` ("Cookie slipped out of batch
+        during transport"), 400 steps later and with a failure name that blames the expert.
+
+        So the check is geometric: for the rows this group will occupy, is any Cookie inside
+        the box standing in that band?  Cookies slotted in *other* rows do not count -- the
+        band is the group's own span plus half a Cookie at each end, and the slot pitch is one
+        Cookie, so an adjacent slotted neighbour falls outside it.
+
+        Returns the blocking Cookie's index so the caller can report which one, rather than a
+        bare boolean that reads as "the scene is bad".
+        """
+
+        slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
+        columns = np.unique(slots[:, 0])
+        if not 0 <= column_index < len(columns):
+            return None
+        column_x = columns[column_index]
+        column_slots = slots[np.isclose(slots[:, 0], column_x)]
+        ys = column_slots[list(rows), 1]
+        low, high = float(ys.min()), float(ys.max())
+        half = np.asarray(self.env.COOKIE_HALF_SIZE, dtype=np.float64).ravel()
+        half_y, half_x = float(half[1]), float(half[0])
+        for index in range(len(self.env.cookie_positions)):
+            if not self.env._cookie_inside_target(index):  # noqa: SLF001 - the judge
+                continue
+            local = np.asarray(
+                self.env.privileged_cookie_target_position(index), dtype=np.float64
+            )
+            if abs(float(local[0]) - float(column_x)) > half_x + 0.004:
+                continue
+            if low - half_y - 0.002 <= float(local[1]) <= high + half_y + 0.002:
+                return index
+        return None
 
     def _validate_target_workspace(self):
         """Reject unreachable table layouts before starting a physical grasp."""
@@ -797,6 +876,24 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
     #: and the loose tolerance is still tried afterwards, so the rule can only add rows.
     ADOPT_IN_PLACE_TOLERANCE_M = 0.0004
 
+    #: Whether an adopted episode may fall back to the loose (1.6 mm) tolerance when no pristine
+    #: row exists.  Default off -- i.e. the fallback stays on -- for two reasons: it is what the
+    #: measured 42 % takeover rate was measured with, and refusing a row does not collect an
+    #: episode, so this can only trade *quality* for *cost*, never add acceptances by itself.
+    #:
+    #: The reason to test it: three of the six failures in the 9.60 run were
+    #: ``Cookie slipped out of batch during transport`` -- the expert's own grasp coming apart
+    #: with five Cookies already in the jaws.  Every success in that run had the policy working
+    #: from **one** source column, leaving the other's rows pristine; the failures are the
+    #: episodes where the expert had to take a row the policy had already worked around.  A row
+    #: displaced by 0.4-1.6 mm passes the loose filter and then does not hold.
+    #:
+    #: So the trade is: with the fallback, those episodes cost ~500 steps and produce nothing;
+    #: without it they cost ~1 step and produce nothing.  Strict mode is therefore only a win if
+    #: it does not also refuse rows that *would* have grasped.  That is a measurement, not an
+    #: argument -- set `A3_ADOPT_STRICT_ROW=1` to run it.
+    ADOPT_STRICT_ROW = False
+
     def _graspable_in_place(
         self, index: int, source: np.ndarray, actual: np.ndarray, tolerance: float | None = None
     ) -> bool:
@@ -1095,6 +1192,22 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         radius = float(self.model.geom_rbound[geom])
         return centre + np.array([[0.0, 0.0, -radius], [0.0, 0.0, radius]])
 
+    #: **Where the batch scene's two-batch assumption lives.**  A recovery episode in the
+    #: twenty-slot box places as many groups of five as the occupancy allows -- up to four -- so
+    #: "the last batch" and "the episode is over" are questions the subclass has to answer.
+    #: Defaults are the batch scene's own numbers, which is what keeps every path that does not
+    #: subclass this byte-identical to what it was.
+    @property
+    def _is_final_batch(self) -> bool:
+        return self.batch_index == 1
+
+    @property
+    def _batches_complete(self) -> bool:
+        return self.batch_index == 2
+
+    def _on_batch_advanced(self) -> None:
+        """Called once, right after a released batch increments the index."""
+
     def _select_batch(self):
         source = np.asarray(self.env.SOURCE_POSITIONS)
         # An adopted episode asks for a pristine row first, because the policy's own picks have
@@ -1111,7 +1224,14 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
         tolerances = []
         if adopting:
             tolerances.append(self.ADOPT_IN_PLACE_TOLERANCE_M)
-        tolerances.append(None)
+            if not self.adopt_strict_row:
+                # The loose fallback.  Kept as the default because it is what the measured
+                # 42 % was measured with, and because refusing a row does not collect an
+                # episode -- see `adopt_strict_row` for the trade and for why the fallback
+                # is the thing suspected of the transport failures.
+                tolerances.append(None)
+        else:
+            tolerances.append(None)
         for tolerance in tolerances:
             for batch in self._candidate_batches(tolerance=tolerance):
                 if len(batch) != 5:
@@ -1678,18 +1798,19 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                     f"all contained={all_inside}, pad still on the batch={not released}"
                 )
                 return self._stay_command()
-            # The first batch only has to be released; the second is the one the
+            # The first batch only has to be released; the last one is what the
             # scene's success test watches, so it is the one that has to hold for
             # the full success window.
             required_stable = (
                 self.env.task_config.success_hold_steps
-                if self.batch_index == 1
+                if self._is_final_batch
                 else self.profile.release_stable_first
             )
             if self._stable >= required_stable:
                 self.batch_reports[-1]["released"] = True
                 self.completed_cookie_indices.extend(self.batch_indices)
                 self.batch_index += 1
+                self._on_batch_advanced()
                 # **The inter-batch perturbation, at the one moment it belongs.**  The
                 # five are released and settled; the second batch is about to be
                 # selected.  Between those two lines the first batch is as good as it
@@ -1720,7 +1841,7 @@ class A3CookieBatchExpert(A3CookieTransferExpert):
                         max_jitter_m=0.00015,
                     )
                 self._advance(
-                    CookiePhase.DONE if self.batch_index == 2 else CookiePhase.SELECT_COOKIE
+                    CookiePhase.DONE if self._batches_complete else CookiePhase.SELECT_COOKIE
                 )
             return self._stay_command()
         self._fail("unsupported batch phase")

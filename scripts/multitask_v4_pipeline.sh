@@ -53,8 +53,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 say() { printf '%s %s\n' "$(date '+%m-%d %H:%M')" "$*" | tee -a "$LOG"; }
 say "=== single-plan pipeline start (${STEPS} steps, ${EVAL_SEEDS} eval seeds) ==="
 
-# ---- 0. wait for the n=5 collection --------------------------------------------
-for _ in $(seq 1 600); do
+# ---- 0. collection already finished; skip the wait ----
+for _ in $(seq 1 0); do
     pgrep -f collect_cookie_2x10 > /dev/null || break
     sleep 60
 done

@@ -77,8 +77,26 @@ GRASP_PROMPT = "pick up the red cube"
 #: criterion both batch experts satisfy (`require_released=True`,
 #: `require_exact_slots=False`): the five-by-five grasp places two batches of five
 #: and does not aim at the ten slot centres a single-Cookie grip does.
-_BATCH_CONTRACT = "released_10_upright_settled_contained_70_remain"
+#: The twenty-slot box's instruction, character for character the `n=5` plan prompt that
+#: `a3_clean_v9` contains and that v9 was therefore trained on.  Not main's 2x10 sentence:
+#: 9.42 measured a v9-lineage checkpoint at **0 / 20** under that one and 7 / 20 under the
+#: sentence it had seen, so the instruction is part of the measurement rather than a label.
+#: `n=5` rather than any other variant because the recovery expert's grasp is five -- an
+#: episode whose instruction says "grasp 1 then 9" while the controller takes five is a
+#: mismatch the policy would be right to distrust.
+COOKIE_2X10_PROMPT = (
+    "Transfer 20 cookies from source column 1 into the 2x10 target box. "
+    "Grasp 5 cookies first, then 5 to fill target column 1 with 10. "
+    "Repeat: grasp 5, then 5 to fill target column 2 with 10. "
+    "Release all 20 cookies upright in the target box and leave 60 in the source box."
+)
 
+_BATCH_CONTRACT = "released_10_upright_settled_contained_70_remain"
+#: The twenty-slot box's own numbers.  Written out rather than derived, because the contract
+#: string is what a later reader uses to decide whether a dataset can be compared with this
+#: one -- and "20 in, 60 left" is a different job from "10 in, 70 left" even though both are
+#: the same arm doing the same thing.
+_BATCH_2X10_CONTRACT = "released_20_upright_settled_contained_60_remain"
 #: The instruction for the one-Cookie scene, and the only variant whose prompt is not
 #: ``COOKIE_PROMPT``.
 #:
@@ -118,6 +136,17 @@ TASKS: dict[str, TaskSpec] = {
         name="a3_cookie_batch",
         prompt=COOKIE_PROMPT,
         success_contract=_BATCH_CONTRACT,
+    ),
+    # The twenty-slot box, collected for **recovery** rather than for volume: the episode
+    # starts from whatever a policy left in the box and the expert finishes it.  Its own
+    # contract because the number of Cookies that have to end up inside is twenty and the
+    # number that has to stay behind is sixty -- recording it under the ten/ seventy
+    # contract would make every accepted episode look like a contract violation to the
+    # auditor, which is the one job the contract string has.
+    "a3_cookie_2x10_recovery": TaskSpec(
+        name="a3_cookie_2x10_recovery",
+        prompt=COOKIE_2X10_PROMPT,
+        success_contract=_BATCH_2X10_CONTRACT,
     ),
     # The same job, the same words, the same contract -- with the second batch met from
     # more than the one state the expert's first batch leaves behind.  The prompt and the

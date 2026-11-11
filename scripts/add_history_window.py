@@ -188,11 +188,28 @@ def main() -> int:
     table = table.append_column("observation.history", fixed_list(history))
     table = table.append_column("observation.progress", fixed_list(progress))
 
+    # A parquet column's child buffers are indexed with 32-bit offsets, so one row group must
+    # hold fewer than 2^31 values -- and HF `datasets` sets its read batch size to the row
+    # count of the *first* row group (`packaged_modules/parquet/parquet.py`:
+    # `batch_size = self.config.batch_size or parquet_fragment.row_groups[0].num_rows`), so a
+    # single row group makes the loader pull the whole column in one piece.
+    #
+    # At 10 steps the whole column is 312470 x 480 = 1.5e8 values and this never mattered.  At
+    # 200 steps it is 312470 x 9600 = 3.0e9 and the load dies with `OSError: List index
+    # overflow` from inside a multiprocessing worker, re-raised as the much less helpful
+    # `DatasetGenerationError: An error occurred while generating the dataset`.  Nothing about
+    # that message points at the row-group layout, so the guard is stated here instead.
+    VALUES_PER_ROW_GROUP = 50_000_000
+    row_group_size = max(1000, min(20000, VALUES_PER_ROW_GROUP // max(1, history.shape[1])))
+
     targets = sorted((args.out / "data").glob("chunk-*/*.parquet"))
     for target in targets:
         target.unlink()
     pq.write_table(table, targets[0] if targets else
-                   (args.out / "data" / "chunk-000" / "file-000.parquet"))
+                   (args.out / "data" / "chunk-000" / "file-000.parquet"),
+                   row_group_size=row_group_size)
+    print(f"row group size: {row_group_size} rows "
+          f"({row_group_size * history.shape[1]:,} values per group)")
 
     info_path = args.out / "meta" / "info.json"
     info = json.loads(info_path.read_text())

@@ -214,6 +214,15 @@ VIEWS = {
 }
 STATE_KEY = "observation.state"
 
+#: The target box, in world coordinates, for the release intervention.  Taken from the same
+#: geometry the box is built from (`cookie_batch.yaml` / `cookie_2x10.yaml`, identical for
+#: both): body at (0.095, 0.100), inner half extents (0.057, 0.029), body z 0.74898 and a wall
+#: 0.026 high.  Used only to decide whether the effector is over the box and below its rim,
+#: never to score anything.
+TARGET_X = (0.010, 0.180)
+TARGET_Y = (0.045, 0.165)
+RIM_Z = 0.77498
+
 
 class BridgeChunkPolicy:
     """main's BenchmarkPolicy protocol over the shared bridge, with chunk execution.
@@ -234,19 +243,40 @@ class BridgeChunkPolicy:
 
     def __init__(self, sock_path: str, *, chunk: int = 50, execute: int = 16,
                  task_prompt: str | None = None, progress_channels: bool = False,
-                 history_window: bool = False):
+                 history_window: bool = False, history_frames: int = 10,
+                 intervention_rise_n: float | None = None,
+                 intervention_window: int = 12):
         self.action_mode = "joint_position"
         #: Append the two progress entries the v5 datasets were trained with.  Off for every
         #: other checkpoint: a 16-wide state against an 18-wide model is a shape error, and a
         #: 16-wide model against an 18-wide sample is silently ignored padding.
         self.progress_channels = progress_channels
-        #: Send the 480-wide proprioceptive history window the v6 checkpoints were trained
-        #: with.  Accumulated here rather than read from the environment: the window is the
-        #: robot's own past trajectory, and the driver sees every step even though it only
-        #: forwards one in `execute`.
+        #: Send the proprioceptive history window the checkpoint was trained with.
+        #: Accumulated here rather than read from the environment: the window is the robot's
+        #: own past trajectory, and the driver sees every step even though it only forwards
+        #: one in `execute`.
+        #:
+        #: `history_frames` is a property of the *dataset* the checkpoint trained on, not a
+        #: tuning knob: the encoder does `window.view(-1, steps, 48)` with the steps it was
+        #: built with, so a 10-frame window against a 200-step encoder is a shape error, and
+        #: a 200-frame window against a 10-step one is silently the wrong input.  v9 used 10;
+        #: the 200-frame arm needs 200 and 9600 floats.
         self.history_window = history_window
+        self.history_frames = history_frames
         self._history: list[np.ndarray] = []
+        #: Force-triggered early release, off unless a rise threshold is given.  See
+        #: `_intervene` for the failure it targets and why the trigger is a sustained rise.
+        self.intervention_rise_n = intervention_rise_n
+        self.intervention_window = intervention_window
+        self._touch_history: list[float] = []
+        self._interventions = 0
         self._last_action: np.ndarray | None = None
+        #: The action the *environment applied* on the previous step, which is what the
+        #: training data's `a_previous` channel holds (`add_history_window.py` shifts the
+        #: recorded `action` column by one row, and that column is `applied`).  Kept apart
+        #: from `_last_action` because the two differ by the environment's own clamping and
+        #: the encoder was trained on the clamped one.
+        self._applied_action: np.ndarray | None = None
         self.chunk = chunk
         self.execute = execute
         self.task_prompt = task_prompt
@@ -298,35 +328,63 @@ class BridgeChunkPolicy:
         self._gap = 10 ** 9
         self._history = []
         self._last_action = None
+        self._applied_action = None
 
-    def _history_vector(self, observation: dict) -> np.ndarray:
-        """The last 10 frames of ``[q, q_dot, a_previous]``, oldest first.
+    def _history_vector(self) -> np.ndarray:
+        """The last ``history_frames`` frames of ``[q, q_dot, a_previous]``, oldest first.
 
         The layout and the padding are the training data's (`add_history_window.py`): ten
         frames of 48, leading frames repeated from the first rather than zero-filled, and
-        ``a_previous`` being the action the policy actually emitted one step earlier.  A
-        window built any other way is a channel the checkpoint has never seen, which is the
-        same trap the progress channels had.
+        ``a_previous`` being the action the environment applied one step earlier.
 
-        This runs every step, not every `execute`: the policy is only asked for a chunk
-        once per `execute` steps, but the window has to advance with the environment or the
-        encoder would see a trajectory sampled at a different rate than in training.
+        **One frame per control step, appended by `_advance_history`.**  This method only
+        concatenates what is already there.  It used to append, and it was called from inside
+        `if not self._queue`, so the window advanced once per `execute` (16) steps and spanned
+        160 steps instead of 10 -- ten times the training window's horizon, sampled at a
+        different rate, on a channel the encoder was trained to read at 20 Hz.  Its own
+        docstring said "this runs every step, not every `execute`" while the code did the
+        opposite, which is how the two drifted apart unnoticed.
         """
 
-        state = np.asarray(observation[STATE_KEY], dtype=np.float32).reshape(-1)[:16]
-        velocity = np.asarray(observation.get("observation.velocity", np.zeros(16)),
-                              dtype=np.float32).reshape(-1)[:16]
-        previous = (self._last_action if self._last_action is not None
-                    else np.zeros(16, dtype=np.float32))
-        frame = np.concatenate([state, velocity,
-                                np.asarray(previous, dtype=np.float32).reshape(-1)[:16]])
-        self._history.append(frame.astype(np.float32))
-        if len(self._history) > 10:
-            del self._history[0]
         frames = list(self._history)
-        while len(frames) < 10:
+        if not frames:
+            return np.zeros(self.history_frames * 48, dtype=np.float32)
+        while len(frames) < self.history_frames:
             frames.insert(0, frames[0])
         return np.concatenate(frames)
+
+    def _advance_history(self, observation: dict) -> None:
+        """Append one frame for the control step that is about to be taken.
+
+        Called from `act` on every step, before any request is built, so the window that is
+        sent ends at the current step -- which is the training data's definition of window
+        ``t`` (the last ``steps`` frames *ending at* ``t``).
+        """
+
+        if not self.history_window:
+            return
+        state = np.asarray(observation[STATE_KEY], dtype=np.float32).reshape(-1)[:16]
+        velocity = np.asarray(
+            observation.get("observation.velocity", np.zeros(16)), dtype=np.float32
+        ).reshape(-1)[:16]
+        previous = (
+            np.zeros(16, dtype=np.float32)
+            if self._applied_action is None
+            else np.asarray(self._applied_action, dtype=np.float32).reshape(-1)[:16]
+        )
+        self._history.append(np.concatenate([state, velocity, previous]).astype(np.float32))
+        if len(self._history) > self.history_frames:
+            del self._history[0]
+
+    def observe_step(self, *, requested=None, applied=None, info=None) -> None:
+        """Record the applied action, which the next history frame carries as `a_previous`.
+
+        The runner calls this after `env.step` when the policy defines it.  `applied` rather
+        than `requested` for the reason in `_applied_action`.
+        """
+
+        if applied is not None:
+            self._applied_action = np.asarray(applied, dtype=np.float32).copy()
 
     def _state_with_progress(self, observation: dict) -> np.ndarray:
         """The 16 joint entries, plus the two progress channels the checkpoint was trained on.
@@ -371,6 +429,8 @@ class BridgeChunkPolicy:
 
     def act(self, observation: dict, task: str = "") -> np.ndarray:
         self._ensure_connected()
+        # Every step, not every chunk: see `_history_vector`.
+        self._advance_history(observation)
         if not self._queue:
             arrays = {}
             for name, key in VIEWS.items():
@@ -382,7 +442,7 @@ class BridgeChunkPolicy:
                 arrays[name] = image
             arrays[STATE_KEY] = self._state_with_progress(observation)
             if self.history_window:
-                arrays["history"] = self._history_vector(observation)
+                arrays["history"] = self._history_vector()
             payload = proto.encode_request(
                 episode_id=f"mainbench-{self._episode}",
                 step=self._step,
@@ -394,7 +454,19 @@ class BridgeChunkPolicy:
             proto.write_frame(self._writer, payload)
             kind, fields, req_arrays = proto.decode_message(proto.read_frame(self._reader))
             if kind != "actions" or "actions" not in req_arrays:
-                raise RuntimeError(f"bridge replied {kind!r} with keys {sorted(req_arrays)}")
+                # `fields` carries the server's `message` and `traceback`.  The earlier version
+                # printed only the kind and the (empty) array keys, so every adapter exception
+                # surfaced as "bridge replied 'error' with keys []" -- the reason was computed,
+                # sent, and then thrown away one line before it would have been read.
+                detail = ""
+                if isinstance(fields, dict) and fields.get("message"):
+                    detail = f": {fields['message']}"
+                    trace = fields.get("traceback")
+                    if trace:
+                        detail += "\n" + str(trace)
+                raise RuntimeError(
+                    f"bridge replied {kind!r} with keys {sorted(req_arrays)}{detail}"
+                )
             self.forwards += 1
             self.forward_seconds += time.monotonic() - started
             actions = np.asarray(req_arrays["actions"], dtype=np.float64)
@@ -405,8 +477,81 @@ class BridgeChunkPolicy:
             self._queue = list(actions[: self.execute])
         self._step += 1
         action = self._queue.pop(0)
+        action = self._intervene(observation, action)
         self._last_action = np.asarray(action, dtype=np.float32).copy()
         return action
+
+    def _intervene(self, observation: dict, action: np.ndarray) -> np.ndarray:
+        """Open the jaws early when the fingers are being squeezed by something the hand is
+        not carrying.
+
+        The failure this addresses, measured on the recorded rollouts (9.69): on the second
+        batch the group jams against the Cookies already in the box, the effector keeps
+        descending another 4-11 mm, the group slides up inside the jaws, and the release
+        leaves it leaning 25-34 degrees -- past the judge's 15 degree limit.  The policy has
+        no force input (`input_features` is three cameras and `observation.state` only), so it
+        cannot see the jam and cannot respond to it.  This is the response, applied by the
+        harness instead.
+
+        **It only ever opens the jaws.**  Every other entry is left exactly as the policy
+        emitted it -- the arm keeps descending, the wrist keeps its pose -- because the point
+        is to test *one* hypothesis ("releasing the squeeze lets the group settle") and any
+        other change would confound it.
+
+        The trigger is a *sustained* rise in the inner fingertip touch sensors, not a peak:
+        the tactile channels read ~2 N while the jaws hold a group and fall to 0 at release,
+        so a peak alone is what a normal placement looks like too.  Measured by hand on the
+        eight recorded rollouts, only the jammed batch shows a second rise after the descent
+        started (2.7 -> 1.5 -> 3.2 N); every clean batch is monotone.
+
+        Disabled unless `--release-intervention` is given, so every existing number stays
+        reproducible.
+        """
+
+        if self.intervention_rise_n is None:
+            return action
+        force = observation.get("observation.force")
+        pose = observation.get("observation.eef_pose")
+        if force is None or pose is None:
+            return action
+        force = np.asarray(force, dtype=np.float64).reshape(-1)
+        pose = np.asarray(pose, dtype=np.float64).reshape(-1)
+        if force.shape[0] < 16 or pose.shape[0] < 3:
+            return action
+
+        # **Only while placing over the target box, at or below the rim.**  The fingertips
+        # read 30-70 N during the *grasp* -- closing on a row is a far bigger impulse than any
+        # placement produces -- so a rise test applied everywhere fires on every grasp.
+        # Measured by replaying the eight recorded rollouts through this function: 34-40
+        # spurious triggers per episode, every one of them at a grasp, before the arm had
+        # lifted anything.  Gating on the placement window is what makes the trigger mean
+        # "something is resisting the descent" rather than "the jaws closed".
+        over_box = TARGET_X[0] < pose[0] < TARGET_X[1] and TARGET_Y[0] < pose[1] < TARGET_Y[1]
+        if not over_box or pose[2] > RIM_Z + 0.02:
+            self._touch_history = []
+            return action
+
+        # `force[12]` and `force[13]` are the left finger's inner and outer pads.
+        touch = float(force[12] + force[13])
+        self._touch_history.append(touch)
+        if len(self._touch_history) > self.intervention_window:
+            del self._touch_history[0]
+        if len(self._touch_history) < self.intervention_window:
+            return action
+
+        recent = self._touch_history[-3:]
+        earlier = self._touch_history[: -3]
+        rise = float(np.mean(recent)) - float(np.mean(earlier))
+        if rise < self.intervention_rise_n:
+            return action
+
+        # Opening: raise the jaw channel towards its fully-open 0.49.  Both arms are written
+        # because the action vector is one command for both.
+        self._interventions += 1
+        opened = np.array(action, dtype=np.float64, copy=True)
+        opened[7] = max(float(opened[7]), 0.49)
+        opened[15] = max(float(opened[15]), 0.49)
+        return opened
 
     def close(self) -> None:
         if self.sock is None:  # never connected: the parent's policy is only a name holder
@@ -417,16 +562,26 @@ class BridgeChunkPolicy:
 
 
 def make_bridge_policy(sock_path: str, *, chunk: int = 50, execute: int = 16,
-                       task_prompt: str | None = None, progress_channels: bool = False):
+                       task_prompt: str | None = None, progress_channels: bool = False,
+                       history_window: bool = False, history_frames: int = 10,
+                       intervention_rise_n: float | None = None,
+                       intervention_window: int = 12):
     """`module:factory` entry point for the workers of main's process pool.
 
     The pool is started with `spawn`, so this is imported by module name in each child; the
     child then opens its own connection to the same bridge, whose model was loaded once.  A
     `BridgeChunkPolicy` cannot be sent to a worker -- it holds a socket -- which is the whole
     reason `worker_policy_spec` exists.
+
+    `history_window` and `history_frames` are accepted here because the parent forwards them
+    in `worker_policy_kwargs`; without them this factory raised a TypeError for every history
+    arm run with `--workers > 1`, which is why those runs only ever worked single-worker.
     """
     return BridgeChunkPolicy(sock_path, chunk=chunk, execute=execute, task_prompt=task_prompt,
-                             progress_channels=progress_channels)
+                             progress_channels=progress_channels,
+                             history_window=history_window, history_frames=history_frames,
+                             intervention_rise_n=intervention_rise_n,
+                             intervention_window=intervention_window)
 
 
 class HoldPolicy:
@@ -661,13 +816,42 @@ def main() -> int:
         "--history-window",
         action="store_true",
         help=(
-            "Send the 480-wide proprioceptive history window that the v6 checkpoints were "
-            "trained with: ten frames of [q, q_dot, previous action].  Must match the "
-            "checkpoint -- every arm before v6 has no history encoder and ignores the key, "
-            "but the bridge would still be sending it, so pair this flag with the weights."
+            "Send the proprioceptive history window that the v6+ checkpoints were trained "
+            "with: frames of [q, q_dot, previous action].  Must match the checkpoint -- every "
+            "arm before v6 has no history encoder and ignores the key, but the bridge would "
+            "still be sending it, so pair this flag with the weights."
+        ),
+    )
+    parser.add_argument(
+        "--history-frames", type=int, default=10,
+        help=(
+            "Frames in the history window (default 10 = 0.5 s at 20 Hz).  This is a property "
+            "of the dataset the checkpoint trained on, not a tuning knob: 10 for v6-v9, 200 "
+            "for the long-window arm.  Pass the same value as `--config history_dims` / 48."
         ),
     )
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument(
+        "--release-intervention",
+        type=float,
+        default=None,
+        metavar="RISE_N",
+        help=(
+            "Open the jaws early when the inner fingertip touch sensors rise by this many "
+            "newtons within `--intervention-window` steps.  The policy has no force input, so "
+            "it cannot react to the second batch jamming against the ones already in the box "
+            "-- which is what leaves it leaning 25-34 deg and refused (9.69).  This applies "
+            "the reaction from the harness instead.  Off by default: every existing number "
+            "was measured without it.  A value of 0.8 N is where the recorded jam separates "
+            "from a clean placement."
+        ),
+    )
+    parser.add_argument(
+        "--intervention-window",
+        type=int,
+        default=12,
+        help="Steps over which the touch rise is measured (default 12 = 0.6 s at 20 Hz).",
+    )
     parser.add_argument("--selftest-steps", type=int, default=120)
     parser.add_argument(
         "--prompt-style",
@@ -820,7 +1004,10 @@ def main() -> int:
     if args.diagnose:
         policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
                                    progress_channels=args.progress_channels,
-                                   history_window=args.history_window)
+                                   history_window=args.history_window,
+                                   history_frames=args.history_frames,
+                                   intervention_rise_n=args.release_intervention,
+                                   intervention_window=args.intervention_window)
         try:
             return diagnose_motion(
                 policy,
@@ -854,7 +1041,8 @@ def main() -> int:
             worker_policy_kwargs={"sock_path": args.socket, "execute": args.execute,
                                   "task_prompt": task_prompt,
                                   "progress_channels": args.progress_channels,
-                                  "history_window": args.history_window},
+                                  "history_window": args.history_window,
+                                  "history_frames": args.history_frames},
         )
         wall = time.monotonic() - t0
         print(f"[bench] {args.workers} workers | wall {wall / 60:.1f} min | {result}")
@@ -862,7 +1050,10 @@ def main() -> int:
     else:
         policy = BridgeChunkPolicy(args.socket, execute=args.execute, task_prompt=task_prompt,
                                    progress_channels=args.progress_channels,
-                                   history_window=args.history_window)
+                                   history_window=args.history_window,
+                                   history_frames=args.history_frames,
+                                   intervention_rise_n=args.release_intervention,
+                                   intervention_window=args.intervention_window)
         t0 = time.monotonic()
         result = bench.evaluate(policy, num_episodes=args.episodes, seed_start=args.seed_start)
         wall = time.monotonic() - t0

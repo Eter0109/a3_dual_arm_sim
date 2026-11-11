@@ -96,7 +96,16 @@ def summary() -> str:
 
 
 def build(config, hidden: int, *, steps: int | None = None):
-    """The module itself, importable on its own so the launcher stays a wiring file."""
+    """The module itself, importable on its own so the launcher stays a wiring file.
+
+    ``hidden`` is the prefix width (2048) and is **no longer used**.  It used to size a
+    ``Linear(width -> hidden)`` inside the encoder that nothing ever called; the projection
+    into the prefix is a separate module (`project` below) with its own scaling, and the
+    encoder's job ends at the 128-wide latent.  The argument is kept so the three callers
+    and any external script keep working, and it is deliberately still named: a caller
+    reading the signature should be able to see that the value travels through here even
+    though the module does not consume it.  Passing a different value has no effect.
+    """
 
     import torch
     import torch.nn as nn
@@ -157,11 +166,18 @@ def build(config, hidden: int, *, steps: int | None = None):
             self.gru = GRULite()
             self.to_mu = nn.Linear(self.width, self.width)
             self.to_logvar = nn.Linear(self.width, self.width)
-            self.out = nn.Linear(self.width, hidden)
+            # There was a `self.out = nn.Linear(width, hidden)` here: 264,192 parameters --
+            # 42 % of the module -- that no call site ever touched.  Nothing noticed, because
+            # it changed the loss by exactly zero; the only visible trace was the trainer's
+            # gradient census printing `(12/14)`, i.e. two tensors in the module that never
+            # received a gradient.  It is removed rather than kept for compatibility: every
+            # checkpoint that contains `model.history_encoder.out.*` still loads, because
+            # `from_pretrained` defaults to `strict=False` and reports the two keys as unused,
+            # and the weights were never read, so dropping them loses nothing.
             # Two outputs: batches delivered and Cookies placed, both on the state's
             # [-1, 1] scale.
             self.progress = nn.Linear(self.width, 2)
-            for module in (self.to_mu, self.to_logvar, self.out, self.progress):
+            for module in (self.to_mu, self.to_logvar, self.progress):
                 nn.init.normal_(module.weight, std=0.02)
                 nn.init.zeros_(module.bias)
 

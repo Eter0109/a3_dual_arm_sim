@@ -13,3 +13,6 @@ artifacts/batch_snapshots_*/
 artifacts/batch_dev_*.json
 *.egg-info/
 .DS_Store
+
+# Vendored reference implementations, cloned separately (they are their own repos).
+refs/

@@ -125,6 +125,18 @@ def main() -> int:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    def _write_meta(target, text):
+        """Replace a metadata file rather than overwriting it.
+
+        The dataset was staged with hard links, so `write_text` on an existing path truncates
+        the *shared inode* and rewrites the source dataset's metadata too -- which is exactly
+        what happened: v5's 18-wide `info.json` landed in v4 and left it declaring 18 for
+        16-wide data.  Unlinking first breaks the link; the write then creates a new file.
+        """
+
+        target.unlink(missing_ok=True)
+        target.write_text(text, encoding="utf-8")
+
     files = sorted((args.source / "data").glob("chunk-*/*.parquet"))
     if not files:
         raise SystemExit(f"no parquet under {args.source}/data")
@@ -190,7 +202,8 @@ def main() -> int:
     info = json.loads(info_path.read_text())
     info["features"]["observation.state"]["shape"] = [new_state.shape[1]]
     info["total_frames"] = int(len(new_state))
-    info_path.write_text(json.dumps(info, indent=2) + "\n")
+    info_path.unlink(missing_ok=True)
+    info_path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
     # The normalisation statistics are per-dimension, so the two new channels need entries
     # or the normaliser drops them (or fails).  They are computed from the values just
@@ -208,7 +221,8 @@ def main() -> int:
             "q99": np.quantile(column, 0.99, axis=0).tolist(),
         }
         stats["observation.state"] = entry
-        stats_path.write_text(json.dumps(stats, indent=2) + "\n")
+        stats_path.unlink(missing_ok=True)
+        stats_path.write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
 
     (args.out / "progress_report.json").write_text(json.dumps(
         {"episodes": len(summary), "max_batches": args.max_batches,

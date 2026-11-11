@@ -422,10 +422,16 @@ def _patch_history_encoder() -> None:
 
             return hook
 
-        for name, parameter in list(self.history_encoder.named_parameters()) + [
+        tracked = list(self.history_encoder.named_parameters()) + [
             (f"proj.{n}", p) for n, p in self.history_proj.named_parameters()
-        ]:
+        ]
+        for name, parameter in tracked:
             parameter.register_hook(record(name))
+        # The denominator for the gradient census, counted rather than written down.  It used
+        # to be a literal `14`, which went wrong the moment the encoder lost its unused `out`
+        # projection: the census would then read `12/14` forever -- the exact signature of a
+        # module that had stopped training -- while everything was in fact fine.
+        self._a3_grad_param_count = len(tracked)
         built.append(id(self.history_encoder))
         print(
             f"[history] built encoder #{len(built)} id={id(self.history_encoder)} "
@@ -437,6 +443,14 @@ def _patch_history_encoder() -> None:
         embs, pad_masks, att_masks = original_embed_prefix(self, images, img_masks, tokens, masks)
         window = getattr(self, "_a3_history", None)
         if window is None:
+            # Clear the cached latent here, not just return.  `policy_forward` reads
+            # `_a3_history_latent` to build the progress loss, and without this line a batch
+            # that carries no window is trained against the latent of the *previous* batch.
+            # Nothing about that fails: the cached tensor has the right shape and a finite
+            # value, so the loss stays plausible and falls.  It cannot happen while every
+            # batch has a window -- which is exactly why it would go unnoticed on the day one
+            # does not, and RECAP's mixed datasets are that day.
+            self._a3_history_latent = None
             return embs, pad_masks, att_masks
         self._a3_history = None
 
@@ -471,20 +485,47 @@ def _patch_history_encoder() -> None:
         loss, loss_dict = original_policy_forward(self, batch, reduction=reduction)
         cached = getattr(self.model, "_a3_history_latent", None)
         target = batch.get("observation.progress")
-        if cached is None or target is None or reduction != "mean":
+        if cached is None or target is None:
             return loss, loss_dict
         mu, logvar, latent = cached
         progress_prediction = self.model.history_encoder.progress(latent)
-        progress_loss = F.mse_loss(progress_prediction.float(), target.to(latent.device).float())
+        # Per-sample, then reduced, so `reduction="none"` gets an honest per-sample total
+        # instead of being skipped.  That path is reachable: `lerobot_train.py` calls
+        # `policy.forward(batch, reduction="none")` whenever RA-BC sample weighting is on,
+        # and the previous version dropped both auxiliary terms there without saying so --
+        # a training run that silently loses its only supervision on the latent looks
+        # exactly like one where the module is not learning.
+        progress_per_sample = F.mse_loss(
+            progress_prediction.float(),
+            target.to(latent.device).float(),
+            reduction="none",
+        )
+        if progress_per_sample.ndim > 1:
+            progress_per_sample = progress_per_sample.mean(
+                dim=tuple(range(1, progress_per_sample.ndim))
+            )
         # KL to N(0, I): the capacity constraint.  Without it the latent is free to encode
         # whatever lowers the flow loss, which includes the visual state of the pile that
         # the encoder cannot even see but can still infer from the trajectory.
-        kl = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
-        total = loss + s["progress_weight"] * progress_loss + s["kl_weight"] * kl
+        #
+        # `.mean(dim=-1)` over the width, then a batch reduction, so the "mean" path is
+        # numerically identical to the previous `torch.mean(...)` over both axes.  Getting
+        # this wrong would rescale the KL term by the latent width (128x) and silently
+        # re-tune `A3_HISTORY_KL_WEIGHT`, which is not a fix but a different run.
+        kl_per_sample = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp()).mean(dim=-1)
+        aux = s["progress_weight"] * progress_per_sample + s["kl_weight"] * kl_per_sample
+        if reduction == "none":
+            total = loss + aux
+        elif reduction == "sum":
+            total = loss + aux.sum()
+        else:
+            total = loss + aux.mean()
+        progress_loss = progress_per_sample.mean()
+        kl = kl_per_sample.mean()
         loss_dict["loss_flow"] = loss_dict.get("loss")
         loss_dict["loss_history_progress"] = float(progress_loss.detach())
         loss_dict["loss_history_kl"] = float(kl.detach())
-        loss_dict["loss"] = float(total.detach())
+        loss_dict["loss"] = float(total.mean().detach())
 
         # Printed rather than left to the trainer's log, which only emits `loss`: the two
         # auxiliary terms are the whole question this run asks, and a run whose progress term
@@ -531,7 +572,7 @@ def _patch_history_encoder() -> None:
                 f"progress={float(progress_loss.detach()):.5f} "
                 f"kl={float(kl.detach()):.5f} "
                 f"| gn enc={encoder_grad:.2e} proj={proj_grad:.2e} head={head_grad:.2e} "
-                f"({seen}/14) in_opt={int(in_opt)} lrs={lrs} sched={sched_info} "
+                f"({seen}/{self.model._a3_grad_param_count}) in_opt={int(in_opt)} lrs={lrs} sched={sched_info} "
                 f"w|to_gates|={weight_fingerprint:.5f} "
                 f"pbias={float(self.model.history_encoder.progress.bias.detach().mean()):+.2e} "
                 f"mu_std={float(mu.detach().std()):.4f} "
@@ -844,10 +885,50 @@ def _patch_drop_n_last_frames() -> int:
     return count
 
 
+def _patch_obsolete_history_keys() -> None:
+    """Drop the dead `history_encoder.out` tensors from checkpoints that still carry them.
+
+    The encoder used to end in `Linear(width, hidden)` -- 264,192 parameters, 42 % of the module
+    -- whose output nothing read.  It was removed; see `history_encoder.py`.
+
+    Every checkpoint trained before that removal still carries the two tensors, so loading one
+    now raises `Unexpected key(s) in state_dict: model.history_encoder.out.weight, ...`, and
+    `from_pretrained` swallows the exception.  Nothing is actually lost by it: torch copies every
+    matching tensor first and raises at the end.  The damage is to the *check*: the log line that
+    would also announce a genuine loading failure reads "Warning: Could not load state dict", so
+    the next real failure looks exactly like this benign one.
+
+    Deleting the known-dead keys by name keeps `strict=True` meaningful for every other
+    parameter.  The filter is by suffix and the list is explicit, so a checkpoint that is missing
+    something it needs still fails loudly.
+    """
+    from lerobot.policies.pi05 import modeling_pi05 as M
+
+    obsolete = (".history_encoder.out.weight", ".history_encoder.out.bias")
+    original = M.PI05Policy.load_state_dict
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        # Deleted in place rather than rebuilt: a rebuilt `dict` would drop the `_metadata` some
+        # loaders use for version-dependent migration.
+        dropped = [key for key in list(state_dict) if key.endswith(obsolete)]
+        if dropped:
+            for key in dropped:
+                del state_dict[key]
+            print(
+                f"obsolete keys      : dropped {len(dropped)} dead history_encoder.out"
+                " tensor(s) from the checkpoint (the layer was removed; nothing read it)",
+                flush=True,
+            )
+        return original(self, state_dict, *args, **kwargs)
+
+    M.PI05Policy.load_state_dict = load_state_dict
+
+
 def main() -> int:
     _register_legacy_step_names()
     _patch_state_projector()
     _patch_history_encoder()
+    _patch_obsolete_history_keys()
     _patch_optimizer_param_groups()
     _patch_partial_unfreeze()
     _patch_fused_adamw()

@@ -41,8 +41,14 @@
 # Checkpoints
 # -----------
 # 15 GB per checkpoint at the default interval.  `save_freq` is 2000 here rather than the
-# library's 20000 so an interrupted night's run leaves something usable, and
-# `save_total_limit` keeps the three most recent.
+# library's 20000 so an interrupted night's run leaves something usable.
+#
+# There is no `save_total_limit` in lerobot 0.5.1.  This header used to claim there was, which is
+# worse than silence: a 30 000-step run at `save_freq=2000` then keeps 15 checkpoints, and a full
+# `pi05-runs/` fails the run partway with a disk error that looks like anything but a checkpoint
+# policy.  `grep save_ lerobot/configs/train.py` shows only `save_checkpoint` and `save_freq`, so
+# every checkpoint is kept: budget ~8.8 GB each *before* launching, or pass a larger
+# `--save_freq`.
 
 set -euo pipefail
 
@@ -53,7 +59,12 @@ BATCH="${4:-8}"
 NAME="${5:-a3_pi05}"
 
 PYTHON="${A3_PI05_PYTHON:-/root/autodl-tmp/a3-collect/.venv/bin/python}"
-BASE="${A3_PI05_BASE:-lerobot/pi05_base}"
+# Single `-`, not `:-`: an *explicitly empty* `A3_PI05_BASE` means "omit `--policy.path`", which
+# is what resuming requires.  `TrainPipelineConfig.validate` checks `--policy.path` first and
+# returns early when it finds it, so `checkpoint_path` -- derived from `--config_path` -- is never
+# set, `load_training_state(None, ...)` runs, and the run silently starts from step 0 with the
+# policy weights it loaded.  See `--resume` handling below.
+BASE="${A3_PI05_BASE-lerobot/pi05_base}"
 
 # Dataset-key -> policy-key renames.  Unset means "the three A3 cameras onto the three openpi
 # slots"; set it to the empty string to omit the flag entirely, which is what a dataset that
@@ -98,7 +109,7 @@ export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 mkdir -p "$(dirname "${OUTPUT_DIR}")"
 
 echo "pi0.5 fine-tune"
-echo "  base        : ${BASE}"
+echo "  base        : ${BASE:-<from --config_path; resuming>}"
 echo "  dataset     : ${DATASET_ROOT}"
 echo "  output      : ${OUTPUT_DIR}"
 echo "  steps       : ${STEPS}"
@@ -149,7 +160,6 @@ ARGS=(
     # set to something meaningful rather than a placeholder reading like a real Hub id.
     --policy.repo_id="local/${NAME}"
 
-    --policy.path="${BASE}"
     --dataset.repo_id="local/${NAME}"
     --dataset.root="${DATASET_ROOT}"
     --output_dir="${OUTPUT_DIR}"
@@ -199,6 +209,13 @@ ARGS=(
 # map and an absent map differently.
 if [[ -n "${RENAME_MAP}" ]]; then
     ARGS+=(--rename_map="${RENAME_MAP}")
+fi
+
+# `--policy.path` is appended only for a fresh run.  Resuming takes the policy directory from
+# `--config_path` instead, and having both present is not a redundant way of saying the same
+# thing: the presence of `--policy.path` is what suppresses the `checkpoint_path` derivation.
+if [[ -n "${BASE}" ]]; then
+    ARGS+=(--policy.path="${BASE}")
 fi
 
 # The two branches exist because a quote inside `${VAR:-<default>}` is not literal: bash

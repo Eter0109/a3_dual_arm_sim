@@ -3144,3 +3144,4517 @@ unseeded and one seed's score could drift (9.47 measured 5/10 and 10/10 on the s
 dataset sent.  On this benchmark that string depends on **two** flags, not one, and the one that
 matters -- `source_column` -- is not the one whose name says "prompt".  Read the sentence back out
 of the result JSON after a run; `prompt_style` alone does not determine it.
+
+### 9.52 The history latent earns its place on the task that needs it, and only there (10-31)
+
+The first controlled ablation of this line: 80 seeds for v9, 64 for the no-history arm, both
+trained by the same script from the same base on the same data, differing only in
+`A3_HISTORY_ENCODER`.  Seeds 8+ are new; the original 8 are folded in for the merged row.
+
+| arm | 2x5 (cap 10) | 2x10 (cap 20) |
+|---|---|---|
+| v9, history latent | 5.65 ±0.27 (n=80) | **13.18 ±0.58 (n=80)** |
+| v9, no history encoder | 5.67 ±0.37 (n=64) | 10.64 ±0.74 (n=64) |
+| difference | **−0.02** | **+2.53** |
+| Welch | p = 0.976 | p = 0.0072 |
+| paired, same 64 seeds | +0.16, p = 0.71 | **+2.92 ±0.92, p = 0.0022** |
+
+Both arms ran the same seeds, so the paired test is the one to read: on 2x10 v9 wins 39 seeds,
+loses 16, ties 9.
+
+**The 2x5 result is a genuine null, and the n=8 sample had it backwards.**  With 8 seeds the
+ablation looked *better* on 2x5 (6.50 vs 5.12).  At 80/64 the means are within 0.02 of each
+other and the effect size is d = −0.008.  That earlier reading was noise, which is the concrete
+cost of CV ≈ 50 % on this benchmark.
+
+**What the latent actually buys on 2x10 is the absence of collapses, not a higher ceiling.**
+
+| | v9 (n=80) | no history (n=64) |
+|---|---|---|
+| ≤ 5 cookies placed | 6 (7.5 %) | 14 (21.9 %) — p = 0.016 |
+| exactly 0 placed | 2 (2.5 %) | 4 (6.2 %) |
+| ≥ 15 placed | 34 (42.5 %) | 18 (28.1 %) — p = 0.085 |
+| full 20 | 9 | 5 |
+| sd / CV | 5.20 / 39.5 % | 5.93 / 55.7 % |
+
+The no-history arm produced `seed 27` with `cookies_in_source` still at 80: it never moved a
+single cookie in 1500 steps.  Both arms are equally capable of a good run; the one with the
+latent is less likely to produce nothing.  That is what a progress signal should look like on a
+four-batch task — it converts "wandered off and kept going" into "carried on".
+
+**On 2x5 the same latent concentrates behaviour without improving it.**  Both means are 5.65,
+but the distributions differ:
+
+| score | v9 | no history |
+|---|---|---|
+| 0 | 2.5 % | 9.4 % |
+| exactly 5 | **53.8 %** | 29.7 % (p = 0.005) |
+| ≥ 6 | 31.2 % | 43.8 % (p = 0.16, CIs overlap) |
+| 10 | 15.0 % | 17.2 % |
+
+So the "exactly one batch then stop" plateau that motivated the module (§9.43) is *more*
+common with the latent, not less.  The plausible reading is that two batches is short enough
+that a progress signal adds little — and that a confident "one batch done" reading can be
+enough to stop.  The four-batch task is where not knowing where you are actually costs
+episodes.
+
+**A scoring bug found on the way.**  Four 2x5 episodes report `cookies_in_target = 11` against a
+declared `max_score = 10` (v9 seed 86; no-history seeds 48, 49, 54).  The in-target predicate
+therefore admits an eleventh cookie, so the score is not bounded by its own maximum.  Clamping
+to the cap changes the means by at most 0.05 and no conclusion here, but a benchmark whose score
+can exceed `max_score` will eventually be compared against one that cannot.
+
+**Also worth recording: 6 of 144 2x5 episodes ended early.**  All six ended at 430–450 steps
+with 10/10 and `success = True` — that is `require_exact_slots` firing on the 2x5 config, i.e.
+the intended early exit, not a truncation.  2x10 has no such term (`terminate_on_success` is
+off) and every episode runs its full budget.
+
+**Budget.**  2x10 was run at 1500 steps rather than 3200.  Measured on v9's traces: every one of
+8 seeds reached its final cookie count by 55.4 s, and the score at 1200 steps equals the score
+at 3200 seed-for-seed.  1500 keeps 35 % headroom.  A batch of 8 seeds takes 15–38 min depending
+on load; 2x5 at 1000 steps finishes in ~11 min and is absorbed by the 2x10 batch.
+
+### 9.53 The 10-frame latent causes a one-batch plateau, and a 200-frame window does not fix the score (10-31)
+
+Follow-up to 9.52: the window is 10 frames = 0.5 s, while one placement cycle (five cookies
+picked, carried, released) takes a median of **264 frames = 13.2 s** off the v9 traces.  A
+200-frame window therefore covers 0.76 of a cycle instead of 3.8 %.  A third arm was trained
+with `A3_HISTORY_STEPS=200` and every other setting identical; its dataset
+(`a3_clean_v9h200`) was verified byte-identical to `a3_clean_v9h` in every column except
+`observation.history` (480 -> 9600), so v9 is a valid control.
+
+Latent quality rose as designed:
+
+| | v9 (10 frames) | v9w200 (200 frames) |
+|---|---|---|
+| R^2 on progress | 0.853 | **0.942** |
+| corr | 0.927 | 0.971 |
+| pred std / target std | 0.889 | **0.958** |
+| ridge upper bound for that window | 0.651 | 0.966 |
+
+The encoder genuinely integrates the whole window: keeping the *last 10 frames* untouched and
+replacing the earlier 190 with frames from other episodes drops R^2 from 0.9455 to **-0.7084**.
+A model that only read the tail would not move.
+
+**The score did not.** 2x5, 57 seeds for the 200-frame arm against 88 for v9:
+
+| | v9 (10 fr) | no history | 200 fr |
+|---|---|---|---|
+| mean | 5.60 | 5.76 | 5.88 |
+| sd | 2.40 | 2.94 | 2.66 |
+| difference vs v9 | -- | +0.16 | +0.27 (p = 0.52) |
+| paired vs v9 | -- | -- | -0.04 (p = 0.97) |
+
+Nothing separates the means.  The earlier +1.38 seen at n = 8 was noise, the same trap as
+9.52 -- and this time the 8-seed subsample was `{5:2, 6:3, 7:2, 10:1}`, a run of eight
+consecutive non-zero, non-5 episodes whose probability under the v9 rate is small enough to
+look convincing.
+
+**What did change is the shape, and it points at the 10-frame window as the cause of the
+plateau rather than as a cure for it.**
+
+| score band | v9 (10 fr, n=88) | no history (n=72) | 200 fr (n=57) |
+|---|---|---|---|
+| <= 4 (failed to finish a batch) | 14.8 % | 25.0 % | 17.5 % |
+| **exactly 5** | **54.5 %** | 31.9 % | 31.6 % |
+| 6..8 (partial progress) | **12.5 %** | 20.8 % | **33.3 %** (p = 0.0028 vs v9) |
+| 9..11 | 18.2 % | 22.2 % | 17.5 % |
+| exactly 5 *or* exactly 10 | **68.2 %** | 45.8 % (p = 0.007) | **40.4 %** (p = 0.001) |
+
+The 10-frame arm is close to bimodal: it either delivers one clean batch or all two, and rarely
+stops in between.  Both alternatives -- removing the encoder, and extending the window 20x --
+smooth that out to the same extent (31.6 % vs 31.9 % on the plateau, indistinguishable).
+So the plateau is a property of the *10-frame* latent, not of having a progress signal at all.
+
+That also explains why the mean is flat while the shape moves: the plateau acts as a floor.
+v9 buys its 5.60 with fewer sub-5 episodes and pays for it by rarely scoring 6-8.  A smoother
+policy trades a few more low scores for a few more partial ones and lands on the same average.
+
+**2x10 is still at 8 seeds and says nothing yet.**  13.12 (200 fr) vs 13.62 (v9) vs 11.75 (no
+history), all p > 0.7.  The 10-frame arm was the only one that beat no-history there
+(9.52, paired p = 0.0022), so the interesting question -- does a longer window help the task
+that actually rewards progress awareness -- is still open.
+
+**Two process notes worth keeping.**
+
+A sweep was left running while the bridge it depended on was killed by a cleanup `pkill`.  The
+driver failed instantly on `ConnectionRefusedError [Errno 111]` and the orchestrator advanced
+through batch after batch at "0 min" each, producing 103 empty logs and no results.  The
+resume logic keys on result files, so it looked like progress in the log and like nothing on
+disk.  Kill the orchestrator before killing a bridge, and check that a batch's duration is
+plausible before trusting "batch done".
+
+The 8-seed snapshot was also read as if it were the whole arm, because the pairing was done on
+the intersection of seed numbers and that intersection was 0-7 while 49 more seeds sat on disk
+under the same tag.  Any paired analysis should print the arm's total n next to the paired n.
+
+**2x10 closes the question, and the answer is the opposite of 2x5.**
+
+104 seeds for the 200-frame arm against 88 for v9, all on the same scenes:
+
+| | v9 (10 fr, n=88) | no history (n=72) | 200 fr (n=104) |
+|---|---|---|---|
+| mean | **13.22** | 10.76 | **11.05** |
+| sd | 5.27 | 6.05 | 5.76 |
+| vs v9, unpaired | -- | -2.46 | **-2.17 (p = 0.008)** |
+| vs v9, paired | -- | -- | **-2.01 ±0.75 (p = 0.0079)**, 27 win / 51 lose |
+| full 20 | 11.4 % | 8.3 % | 4.8 % |
+| >= 15 | **43.2 %** | 29.2 % | 31.7 % |
+| <= 5 | 8.0 % | 22.2 % | 19.2 % |
+| exactly 0 | 2.3 % | 6.9 % | 8.7 % |
+
+The 200-frame arm is statistically indistinguishable from having **no history encoder at all**
+(+1.10 ±0.89 vs no-history, p = 0.23) and significantly worse than the 10-frame arm.  Twenty
+times the window, R^2 0.942 instead of 0.853, and the four-batch task gets worse.
+
+**Why this is not a paradox.**  Ten frames is exactly the length of one *grasp-and-place
+primitive* at 20 Hz, which is what the flow-matching action expert has to produce: a 50-step
+chunk is 2.5 s, and the last ten frames describe the phase the arm is in right now.  A 200-frame
+window also contains the previous two batches, and the encoder compresses all of it into a
+single 128-d vector and one 2048-d prefix token.  That token then has to serve two purposes at
+once -- "which phase am I in" for the action expert and "how many batches are done" for the
+progress head -- and the longer window makes the second easier (R^2 0.853 -> 0.942) while
+blurring the first.  The 10-frame arm wins because the information it carries is the
+information the action head needs; the 200-frame arm optimises a proxy that only the auxiliary
+head reads.
+
+This is the same lesson as 9.52 from another angle: an auxiliary metric that improves while the
+task gets worse is not evidence that the module works.  Both times the honest signal came from
+seed sweeps, not from the latent diagnostic.
+
+**What the whole sequence says about the module.**
+
+| task | no history | 10 frames | 200 frames |
+|---|---|---|---|
+| 2x5 (2 batches, 27 s) | 5.76 | 5.60 (p = 0.98) | 5.88 (p = 0.52) |
+| 2x10 (4 batches, 53 s) | 10.76 | **13.22 (p = 0.0022)** | 11.05 (p = 0.23) |
+
+The latent earns its place on the long task, and only at the window length that matches a
+single action primitive.  Lengthening it is not an improvement; it is a different module that
+happens to score better on its own supervision.
+
+### 9.54 The progress head is what keeps the latent nonzero, not a loss term that helps it (11-01)
+
+Follow-up to 9.53.  The 200-frame result raised a specific worry: the auxiliary progress loss
+might be steering the latent toward "how many batches are done" and away from the phase
+information the action expert needs.  `A3_HISTORY_PROGRESS_WEIGHT=0` tests that by removing the
+supervision while keeping the channel, the architecture, the KL weight and everything else.
+
+The arm did something the hypothesis did not anticipate.
+
+**It collapsed.**  `mu` has 128 dimensions and the loss pushes it toward 0 only through KL
+(weight 0.05).  With the progress term gone, nothing pulls it away from 0:
+
+| step | mu_std | KL |
+|---|---|---|
+| 1 | 0.0315 | 7.2e-4 |
+| 750 (peak) | 0.0345 | 5.9e-4 |
+| 6000 | 0.0068 | 2e-5 |
+| 15000 | ~0.003 | ~0 |
+| 30000 | **0.0017** | **0.00000** |
+
+v9 finished at 0.0576.  This arm ends **34x narrower with KL at exactly zero** -- the capacity
+constraint is no longer binding because the latent has already been squeezed to a constant.
+The check that catches this is a one-line grep of `mu_std` from the training log; it was read
+at 3000 steps and the direction was already unambiguous.
+
+**What it scored.**  32 seeds on each task, paired by seed:
+
+| | 2x5 (n) | 2x10 (n) |
+|---|---|---|
+| v9, 10 frames + progress | 5.60 (88) | **13.22 (88)** |
+| no history encoder | 5.76 (72) | 10.76 (72) |
+| **progress_weight = 0 (collapsed)** | 5.69 (32) | **11.38 (32)** |
+| paired vs v9 | -0.72 ±0.52, p = 0.21 | -1.94 ±1.14, **p = 0.10** |
+| paired vs no-history | -0.50 ±0.74, p = 0.53 | +0.81 ±1.30, **p = 0.55** |
+
+On 2x10 the collapsed arm sits between the two controls and is **statistically
+indistinguishable from having no encoder at all**.  On 2x5 all three arms are equal, which is
+consistent with 9.52 -- 2x5 never responded to the latent in the first place.
+
+**So the answer to the original question is "not testable this way", and the reason is
+informative.**  Removing the supervision does not produce "a free latent that the flow loss
+shapes as it likes".  It produces **no latent**: the flow loss is content with a constant
+prefix token (the action expert can ignore it), and a constant token is the minimiser of KL.
+The progress loss is therefore not merely teaching the latent to report progress -- it is the
+only term in the objective that requires the latent to carry anything at all.
+
+**This reframes every earlier result.**  9.52 measured the value of "a latent kept alive by
+progress supervision", not the value of "a latent".  The 200-frame failure in 9.53 fits the same
+frame: a longer window offers more to encode and scores better on R^2, but with KL compressing
+harder over a 20x larger input, the information that actually reaches the prefix token shrinks.
+R^2 was measuring the encoder, not the token.
+
+**A cost note on the measurement itself.**  The 8-seed snapshot of this arm read 14.38 on 2x10
+-- above v9.  Adding seeds moved it 14.38 (n=8) -> 13.75 (n=16) -> 12.62 (n=24) -> 11.38
+(n=31), monotonically down.  That is the fourth arm in this sequence where n=8 pointed the
+wrong way, and the reason is always the same: CV near 50 % on a 0-20 integer score means a
+handful of good scenes dominate.
+
+### 9.55 Two harness bugs found while running these arms (11-01)
+
+Both are silent, and both were caught only because a number looked implausible.
+
+**The `mu_std` monitor read one line out of 120.**  `grep '^\[history\]'` matched only the
+first record, because the trainer writes its progress bar with `\r` and no newline, so each
+`[history]` line is appended *after* `Training: ...` rather than starting a line.  The first
+record happens to be the pre-training one, so a collapse over the following 30000 steps would
+have looked like a flat line at 0.0315.  Fixed by dropping the `^` anchor; the fix was
+verified against v9's log, which then yields the full sequence (0.0315 -> 0.1227 by step 1000).
+
+**A dead bridge turned a sweep into 103 no-op batches.**  `run_seed_sweep.sh` loads the
+checkpoint once and reuses it.  Killing that bridge with an unrelated `pkill` made every driver
+exit on `ConnectionRefusedError [Errno 111]` within a second, and the orchestrator recorded
+"batch done in 0 min" and advanced -- logging progress while writing nothing.  Added a health
+check: if a batch produced zero results in under 60 s, print the driver's error and abort the
+whole sweep.  The rule worth keeping: **judge a batch by its duration, not by its completion
+message.**
+
+### 9.56 Why 2x10 stops at 13 of 20: a failed grasp is never retried (11-02)
+
+Four hypotheses were tested and three were rejected.  The survivor explains every earlier anomaly,
+and it is not a precision problem at all.
+
+**What the loss is not.**  Tracking each cookie's own xy position through 8 recorded episodes
+(3200 frames each) shows the arm moved 129 cookies and delivered 117: **90.7 %, one or two lost
+per episode**.  An earlier count-based estimate said 21 % was lost to whole failed batches; that
+was wrong, because `cookies_in_source` also falls when a cookie is nudged across the box's
+internal edge, not only when it is lifted out.  Geometry cannot be fooled that way.  **Placement
+precision is not the bottleneck**, which removes `cartesian_delta` from the list.
+
+**What the loss is not, part two.**  `bench_arm.sh` has been run at 1500 and at 3200 steps and the
+scores are equal (13.18 vs 13.62).  The reason: across all 8 episodes the arm makes its last grasp
+between frame 490 and 1053 and its last placement between 534 and 1236, then stays idle for
+**100 to 133 seconds**.  The episode budget was never the constraint.
+
+**What the loss is not, part three.**  It is not "learned the expert's final pose".  The expert's
+last frame sits at `y = 0.118 +- 0.011` (near the target box, 200 episodes); the policy parks at
+`y = 0.39`, which is the **far inner edge of the source box** (source centre 0.310 + half-width
+0.101 = 0.411), and it is inside the demonstration distribution (14 % of expert frames exceed
+y = 0.36).  So the parking spot is a legal "reaching into the far end of the source box" pose --
+which is exactly what a grasp start looks like.
+
+**What it is.**  The arm reaches, does not take a cookie, and never reaches again.
+
+| seed | 张-合周期 | 末次张开 | 末次闭合 | 末次放入 | 放入后还有尝试 |
+|---|---|---|---|---|---|
+| 5 | 4 | 1114 | 1142 | 3190 | 0 |
+| 6 | 4 | 1146 | 1172 | 2938 | 0 |
+| 1 | 4 | 1116 | 1141 | 2418 | 0 |
+| 0 | 3 | 843 | 907 | 3132 | 0 |
+| 4 | **0** | -- | -- | 2007 | 0 |
+| 2 | 3 | 817 | 905 | 794 | 1 |
+| 3 | 3 | 874 | 901 | 531 | 2 |
+| 7 | 2 | 578 | 601 | 565 | 1 |
+
+The jaw completes 0-4 open-close cycles per episode, all of them in the first ~60 s, and then
+stops cycling.  Meanwhile the effector keeps moving with normal amplitude -- mean |action| is 0.85
+during the idle tail against 0.90 while working -- and the arm tracks it to within 0.005-0.035 rad.
+Action magnitude standard deviation drops from 0.123 to 0.020, so the policy is outputting a small
+drifting wiggle, not zeros, and the arm obeys.  Nothing is stuck, blocked, or out of reach.
+
+**The failure is that a miss is terminal.**  The demonstrations are expert-only: every episode in
+`a3_clean_v9` is a successful run.  A policy trained on them has seen "reach, close, carry, place"
+and has never seen "reach, close on nothing, try again".  When a grasp misses, the state it lands
+in has no continuation in the data, and the closest thing the action expert can produce is a quiet
+drift near the source box.
+
+**Why this matters more than the previous four experiments.**  `cartesian_delta`, the window
+length, the KL weight and the progress weight were all attempts to make the *policy* better at
+what it already does.  This says the policy is missing a *behaviour*, and no amount of tuning the
+inputs supplies a behaviour that is absent from the demonstrations.  The grafted-DAgger dataset
+that 9.52 rejected for mixing policy rollouts into expert data is the correct remedy here, for the
+opposite reason: not to add volume, but to add recoveries.
+
+**Consequence for the score ceiling.**  Four grasps of five cookies is the designed route to 20.
+Episodes with 4 cycles score 18-19; episodes with 2-3 score 10-15; the one with 0 scores 17 by
+pulling 10 and 9 in two oversized grabs.  So 2x10's 13.2 average is mostly "3.1 grasps instead of
+4", and the mechanism behind a missing grasp is a miss that was never retried.
+
+### 9.57 Is the stall state recoverable? The gate, measured on v9's own end states (11-02)
+
+9.56 ends with "a miss is terminal, so the demonstrations need recoveries".  The question that has
+to be answered before any collection is whether a privileged controller can finish from the state
+v9 actually leaves -- if it cannot, collecting grafted episodes collects failures.
+
+**The mechanism already exists, and it is not new.**  `A3CookieBatchExpert` has an `adopt` entry
+(`second_batch_mode="adopt"`, `_adopt_current_state`) written for exactly this: it reads the
+occupancy, marks the in-target Cookies as already done, aims at a column with free slots and moves
+nothing.  It has three start strategies (`A3_ADOPT_START`), and the measured reason for the default
+is in 9.39: opening the jaws at the takeover pose displaced **13 of 70** untouched source Cookies,
+while `lift` displaced 0.  `scripts/collect_graft.py` already drives it (policy phase, then expert
+phase, one trajectory) and 9.40 reports the production run: 428 attempts, **200 accepted (46.7 %)**,
+**167 tier A**, 0 tier B.  And 9.41 measured the specific claim: from the exact state a policy
+leaves after releasing a second batch 9.6 mm too high, `adopt` finished **2 of 2** seeds at tier A.
+
+So the answer to "can it take over" is yes, with production numbers behind it.  What had not been
+checked is whether the 2x10 state v9 leaves is inside what `adopt` can accept.
+
+**The gate, on the eight recorded 2x10 end states.**  `adopt` refuses when no column has five free
+slots (`adopt_infeasible`), because one grasp carries a whole group of five into one column.  The
+2x10 target is two columns of ten, so this is a real gate.  Read from
+`success_diagnostics.json:final_conditions.target_slot_occupancy` on `diag/v9_run/2x10` (the idle
+tail changes nothing, so the final frame *is* the stall frame):
+
+| seed | in target | col0 taken | col1 taken | free per column | `adopt` feasible | score after |
+|---|---|---|---|---|---|---|
+| 0 | 13 | 8 | 3 | 2 / 7 | yes | 18 |
+| 1 | 19 | 9 | 8 | 1 / 2 | **no** | 19 |
+| 2 | 12 | 8 | 2 | 2 / 8 | yes | 17 |
+| 3 | 10 | 9 | 0 | 1 / 10 | yes | 20 |
+| 4 | 15 | 10 | 4 | 0 / 6 | yes | 20 |
+| 5 | 20 | 9 | 8 | 1 / 2 | **no** | 20 |
+| 6 | 19 | 9 | 9 | 1 / 1 | **no** | 19 |
+| 7 | 1 | 0 | 0 | 10 / 10 | yes | 20 |
+
+**5 of 8 feasible -- and the three that are not are already at 19-20.**  The infeasible states are
+the near-misses, which do not need recovery; the states that need it (10-15 in target) all have a
+column with six to ten free slots.  Replaying "add one batch of five into the emptiest column while
+a whole column has five free" over these occupancies gives the ceiling:
+
+| task | v9 mean | after takeover | gain |
+|---|---|---|---|
+| 2x5 (8 seeds, cap 10) | 5.12 | **10.12** | +5.00, every seed full |
+| 2x10 (8 seeds, cap 20) | 13.62 | **19.25** | +5.62 |
+
+So for 2x5 the existing expert closes the gap completely, and for 2x10 the recovery ceiling is
+19.25/20 -- the remaining 0.75 is the three near-misses that have nothing left to recover.
+
+**The free rows are contiguous, which is what makes it work.**  `_place_pose` aims a group at the
+*mean* y of a set of rows, so a batch of five needs five adjacent free rows, not five free rows
+anywhere.  Per column, from the same occupancy:
+
+| seed | col0 free rows | col1 free rows | longest run | what a five-grasp can do |
+|---|---|---|---|---|
+| 0 | 3,4 | 3-9 | 7 | col1 rows 3-7 |
+| 1 | 5 | 6,7 | 2 | nothing (already 19) |
+| 2 | 2,7 | 0, 3-9 | 7 | col1 rows 3-7 |
+| 3 | 4 | 0-9 | 10 | col1 rows 0-4, then 5-9 |
+| 4 | -- | 0-5 | 6 | col1 rows 0-4 |
+| 5 | 2 | 4,8 | 1 | nothing (already 20) |
+| 6 | 4 | 9 | 1 | nothing (already 19) |
+| 7 | 0-9 | 0-9 | 10 | four batches |
+
+Every seed that needs help has a run of at least six, i.e. a five-grasp fits.  The three that do not
+are the ones with 19-20 already in the box.
+
+**What is actually missing, and it is two small things rather than a new controller.**
+
+1. **`A3CookieBatchExpert` is the wrong expert for 2x10, and main already has the right one.**
+   `A3Cookie2x10Expert` (`controllers/cookie_2x10_expert.py`) takes a `Cookie2x10Plan` with
+   `batch_sizes = (n, 10-n, n, 10-n)` and `target_rows(batch_index)` naming **which rows** a grasp
+   aims at, so a group of `n` lands in rows `0..n-1` and the complement in `n..9`.  Variable batch
+   sizes are not a special case there -- the collected 2x10 data already contains grasps of 1 to 9
+   (`a3_2x10_n5` shards, plan variants n=1..9).  What it has **no** entry for is `adopt`: its plan
+   comes from the seed, not from occupancy.  The batch expert's `_place_pose` is the 2x5 version --
+   it aims at the column's *centre* -- so aimed at a half-full 2x10 column it descends onto the
+   Cookies the policy already placed.
+2. **The collection tree cannot host a 2x10 scene at all.**  `config.py:588` asserts
+   `len(target_slots_local_m) != 10 -> raise`.  The 20-slot config exists only in main's tree, where
+   `batch_expert.py` does not.  So a 2x10 recovery collector needs that assertion relaxed (every
+   consumer of the slot list already derives its length rather than assuming ten:
+   `_target_slot_occupancy`, `_column_sizes`, `_free_slots_per_column`).
+
+**Consequence for the plan.**  The recovery primitive is "place the longest contiguous free run in
+one column, up to five".  For 2x5 that is `adopt` as it stands.  For 2x10 it is `adopt` with the
+plan derived from occupancy instead of from the seed -- the same `target_rows`/`batch_size`
+machinery, fed by the judge's occupancy rather than by `Cookie2x10Plan.from_seed`.  Nothing about
+the scene, the arm or the source box is blocking; 9.41 already showed that for the 2x5 case and the
+free-run table above shows it for 2x10.
+
+### 9.58 The 2x10 `adopt` entry, built and measured (11-02)
+
+9.57 concluded that the 2x10 stall state is recoverable but that the two pieces needed to
+*use* that were missing.  Both now exist, and the numbers below are the first measurement of
+the entry itself.
+
+**What was missing, restated as code.**
+
+* `A3CookieBatchExpert`'s `adopt` decides a **column** (`_free_slot_column`) because a 2x5
+  column is five slots.  In a ten-row column that is not enough: `_place_pose` aims at the
+  **mean y of the rows it is given**, so a group aimed at a half-full column's centre lands
+  on the Cookies already there.
+* `A3Cookie2x10Expert` (main's tree) has the machinery -- `plan.target_rows(batch_index)`
+  names which rows a grasp goes to -- but its plan comes from the seed, not from occupancy.
+* The collection tree could not build a twenty-slot scene at all: `config.py` refused any
+  `target_slots_local_m` whose length was not ten.
+
+**What was built.**
+
+| piece | file | what it does |
+|---|---|---|
+| `A3Cookie2x10RecoveryExpert` | `batch_expert_2x10.py` | reads the judge's occupancy, cuts each column into **contiguous free runs**, and turns the longest runs into groups of five; `_place_pose` aims each group at *its own rows*, and `_relief_sign` leans the release away from an occupied neighbour |
+| three hooks on the base class | `batch_expert.py` | `_is_final_batch`, `_batches_complete`, `_on_batch_advanced` -- the batch scene's "two batches" assumption, made answerable by a subclass; defaults are the old constants, so every existing path is unchanged |
+| twenty-slot config | `configs/cookie_2x10_recovery.yaml` | `cookie_batch.yaml` character for character except the target box and its grid, which are main's `cookie_2x10.yaml` -- that is what makes an episode here comparable with main's benchmark |
+| the slot-count rule | `config.py` | ten became "even and at least four"; every consumer (`_target_slot_occupancy`, `_column_sizes`, `_free_slots_per_column`) already derived the length, so the constant was the only thing pinning it |
+| scene + task | `collection.py`, `tasks.py` | `a3_cookie_2x10_recovery`, contract `released_20_upright_settled_contained_60_remain` |
+
+**The instruction is part of the experiment, and it was wrong.**  The scene's default prompt is
+this branch's 2x5 sentence.  v9 was fine-tuned on main's, and 9.42 measured a v9-lineage
+checkpoint at **7/20 under the sentence it had seen and 0/20 under the other one**.  So the
+recovery scene uses `COOKIE_2X10_PROMPT`, which is character for character the `n=5` plan
+prompt `a3_clean_v9` contains (`task_index 0`).  `n=5` rather than any other variant because
+the recovery expert's grasp *is* five -- an episode whose instruction says "grasp 1 then 9"
+while the controller takes five is a mismatch the policy would be right to distrust.
+
+**The measurement, on v9's own recorded end states.**  `scripts/probe_2x10_recovery.py`
+rebuilds each recorded occupancy by teleporting that many Cookies into the same slot indices,
+then hands the box to the new expert.  Both numbers are reported, because they answer
+different questions: `cookies_in_target` is what main scores, and slot occupancy is what a
+dataset is worth.
+
+| seed | recorded | in-box before -> after | slots before -> after | plan | outcome |
+|---|---|---|---|---|---|
+| 0 | 13 | 11 -> **16** | 11 -> 15 | 1x5 | ok, 278 steps |
+| 1 | 19 | 17 -> 17 | 17 -> 17 | -- | infeasible (runs of 2 and 1) |
+| 2 | 12 | 10 -> **15** | 10 -> 13 | 1x5 | ok, 278 steps |
+| 3 | 10 | 9 -> **14** | 9 -> 13 | 2x5 | batch 1 ok, batch 2 `VERIFY_RELEASE` |
+| 4 | 15 | 14 -> **19** | 14 -> 15 | 1x5 | ok, 282 steps |
+| 5 | 20 | 17 -> 17 | 17 -> 17 | -- | infeasible (runs of 1, 1, 1) |
+| 6 | 19 | 18 -> 18 | 18 -> 18 | -- | infeasible (runs of 1, 1) |
+| 7 | 1 | 0 -> **20** | 0 -> 18 | 4x5 | ok, 1045 steps |
+
+**Every takeover that was feasible delivered exactly five.**  Seeds 0, 2 and 4 gained +5 in-box
+and +4, +3, +1 in slots -- the slot gain is smaller than five because a group of five placed
+from one wide grip lands 3-5 on slot centres, which is the same reason the 2x5 contract sets
+`require_exact_slots=False`.  Seed 7 started from an empty box and ran **four** consecutive
+batches to 20/20 in 1045 steps with 18 slotted, which is the multi-batch state machine working
+across both columns (columns 0, 0, 1, 1 -- the plan fills the longest run first and then moves
+on).
+
+**The three infeasible seeds are the ones that do not need recovery**, exactly as 9.57
+predicted from occupancy alone: 17, 17 and 18 in the box with no run of five free rows
+anywhere.  A `VERIFY_RELEASE` failure on seed 3's second batch is a placement that did not
+settle, not a planning failure -- batch 1 landed fine from the same state.
+
+**Two gaps this measurement exposes, neither of them in the new expert.**
+
+1. **`adopt` plans from *slots*, and a policy's Cookies are not always in slots.**  On the 2x5
+   probe, three of five triggered episodes had `slots@takeover` of 0, 0 and 2 with
+   `in_target` of 6, 6 and 7: the policy put Cookies in the box without slotting them, so the
+   occupancy reads "empty" while the box is physically full of a loose block.  The recovery
+   then plans into rows that a Cookie is already lying across.  A feasibility check that
+   counts only free slots will accept those states and fail in `LIFT` or `DESCEND_TO_PLACE`,
+   which is what seeds 5 and 7 did.  The fix is a physical check -- is the group's insertion
+   corridor clear -- rather than a bookkeeping one.
+2. **`_should_hand_over` requires the source count to stop shrinking.**  That is right for a
+   policy that stalls, and wrong for one that keeps *removing* source Cookies while failing to
+   place them: seed 2 of the 2x5 probe ended with five in the box, five in slots, and
+   `graft_triggered=False` because the source count never stopped falling.  The gate should
+   also fire on "the target count has not increased for N steps", which is the condition that
+   actually describes a stall.
+
+### 9.59 The 2x5 takeover rate, measured on v9 with the right instruction (11-02)
+
+The gate 9.40 reports (428 attempts, 200 accepted, 46.7 %) was measured on the 4.05
+checkpoint with this branch's own instruction.  Re-measuring it on v9 first required fixing the
+instruction, because `collect_graft.py` drives phase one with `scene.task.prompt` and that is
+this branch's sentence -- while v9 was fine-tuned on main's.  Under the wrong sentence the same
+twelve seeds gave **1 / 8 accepted** and one episode that moved **zero** Cookies in 700 steps;
+9.42 measured exactly this failure mode (7/20 vs 0/20 for one weight set under two sentences).
+
+With `--task-prompt "Transfer 10 cookies from source column 1 into the target box in two
+batches of five."` (the `source_column=1` sentence, `a3_clean_v9` `task_index 10`):
+
+| seed | tier | triggered | slots at takeover -> final | in box at takeover | accepted | expert failure |
+|---|---|---|---|---|---|---|
+| 0 | A | yes | 4 -> 9 | 5 | **yes** | -- |
+| 1 | C | yes | 5 -> 5 | 5 | no | `DESCEND_TO_PLACE` |
+| 2 | no_trigger | **no** | -- -> 5 | -- | no | -- |
+| 3 | A | yes | 4 -> 9 | 5 | **yes** | -- |
+| 4 | no_trigger | **no** | -- -> 10 | -- | no | -- |
+| 5 | A | yes | 4 -> 9 | 5 | **yes** | -- |
+| 6 | A | yes | 4 -> 9 | 5 | **yes** | -- |
+| 7 | C | yes | 4 -> 2 | 5 | no | `LIFT` |
+| 8 | A | yes | 4 -> 9 | 5 | **yes** | -- |
+| 9 | C | yes | 4 -> 4 | 7 | no | -- (ran out of steps) |
+| 10 | no_trigger | **no** | -- -> 9 | -- | no | -- |
+| 11 | no_trigger | **no** | -- -> 4 | -- | no | -- |
+
+**5 / 12 accepted (42 %), 8 / 12 triggered, and 5 of the 8 triggered reached tier A (62 %).**
+That is the same rate as 9.40's 46.7 %, on a different checkpoint and a different instruction --
+so the primitive is stable and this is not a lucky sample.
+
+**The five successes are one shape, exactly.**  Every one is `slots_at_takeover = 4`,
+`slots_final = 9`, `in_box_at_takeover = 5`: the policy placed its first five (four of them on
+slot centres), and the expert's single group of five carried the box to ten.  That is the
+behaviour the dataset is being collected for, and it is reproducible rather than incidental.
+
+**Four seeds never triggered, and they are the interesting ones.**
+
+* seed 4 finished the job itself -- ten in slots, eleven in the box.  Eleven violates the
+  contract (`70_remain` wants exactly seventy left), which is a *policy* error the gate has no
+  business rescuing, and the episode is correctly refused.
+* seed 10 reached ten in the box with nine slotted and **69** left in the source -- one Cookie
+  over.  Also refused, also correctly: the contract is exact.
+* seeds 2 and 11 stopped at five and four with `graft_triggered = False`, which is the gate's
+  own blind spot: `_should_hand_over` required `cookies_in_source` to stop falling, and these
+  two were still lifting Cookies out of the source every batch while placing none of them.
+
+**Two fixes, both in the gate rather than in the expert.**
+
+1. **The stall trigger now needs *neither* progress signal to have moved.**  Tracking the
+   target alone is not enough -- a batch cycle is 300 steps and the drawn delay is 100-200, so
+   "the target has not grown" is true for most of every normal transport and would fire
+   mid-carry.  Tracking the source alone is 9.40's rule and misses seeds 2 and 11.  So both are
+   tracked, *either* improving counts as progress, and the trigger reads when progress last
+   happened.
+2. **`adopt` now checks the insertion corridor, not just free slots.**  Three of the eight
+   triggered episodes had `slots_at_takeover` of 0, 0 and 2 with 6, 6 and 7 Cookies *in the
+   box*: occupancy read "ten free" while a loose block of six lay across the rows the expert was
+   about to use.  Those are the `LIFT` (pad forces 2.86 / 2.88 N, opening 0.185) and
+   `DESCEND_TO_PLACE` ("Cookie slipped out of batch during transport") failures -- 400 steps
+   spent, and a failure name that blames the controller.  `_corridor_blocked` now answers the
+   geometric question ("is a Cookie inside the box standing in this group's band?") and
+   `adopt_infeasible` refuses the state up front with the blocking Cookie's index.
+
+**A third finding that is not a bug in anything.**  Seed 7 went `slots 4 -> 2`: the expert's
+group *reduced* the slot count.  Its five landed in the box but pushed the policy's four off
+their centres.  A takeover that trades one arrangement for another still raises
+`cookies_in_target`, so it is not a lost episode -- but it is why the acceptance rule has to be
+tier A (five slots *gained*) rather than "ten in the box".
+
+### 9.60 Two gate fixes, one of which lost, and the bottleneck they exposed (11-02)
+
+9.59 ended with two candidate fixes to `collect_graft.py`'s handover gate.  Both were built and
+both were measured over the same twelve 2x5 seeds.  One is kept and one is off by default,
+because it was measured to be *worse*.
+
+| arm | accepted | triggered | tier A among triggered |
+|---|---|---|---|
+| baseline (source-stall rule only) | **5 / 12 (42 %)** | 8 / 12 | **5 / 8 (62 %)** |
+| + corridor check + stall rule (`--stall-steps 350`) | 4 / 12 (33 %) | 10 / 12 | 4 / 10 (40 %) |
+
+**Kept: `_corridor_blocked`.**  It fires correctly and cheaply.  Seed 9 of the fixed run is the
+demonstration: `slots@takeover = 1` with **nine** Cookies in the box, and the refusal is instant
+and named --
+
+```
+every column with five free slots has a Cookie lying in it
+  (blockers by column: {0: 0}, in target: 9, slotted: 1)
+```
+
+-- where the old gate would have spent ~400 steps in `LIFT` or `DESCEND_TO_PLACE` and reported a
+placement failure.  It also provably does not over-refuse: re-running the 2x10 probe dry-run after
+the change gives byte-identical plans for all eight seeds, including the three that are infeasible
+for the *other* reason (no run of five free rows).
+
+**Rejected: the stall rule, and the reason is the interesting part.**  Adding "the policy took a
+batch and never delivered it" raised the trigger count (8 -> 10) but lowered both rates.  The two
+extra takeovers were the two worst states in the set:
+
+* seed 2 triggered with **four slots already filled** and ended with **zero**.  The expert's group
+  of five came apart during transport and scattered the box -- a takeover that made the episode
+  strictly worse than leaving the policy alone (baseline: five in the box, five slotted).
+* seed 11 triggered with one slot filled and ended at one, failing in `DESCEND_TO_PLACE`.
+
+So "the policy is still reaching but not delivering" does not mean "the box is ready to be
+rescued".  It usually means the policy is holding a batch, or has just dropped one somewhere the
+expert cannot see; taking the box off it costs more than the batch it was going to lose.  The flag
+is kept (`--stall-steps`, default 0 = off) with the measurement in its help text, so the idea can
+be revisited without being re-derived.
+
+**The bottleneck the fixed run exposed is not the box at all.**  Three of its six failures are the
+same string:
+
+```
+Cookie slipped out of batch during transport     (seeds 1, 2, 11)
+```
+
+That is the *expert's own* grasp failing to hold five Cookies, not the box state, not the
+corridor, and not the trigger.  `adopt` prefers a pristine source row
+(`ADOPT_IN_PLACE_TOLERANCE_M = 0.0004`) and falls back to the loose tolerance when none is
+pristine -- and a policy that has already taken Cookies from that column leaves the remaining rows
+nudged by about a millimetre, which is enough for the pad to close on a misaligned row.  The five
+successes are consistent with this: they are all `slots@takeover = 4`, i.e. the policy used *one*
+column and left the other's rows untouched.
+
+**What that means for the plan.**  The takeover rate is 42 %, and it is 42 % because of the source
+row, not the target box.  Two consequences:
+
+1. Collection cost is ~2.4 attempts per accepted episode.  At 4.5 minutes per attempt that is
+   ~11 minutes per episode, so 200 episodes is ~36 hours -- which is affordable but means the
+   quota should be set from this rate rather than from 9.40's 46.7 % on a different checkpoint.
+2. If the rate needs to go up, the lever is the **source row**, not the gate: either restrict
+   collection to episodes where the policy used one column (which is what every success looks
+   like), or make `_select_batch` in `adopt` reject a disturbed row outright instead of falling
+   back to the loose tolerance.  The second is a small change and is the obvious next experiment.
+
+**One incidental bug.**  `collect_graft.py --help` had never been run and crashed with
+`ValueError: unsupported format character ')'`: argparse `%`-formats every help string, and the
+`--fast-render` text contains `(50%)`.  Escaped to `(50%%)`.  Worth noting because the same
+mistake is one keystroke away in any new help string that quotes a rate.
+
+### 9.61 How to test 2x10, now that the 2x5 pipeline is validated (11-02)
+
+The 2x5 takeover now works end to end: the collector drives v9 with the sentence it was trained
+on, the gate fires, the expert's `adopt` places a group, and 42 % of attempts are accepted.  None
+of that transfers to 2x10 for free, because **the 2x10 failure is a different shape**: 2x5 stops
+after *one* batch, 2x10 keeps going for four and stops at 3.1 of them (9.56).  So the test ladder
+has to answer three questions in order, and each one can kill the plan.
+
+**What is already established, and what it does not cover.**  `probe_2x10_recovery.py` rebuilt
+v9's eight recorded end states by teleporting Cookies into the same slot indices, then handed the
+box to `A3Cookie2x10RecoveryExpert` (9.58).  Every feasible state gained exactly five, and seed 7
+ran four consecutive batches from empty to 20/20.  That establishes the **planner**: reading a
+scattered twenty-slot occupancy, cutting it into contiguous free runs, aiming each group at its
+own rows, and re-planning after each batch.  It does **not** cover the arm: the policy's hand is
+not where the probe's teleport leaves it, the box pose is the probe's not the benchmark's, and the
+source rows have not been worked around by a policy.
+
+**Stage 1 -- live takeover on the real 2x10 scene.**  This is the measurement that matters, and
+the collector can already make it: `--scene a3_cookie_2x10_recovery` selects the twenty-slot
+config, `--expert` infers the recovery controller from the scene name, and the scene dump needs no
+new one because robot, source box, cameras and all eighty Cookie positions are identical between
+main's 2x5 and 2x10 benchmarks -- verified parameter by parameter, only the target box differs and
+that is config-level.  The 2x10 config itself is byte-equivalent to main's `cookie_2x10.yaml` on
+every physical field, so a number measured on it is comparable with main's benchmark.
+
+```
+A3_ADOPT_STRICT_ROW=1 python scripts/collect_graft.py \
+  --root /root/autodl-tmp/datasets/graft_2x10_probe \
+  --episodes 12 --max-attempts 12 \
+  --socket /tmp/graft_v9.sock \
+  --scene a3_cookie_2x10_recovery \
+  --task-prompt "$(python -c 'import sys;sys.path.insert(0,"src");
+      from a3_dual_arm_sim.tasks import COOKIE_2X10_PROMPT;print(COOKIE_2X10_PROMPT)')" \
+  --policy-steps 1500 --expert-steps 1400 \
+  --execute 16 --no-videos --keep-failures
+```
+
+**`--policy-steps 1500`, not the 2x5 default of 700.**  9.56 measured v9's last grasp at frames
+490-1053 and its last placement at 534-1236.  At 700 the policy is cut off while it is still
+working, the gate's `cookies_in_source` rule never sees a stall, and every episode would be
+recorded as `no_trigger`.  `--expert-steps 1400` because one group takes 280-600 steps (the probe
+measured 278, 278, 282, 596) and the plan can hold two.
+
+**Stage 2 -- the question the 2x5 data never had to ask: one batch or the whole episode?**  For
+2x5 a single recovery is the entire remaining task.  For 2x10 it is one of up to four, and the
+collector's `GraftPolicy` naturally runs the expert to `DONE`, i.e. it collects the **whole
+remaining sequence** including the re-plan between batches.  That is the right default for 2x10 --
+seed 7 of the probe showed the re-plan works (columns 0, 0, 1, 1) -- but it also means an accepted
+episode is much longer, so the quota and the wall-clock estimate have to be recomputed rather than
+copied from 2x5.
+
+**Stage 3 -- the prompt-variant trap, which can make the result uninterpretable.**  `a3_clean_v9`
+contains **ten** distinct 2x10 plan sentences (`Grasp n cookies first, then 10-n ...`, n = 1..9,
+plus a skip variant) and main's benchmark draws `first_grasp=random`, so one eval seed in eleven
+sees the `n=5` sentence the recovery data would carry.  A model trained only on `n=5` recoveries
+would have learned "when the instruction says five, recover", and 10/11 of main's seeds would
+never ask it that.  Two defensible ways out, and they are different experiments:
+
+* **Narrow, single-variable (recommended first).**  Collect and evaluate at `first_grasp=5`.  The
+  question becomes "does recovery data fix the stall at all", with the instruction held constant,
+  which is the same discipline 9.42 imposed on the 2x5 numbers.  It is not an acceptance number.
+* **Full distribution (second).**  Collect under all ten variants.  That needs the recovery
+  controller to obey the plan's batch sizes rather than always taking five -- the capability
+  main's `A3Cookie2x10Expert` already has (`plan.batch_sizes`, `plan.target_rows`) and which was
+  deliberately not ported (9.58) because a *recovery* only ever needs five.  So this is a real
+  port, not a flag.
+
+**The acceptance ceiling, from the 2x5 data, because it bounds the 2x10 plan too.**  Of the twelve
+2x5 baseline episodes: five accepted, two *correctly refused* (the policy over-delivered -- eleven
+in the box, or sixty-nine left in the source, both contract violations that no takeover should
+rescue), three lost to the source row, and two that never triggered.  So fixing the source row
+alone caps the rate near **8/12 = 67 %**, and the remaining headroom needs the no-trigger cases,
+which is exactly what the stall rule was measured to make *worse* (9.60).  Any 2x10 quota should
+be planned at ~2.4 attempts per accepted episode, i.e. ~11 minutes per episode at the 2x5 timings,
+and 2x10 attempts are longer.
+
+**The honest order of operations.**  Stage 1 first, twelve seeds, because it answers whether the
+arm can do what the planner can.  If the rate is in the same 40-65 % band as 2x5, collect.  If it
+is near zero, the reason will be in `graft_expert_failure_phase` and the probe has already ruled
+out the planner, which narrows it to the grasp or the trigger -- two things the 2x5 run has
+already instrumented.
+
+### 9.62 Strict source rows: it removed a failure class and did not raise the rate (11-02)
+
+9.60 ended by naming the source row as the suspected cause of the transport failures, and by
+proposing to make `adopt` refuse a disturbed row instead of falling back to the loose 1.6 mm
+tolerance.  Built as `ADOPT_STRICT_ROW` / `A3_ADOPT_STRICT_ROW=1`, measured over 16 seeds.
+
+| arm | n | tier A | rate | triggered | failures by phase |
+|---|---|---|---|---|---|
+| baseline (loose fallback) | 12 | 5 | 42 % | 8 | `DESCEND_TO_PLACE` 1, `LIFT` 1, no_trigger 4 |
+| + corridor + stall rule | 12 | 4 | 33 % | 10 | `DESCEND_TO_PLACE` 3, `ADOPT` 1, no_trigger 2 |
+| + corridor + **strict rows** | 16 | 4 | 25 % | 8 | `SELECT_COOKIE` 3, `ADOPT` 1, no_trigger 8 |
+
+**The rate comparison is not a measurement, and saying so is the point.**  The bridge is
+stochastic (9.40: two samples of one observation differ by up to 0.086 rad), so each run draws a
+*different policy trajectory*.  That is why the no_trigger count moves 4 -> 2 -> 8 across arms
+that cannot possibly affect the trigger -- it is sampling noise, not an effect.  A 4/16 vs 5/12
+difference is well inside what that noise produces, so the honest reading is **"no change
+detected"**, not "strict is worse".
+
+**What the change actually did, measured where the noise cannot reach it.**
+
+| failure | expert steps | what the arm does |
+|---|---|---|
+| `DESCEND_TO_PLACE` (baseline) | 351 | carries a bad row all the way to the box |
+| `LIFT` (baseline) | 547 | closes on a misaligned row, times out |
+| `SELECT_COOKIE` (strict) | 254 | clears the hand away, then finds no pristine row |
+| `ADOPT` (strict) | **0** | refuses at takeover, before moving |
+
+And the failure class the change was aimed at is gone:
+
+| arm | `Cookie slipped out of batch during transport` |
+|---|---|
+| baseline | 1 / 12 |
+| corridor + stall rule | **3 / 12** |
+| corridor + strict rows | **0 / 16** |
+
+So the hypothesis was right -- the loose fallback *is* what produced the transport slips -- and
+fixing it removed them entirely.  It just does not add episodes, because refusing a row is still a
+failure; it converts a 350-550-step corruption into a 254-step or 0-step named refusal.  For a
+collection run that is worth having (it is ~40 % of the expert budget on the failing half of the
+attempts, and it stops writing episodes whose second group was scattered), but it is a **cost**
+lever, not a rate lever.  Kept, off by default, documented as such.
+
+**The rate lever is the no-trigger cases, and that is what 2x10 makes urgent.**
+
+### 9.63 2x10, first live takeovers: the pipeline works and the gate is the problem (11-02)
+
+9.61 proposed the ladder; this is stage 1, three seeds, on the real twenty-slot scene with v9
+driving for 1500 steps.
+
+| seed | tier | in box @ takeover | slots @ -> final | frames | failure |
+|---|---|---|---|---|---|
+| 0 | **B** | 5 | 0 -> 3 | 1111 | `VERIFY_RELEASE`: released Cookies not upright, settled and contained: [21..25] |
+| 1 | C | 6 | 5 -> 5 | 914 | `LIFT` timeout, pad forces 10.92 N |
+| 2 | no_trigger | -- | -- -> 5 | 1501 | the policy never stalled |
+
+**Seed 0 is the result that matters: the whole chain works.**  The policy placed five (none on
+slot centres), the gate fired after its drawn 116-step delay, `A3Cookie2x10RecoveryExpert` took
+over, planned against the occupancy, grasped five from the source, carried them in, and the box
+went **5 -> 10 Cookies** -- the exact +5 the probe predicted.  It failed only at
+`VERIFY_RELEASE`: the group landed in the box but not upright and settled, which is tier **B**,
+"usable but must be labelled", not an unrecoverable state.  So the planner, the arm, the clearing
+lift, the multi-column aiming and the re-plan are all confirmed on the real scene, and the
+remaining defect is placement quality -- the same axis the 2x5 data already has a tier for.
+
+**Seed 2 is the structural finding, and it inverts a 2x5 conclusion.**  The policy ran the full
+1500 steps; `first_five` was reached at step 230, so **1270 steps passed with the box stuck at
+five** while `cookies_in_source` kept falling the whole time.  The gate's rule is "hand over when
+the source stops shrinking", and on 2x5 that rule works because a stalled policy *stops reaching*.
+On 2x10 it does not: the policy keeps lifting Cookies out of the source, missing, and lifting
+again, which is exactly the behaviour 9.56 identified as the bottleneck.  So the source rule is
+blind to the 2x10 failure by construction, and **the stall rule that lost on 2x5 (9.60) is the one
+2x10 needs** -- its target population is not "the policy gave up" but "the policy is still trying
+and failing", which on 2x10 is most episodes and on 2x5 was 4 of 12.
+
+That reframes the flag: `--stall-steps 0` is the right default for a 2x5 collection and the wrong
+one for a 2x10 collection.  The window still has to be a whole attempt cycle (9.60's lesson
+stands -- a 2x10 grasp-to-release is 280-600 steps, so >= 700 is the honest value here, not 350).
+
+**The 2x10 ladder, restated with these numbers.**
+
+1. **Gate first, not data.**  Re-run stage 1 with `--stall-steps 700`.  If the no-trigger cases
+   convert to takeovers, the rate should land near the 2x5 band; if they convert to fast refusals,
+   the bottleneck is the source row on 2x10 too, and the answer is `A3Cookie2x10Expert`'s variable
+   batch sizes rather than a five-Cookie group.
+2. **Then placement quality.**  Seed 0's tier B is a release that did not settle.  Two
+   candidates, both cheap to test: the group's `_relief_sign` lean (4 mm) may be too small for a
+   ten-row column whose neighbour was placed by a policy, and `_place_pose`'s wall clearance
+   (5 / 3 mm) was measured for the 2x5 box.
+3. **Then the prompt distribution.**  9.61's stage 3 stands: `a3_clean_v9` carries ten 2x10 plan
+   sentences and main's benchmark draws `first_grasp=random`, so a model trained only on `n=5`
+   recoveries has learned a conditional that 10 of 11 eval seeds never ask for.  Narrow first
+   (`first_grasp=5`), full distribution second -- and the second needs the variable-batch port.
+
+### 9.64 2x10 with the stall gate: the takeover works and cannot chain (11-02)
+
+9.63 ended with "fix the gate first, and the stall rule that lost on 2x5 is the one 2x10 needs".
+That prediction was right, and the result is the most important negative finding of this line:
+**the recovery primitive is reliable per batch and the 2x10 task needs four batches.**
+
+`--scene a3_cookie_2x10_recovery --stall-steps 700 --policy-steps 1500 --expert-steps 1400`,
+twelve seeds, v9, `A3_ADOPT_STRICT_ROW=1`:
+
+| seed | tier | triggered | in box @ -> final | slots @ -> final | frames | expert failure |
+|---|---|---|---|---|---|---|
+| 0 | C | yes | 5 -> 10 | 5 -> 10 | 907 | `MOVE_TO_SLOT` |
+| 1 | C | yes | 0 -> 0 | 0 -> 0 | 1075 | `SELECT_COOKIE` |
+| 2 | no_trigger | no | -- -> 14 | -- -> 4 | 1501 | -- |
+| 3 | **A** | yes | 5 -> **20** | 5 -> 17 | 1769 | -- (3 batches) |
+| 4 | C | yes | 5 -> 10 | 5 -> 10 | 1194 | `LIFT` |
+| 5 | C | yes | 5 -> 10 | 5 -> 10 | 1172 | `LIFT` |
+| 6 | C | yes | 5 -> 10 | 4 -> 4 | 1249 | `DESCEND_TO_PLACE` |
+| 7 | C | yes | 5 -> 15 | 0 -> 12 | 1451 | -- (DONE after 2) |
+| 8 | C | yes | 6 -> 16 | 2 -> 12 | 944 | -- (DONE after 2) |
+| 9 | no_trigger | no | -- -> 14 | -- -> 11 | 1501 | -- |
+| 10 | no_trigger | no | -- -> 15 | -- -> 11 | 1501 | -- |
+| 11 | C | yes | 2 -> 2 | 2 -> 2 | 1501 | `DESCEND_TO_PLACE` |
+
+**The gate fix worked.** Triggered 9/12, against 2/3 in the three-seed smoke and -- more to the
+point -- the three `no_trigger` seeds are the ones where the *policy* reached 14, 14 and 15 in the
+box. So the stall rule now fires exactly on the episodes that stall and leaves alone the episodes
+that are still progressing, which is what 9.63 predicted it would do.
+
+**And the chain degrades, in a way that is arithmetic rather than mysterious:**
+
+| batch | seeds completing it |
+|---|---|
+| 1st | 7 / 9 |
+| 2nd | 3 / 9 |
+| 3rd | 1 / 9 |
+
+Mean gain per takeover is **+6.1 Cookies (1.22 batches)**, and reaching 20 from a stall at five
+needs **+15 (3 batches)**.  The 2x5 recovery needs one batch and succeeds at 62 % *given a
+trigger*; the 2x10 recovery needs three to four and lands at 1/12.  A per-batch rate `p` compounds
+as `p^n`, so the identical primitive is worth 62 % on one task and ~10 % on the other.  Nothing
+about the controller changed between those two numbers.
+
+**Two distinct causes, and they need different fixes.**
+
+1. **The grasp/transport fails from batch two onward (5 seeds).**  Seeds 0, 4, 5, 6 and 11 each
+   placed a clean first group and then failed in `MOVE_TO_SLOT`, `LIFT` or `DESCEND_TO_PLACE` --
+   the same source-row failure 9.60/9.62 measured on 2x5, except that on 2x5 it costs the episode
+   and here it costs the *chain*.  The expert's own first grasp disturbs the rows beside it
+   (the pads straddle the group and stand outside it), so by batch two the column it is working
+   has been worked twice.
+2. **The plan runs out of groups before the task does (2 seeds).**  Seeds 7 and 8 stopped at
+   `DONE` after two batches, at 1091 and 591 expert steps -- they did not hit the 1400-step
+   budget, so `_plan_targets` had nothing left to offer.  Both had **zero or two slots filled and
+   5-6 loose Cookies in the box**: `_corridor_blocked` refused the remaining groups because those
+   loose Cookies lie across the corridors.  That check is doing its job (those groups *would* have
+   scattered), but on a box where the policy leaves its Cookies loose it also removes most of the
+   plan.
+
+**So the honest conclusion for 2x10 is that "expert cleans up after the policy" does not work
+here**, for the same structural reason 9.41 found for the 2x5 box and then escaped: one privileged
+grasp is reliable, four in a row are not.  The 2x5 dataset works because its failure needs exactly
+one recovery.
+
+**What that leaves, in order of cost.**
+
+1. **Do not chain: hand back after one batch.**  The collector already has the machinery
+   (`GraftPolicy` owns both phases), and a policy-expert-policy rotation is what DAgger is
+   supposed to be.  Each cycle gives the policy a fresh chance to continue, and the recorded
+   trajectory teaches exactly one recovery.  This is the cheapest experiment and it is the one
+   that matches what the data can carry.
+2. **Fix the source row for repeated batches**, which is the same problem 9.62 attacked and which
+   strict mode made *worse* by refusing rows the expert could still use -- after its own first
+   grasp, nothing is within 0.4 mm.  A tolerance measured against the row's *own* last observed
+   position rather than the nominal layout is the obvious next attempt.
+3. **Port the variable batch sizes** from main's `A3Cookie2x10Expert` (`plan.batch_sizes`), so one
+   batch can carry the eight to ten Cookies that a fragmented box leaves, turning three grasp
+   attempts into one.
+
+**One measurement that got worse and has to be stated.**  The twelve episodes average **11.8/20**
+in the box against v9's 13.2 at 1500 steps -- but that is not like-for-like, because nine of the
+twelve had their policy cut off at the stall.  What *is* like-for-like: at the stall point those
+nine held five or six Cookies, and the takeover carried them to a mean of 11.0, i.e. **the expert
+added ~6 and removed none**.  So the primitive is not harmful, it is simply worth less than the
+ten Cookies a full 2x10 recovery needs.
+
+### 9.65 The collector never sent the history channel, and nothing said so (11-02)
+
+Found while checking whether a hand-back-after-one-batch rotation would be feasible, which is
+the wrong order to find it in: the fix comes first because **every takeover rate in 9.59-9.64 was
+measured on a model that was not v9**.
+
+**The defect.**  `collect_graft.py`'s `Client.infer` sent four arrays -- three camera views and
+`observation.state` -- and no `history`.  The chain from there is silent at every step:
+
+1. the adapter's `_history_vector` catches the missing key and returns `None`, deliberately, so a
+   pre-v6 checkpoint still loads;
+2. the batch therefore has no `observation.history`, so the launcher's `_stash` sets nothing;
+3. the patched `embed_prefix` begins `if window is None: return embs, pad_masks, att_masks`.
+
+So **the history token was never appended**.  This is not "a policy with a zeroed history" -- it is
+a *different architecture*: a prefix one token shorter than the one v9 was trained with, whose
+attention mask and positional layout are both off by one.  Nothing raised, no episode failed, and
+the only symptom was a takeover rate that happened to look plausible: 42 % against 9.40's 46.7 %,
+on a checkpoint (4.05) that had no history encoder at all and so could not have been measuring the
+same thing.  Two numbers agreeing was the coincidence that hid the bug.
+
+**The fix, in three places.**
+
+* `Client` takes `history_frames` (default 10) and builds the window itself, term for term the
+  benchmark's: ten frames of `[q(16), q_dot(16), a_previous(16)]`, oldest first, leading frames
+  **repeated from the first** rather than zero-filled, and `a_previous` being the action the
+  environment actually executed one step earlier -- which is why `infer` now takes it as an
+  argument (`GraftPolicy.last_action`) instead of guessing.
+* The collector prints the width it will send at startup, and the adapter now prints a **WARNING**
+  when a checkpoint *with* an encoder receives no vector.  A warning rather than an exception
+  because the same adapter serves the benchmark path, where running without the window is a
+  legitimate (if confounded) choice; the point is that the choice can no longer be invisible.
+* `--history-frames 0` is the documented opt-out for pre-v6 checkpoints.
+
+**Verified end to end, not by inspection.**  Bridge restarted on v9 with `history_dims=480`, one
+episode collected: the collector printed `history: 10 frames (480-wide observation.history)`, the
+bridge logged **zero** missing-history warnings, no shape error was raised (a wrong width is a hard
+error in this adapter), and the episode finished tier A at 10/10 with slots 4 -> 9 in 670 steps.
+
+**What this invalidates.**  Every takeover rate below was measured on the shorter-prefix model and
+has to be re-measured before it is quoted:
+
+| result | status |
+|---|---|
+| 2x5 baseline 5/12, corridor+stall 4/12, strict 4/16 (9.59-9.62) | **invalid as a v9 number** |
+| 2x10 smoke 0/3, stall=700 1/12 (9.63-9.64) | **invalid as a v9 number** |
+| 2x10 batch-chain decay 7/9 -> 3/9 -> 1/9 (9.64) | **stands** -- the expert's own grasping, no policy call |
+| `_corridor_blocked`, strict rows, the tier rule (9.60-9.62) | **stands**, all mechanism |
+| `probe_2x10_recovery` +5 per batch, 4 batches from empty (9.58) | **stands**, no policy phase |
+| 9.40's 46.7 % on 4.05 | **stands**, that checkpoint has no encoder |
+
+**One thing the fix does not settle, and it is the next question.**  The benchmark appends **one
+history frame per chunk request**, not per control step -- the call sits inside `if not
+self._queue` -- so its window spans `frames * execute` = 160 steps while the training data's spans
+ten.  Its own docstring says "this runs every step, not every `execute`" and the code does not.
+The collector now replicates the *code*, deliberately, because the 13.2/20 baseline and every
+ablation under it were measured that way and changing both at once would move the baseline.  That
+means collection and evaluation are consistent with each other and both inconsistent with training
+-- which is a real finding about v9, not a bug being hidden: it may be part of why the latent
+carried so little (9.54).  Fixing both together is a clean single-variable experiment, and it
+should be run before any more collection.
+
+### 9.66 After the history fix: the 2x5 numbers move, and move against the project (11-02)
+
+`--history-frames 10`, per-step window (`9.65` + the A change), sixteen seeds, v9, every other flag
+at its 9.59 value.  **2 / 16 accepted, both `policy_only`.  Zero expert recoveries.**
+
+| seed | tier | triggered | in box @ -> final | slots @ -> final | policy steps | expert failure |
+|---|---|---|---|---|---|---|
+| 0 | C | yes | 5 -> 5 | 4 -> 4 | 308 | `LIFT` timeout, pads 2.52 N, opening 0.224 |
+| 1 | C | yes | 5 -> 5 | 5 -> 5 | 603 | `slipped out of batch during transport` |
+| 2 | no_trigger | no | -- -> 5 | -- -> 0 | 700 | -- |
+| 3 | no_trigger | no | -- -> **11** | -- -> 8 | 700 | -- (over-delivered, contract refused) |
+| 4 | C | yes | 5 -> 5 | 0 -> 0 | 335 | `LIFT` timeout, pads 5.75 N, opening 0.255 |
+| 5 | no_trigger | no | -- -> **10** | -- -> 6 | 700 | -- (69 left in source, contract refused) |
+| 6 | no_trigger | no | -- -> 6 | -- -> 3 | 700 | -- |
+| 7 | C | yes | 5 -> 5 | 0 -> 5 | 311 | `APPROACH` not converging, 4.1 mm short after 108 steps |
+| 8 | **policy_only** | no | -- -> **10** | -- -> 7 | 516 | -- (**accepted**, 70 left) |
+| 9 | C | yes | 7 -> 7 | 6 -> 6 | 618 | `ADOPT`: free per column [3, 1] |
+| 10 | **policy_only** | no | -- -> **10** | -- -> 5 | 503 | -- (**accepted**, 70 left) |
+| 11 | no_trigger | no | -- -> 5 | -- -> 4 | 700 | -- |
+| 12 | no_trigger | no | -- -> 5 | -- -> 5 | 700 | -- |
+| 13 | C | yes | 5 -> 5 | 4 -> 4 | 344 | **none named**, expert budget 700 exhausted |
+| 14 | C | yes | 5 -> 5 | 4 -> 4 | 578 | `slipped out of batch during transport` |
+| 15 | no_trigger | no | -- -> 8 | -- -> 3 | 700 | -- |
+
+**The policy is much stronger than it was.**  Four episodes reached ten or eleven in the box under
+the policy alone (seeds 3, 5, 8, 10) where the pre-fix runs typically stalled at five.  Two of those
+are clean successes; the other two violate the exact contract (eleven moved, or sixty-nine left).
+
+**The expert got worse, and that is the number that matters: 0 / 7 against 5 / 8 before.**  With
+seven triggered episodes and a stochastic bridge this is a small sample, so it is not yet a
+measurement of an effect -- but the *failure modes* are informative, because they are all on the
+**source** side:
+
+| failure | count | what it means |
+|---|---|---|
+| `LIFT` timeout at 2.5-5.8 N with the jaws part-closed | 2 | the pads closed on a row that does not hold together |
+| `Cookie slipped out of batch during transport` | 2 | the grasp formed and then came apart |
+| `APPROACH` not converging, 4.1 mm short | 1 | the chosen row is outside the vertical-grasp envelope |
+| `ADOPT` refused, free slots [3, 1] | 1 | correct refusal |
+| **no failure named, expert budget exhausted** | 1 | see below |
+
+The first three are the same family 9.60/9.62 measured, and the plausible mechanism is *causal*:
+a stronger policy takes more Cookies out of the source, so by the time it stalls the rows the expert
+needs have been worked harder and are more disturbed.  That is a hypothesis, not a result -- the
+controlled test is to replay the expert from each episode's recorded takeover state.
+
+**A real logic gap the run exposed: the expert can loop without ever naming a failure.**  Seed 13
+burned all 700 expert steps, moved nothing, and reported `failure_phase = None`.  The per-phase
+guard is 420 steps and it never fired, so the machine was cycling
+(`SELECT_COOKIE -> ... -> SELECT_COOKIE`) with `phase_steps` reset at every advance.  Every other
+failure in this project is *named*; this one is not, and a budget exhaustion that says only
+"`failed`" cannot be told apart from "the arm was thinking".  A global "no target progress in N
+steps" guard belongs in `_act_step` alongside the per-phase one.
+
+**Two judgment bugs, now confirmed on data.**
+
+* **Budget exhaustion is stamped `failed`, which erases `policy_only`.**  `tier` derives
+  `no_trigger` from `failed`, so seeds 3 and 5 -- where the *policy* delivered ten and eleven --
+  are recorded as `no_trigger` rather than `policy_only`.  Their refusal is correct (both violate
+  the exact contract), but the recorded reason is wrong, and a genuinely successful
+  `policy_only` that happens to finish at step 700 would be silently discarded.
+* **The `--stall-steps` default is wrong for 2x5 in this regime.**  Five of the nine
+  `no_trigger` episodes ended with the policy still removing Cookies from the source
+  (`in_source` 69-70 while `source_at_first_five` was 70-71) and the box stuck at 5-8.  That is
+  exactly the "keeps taking, never delivers" state the stall rule exists to catch, and it is off.
+
+**What this changes about the plan, stated plainly.**  The premise of the whole line was 9.56's
+"a failed grasp is never retried".  With the history channel finally wired, the policy retries
+enough to finish the task 4 times in 16 on its own, and the recovery rates measured in 9.59-9.64
+are not the recovery rates of this model.  Before any further collection or training, three things
+have to be re-established on the fixed pipeline: the benchmark score (9.56's 13.2/20 was measured
+on the old window), the trigger rate, and the per-batch expert success rate from recorded states.
+
+### 9.67 What the policy actually does when it fails: it closes its jaws in mid-air (11-02)
+
+> **RETRACTED -- see 9.68.**  The events this section calls `air_close` are grasps whose jaws
+> began closing during the transport and completed at the row.  The probe anchored its window on
+> the close rather than on the descent bottom, so it measured the descent and missed the grasp.
+> The true failure is a release 9 mm above the box floor, and "closed on air" never happens.
+> Kept because the mechanism of the mistake is worth more than the claim was.
+
+9.56 counted jaw open-close cycles and concluded "a failed grasp is never retried".  That is a
+statement about **attempts**, and it cannot distinguish two failures with nothing in common:
+
+* the jaws close **around the row** and nothing comes up -- a grasp that failed to hold;
+* the jaws close **in the air** and there was never a grasp at all.
+
+`scripts/probe_grasp_events.py` separates them on the recorded rollouts.  For every close event
+it measures (a) how far the effector is above the nearest Cookie's own height, (b) which Cookies
+then move with the hand, and (c) which of those rise more than 8 mm.  A grasp lifts a row ~12 mm
+in these traces, so the classes are cleanly separated rather than threshold-tuned:
+
+| class | meaning |
+|---|---|
+| `grab_lift` | closed at the row and carried Cookies up |
+| `grab_no_lift` | closed at the row and they did not come up |
+| `air_close` | closed with the effector **30 mm or more above** the row |
+| `missed` | descended to the row, closed, nothing between the pads |
+
+**2x10, eight rollouts, 22 close events:**
+
+| class | count | share |
+|---|---|---|
+| `grab_lift` | 6 | 27.3 % |
+| `grab_no_lift` | **1** | **4.5 %** |
+| `air_close` | **10** | **45.5 %** |
+| `missed` | 5 | 22.7 % |
+
+Failed closes have a **median height gap of 77.2 mm**.  The first successful grasp of seed 0
+closes at 12.0 mm, and seeds 1, 2 and 7 close at 77-85 mm -- three quarters of a metre above the
+table, on a pile that stands 0 mm tall relative to itself.
+
+**2x5, the same eight seeds, the same checkpoint:**
+
+| class | count | share |
+|---|---|---|
+| `grab_lift` | **13** | **81.2 %** |
+| `grab_no_lift` | 0 | 0 % |
+| `air_close` | **0** | **0 %** |
+| `missed` | 3 | 18.8 % |
+
+**So the answer to "grab and fail to lift, or hover with an empty gripper" is: neither, and the
+distinction matters.**  It is not a half-held grasp (4.5 %); it is a close performed in mid-air
+(45.5 %).  And it is **specific to 2x10** -- the same weights, the same source box, the same eighty
+Cookies produce zero air-closes on 2x5.
+
+**Two consequences, and the second one is why this matters for the recovery plan.**
+
+1. **"Never retried" was the wrong diagnosis.**  The policy does keep cycling; what it does not do
+   is *descend*.  A recovery dataset built on "what to do after a grasp missed" addresses a failure
+   that accounts for 1 of 22 events.  The failure that accounts for 10 of 22 is "close at 80 mm",
+   and no amount of recovery-from-a-missed-grasp data teaches the hand to come down.
+2. **It explains the history result in 9.66 without needing a new mechanism.**  A policy that stops
+   with its jaws shut 80 mm above the pile leaves the expert an inherited state
+   `_cookies_in_jaws() == 0` -- which is exactly the `jaws_held = 0` the source report measured on
+   the failing takeover (seed 1).  The expert then takes the "clear away and re-grasp" path, and
+   that path is what fails in `LIFT`.  The two findings are one finding.
+
+**What this does not yet explain, stated so it is not overclaimed.**  *Why* 2x10 air-closes and 2x5
+does not is open.  The source box, the Cookies and the weights are identical; what differs is the
+instruction and the target box.  `a3_clean_v9` carries ten 2x10 plan sentences whose `n` varies
+from 1 to 9, and a plan that says "grasp 1 cookie" is satisfied by a jaw that closes on one -- the
+model may have learned a close as a *plan step* rather than as the end of a descent.  That is a
+hypothesis with a cheap test: score 2x10 with `first_grasp=5` only, where the sentence matches what
+2x5 asks for, and see whether air-closes disappear.
+
+### 9.68 RETRACTION of 9.67, and the failure mode it was hiding (11-02)
+
+**9.67 is wrong and this replaces it.**  It claimed that 45 % of the policy's closes on 2x10 happen
+"in mid-air" with the effector 78-84 mm above the row, and concluded the policy "never descends".
+The measurement that produced that was anchored at the wrong event.
+
+**What went wrong.**  The probe detected a close as the gripper channel crossing 0.45 downward and
+called the following 25 steps its "lift window".  But the gripper channel starts closing *during*
+the transport, tens of steps before the hand arrives at the row: on 2x10 seed 1 the channel goes
+`1.000 -> 0.263` at frame 288 while the effector is at z = 0.847, and the hand then **descends from
+0.847 to 0.768 by frame 320 and grasps four Cookies there**.  The window (288-313) contained the
+descent and none of the grasp, so a perfectly ordinary grasp was recorded as "closed on air".
+
+**The corrected measurement.**  Anchor on the *descent bottom* -- a local minimum of the effector's
+height within 20 mm of the Cookies' own height, inside the source box -- and ask what left the
+source and what entered the target over the following 250 steps.  Restricted to the episode's
+active phase (a parked arm drifts at Cookie height and otherwise registers as an "attempt"):
+
+| | 2x5 (20 attempts) | 2x10 (29 attempts) |
+|---|---|---|
+| grabbed and **delivered** | 9 (45 %) | 24 (83 %) |
+| **grabbed, delivered nothing** | **7 (35 %)** | **4 (14 %)** |
+| grabbed 1-2 only | 4 (20 %) | 1 (3 %) |
+| **grabbed nothing at all** | **0 (0 %)** | **0 (0 %)** |
+
+**"Closed on air" never happens -- not once in 49 attempts across both tasks.**  Every descent that
+reaches the row takes at least one Cookie out of the source.  (The 110 `nothing` events in the raw
+2x10 count are all in the idle tail, where the parked arm's drift crosses the Cookie-height plane
+forty times.)
+
+**And "grabbed but delivered nothing" is not a transport failure either.**  Tracking the five
+Cookies through the 400 steps after each such grasp gives their final resting height:
+
+| task | seed | step | left source | entered target | final z | vs a placed Cookie |
+|---|---|---|---|---|---|---|
+| 2x5 | 0 | 320 | 5 | 0 | 0.7776 | **+9.1 mm** |
+| 2x5 | 2 | 52 | 5 | 0 | 0.7794 | **+10.9 mm** |
+| 2x5 | 3 | 59 | 5 | 0 | 0.7789 | **+10.4 mm** |
+| 2x5 | 4 | 73 | 5 | 0 | 0.7776 | **+9.1 mm** |
+| 2x5 | 6 | 311 | 5 | 0 | 0.7772 | **+8.7 mm** |
+| 2x5 | 7 | 71 | 5 | 0 | 0.7771 | **+8.6 mm** |
+| 2x10 | 3 | 626 | 5 | 0 | 0.7773 | **+8.8 mm** |
+
+A correctly placed Cookie rests at z = 0.7685; the box rim is at 0.7755.  Every one of those
+batches is at **0.777 +/- 0.001, i.e. 1.5-2 mm above the rim, 8.6-10.9 mm above the floor**.  The
+full trace of 2x5 seed 0's batch is the demonstration:
+
+```
+f320  y=0.284-0.309  z=0.769   grasped at the far end of the source
+f360                z=0.852   lifted
+f420  y=0.091-0.116  z=0.827   carried to the target box, above it
+f480  y=0.098-0.123  z=0.777   released -- 8.5 mm high
+f560+  unchanged              rests on the rim for the remaining 500 frames
+```
+
+`cookies_in_target_mask` counts **0 of the 5** at every one of those steps, and the episode's score
+stays at 5 to the end.  **So the batch is grasped correctly, carried correctly, aimed correctly,
+and let go 9 mm too high, where it balances on the rim.**  This is 9.41's release-height finding,
+reproduced on the v9 checkpoint with the history channel working -- and it is the *dominant* 2x5
+failure (35 % of attempts), not a grasp failure at all.
+
+**Two cases are different and are worth separating.**  2x5 seed 1 and 2x10 seed 7 end at
+`z = 0.766-0.768` (correct height) with a **negative** target delta: the batch reached the box and
+*knocked cookies out of it*.  That is a placement-collision failure, not a release-height one.
+
+**What this changes for the recovery plan.**  9.56's premise -- "a failed grasp is never retried"
+-- was already weakened by 9.66; it is now dead in this form.  The policy does not fail to grasp
+(0 of 49 attempts), it fails to **release at the right height**, and it fails to **stop** doing
+that.  A DAgger dataset of "recover from a missed grasp" addresses a failure that does not occur.
+What the data supports is either (a) teaching the release, which is a *height* correction and would
+show up as a change in the last 20 frames of each demonstration, or (b) leaving the release alone
+and teaching the expert to clean up after it -- which is the same +5-per-batch primitive 9.58
+measured, and which 9.66 showed is worth ~45 % of attempts when the history channel is present.
+
+**The comparison the pictures actually show**, since the frames were rendered for it.  All three
+views are the policy's own inputs, so this is what the model sees, not a diagnostic overlay.
+
+* **`front`** answers *where and how high*.  In the delivered grasp the forearm is low and the
+  fingers are down among the Cookies at the **near** end of the source box.  In the lost grasp the
+  arm is over the **far** end and visibly higher -- and after the release the batch is a yellow
+  cluster sitting on the box's far rim, above the ones already inside.
+* **`left_wrist`** answers *what is between the fingers*.  Delivered: the two fingers are
+  interdigitated with the Cookie rows, with Cookies on both sides right up to the pads.  Lost: the
+  fingers are at the bottom of frame with a wide brown gap between them and the rows -- and at the
+  release frame the view contains the **target box's white rim** with the batch balanced on it.
+* **`right_wrist`** shows neither, in either case: the right arm only holds its own gripper shut
+  and never enters the workspace, so that camera is table and shadow.  Worth saying plainly because
+  it means two thirds of the image tokens in every observation carry no information about this
+  task -- which is a training-side observation, not a failure.
+
+**A caveat about what a single frame can prove.**  The release-height failure is invisible in the
+*close* frame: at that moment the two cases look similar (fingers in the pile, jaws near shut).  It
+only becomes visible ~160 frames later, at the release, and only in the `front` view as "the batch
+is above the rim rather than in the box".  This is exactly why the failure went undiagnosed for so
+long -- every convenient frame, including the ones a person would naturally screenshot, is the
+frame before the mistake happens.
+
+### 9.69 The failure, measured properly: a batch that lands leaning 27 degrees (11-02)
+
+9.68 was directionally right ("release too high, batch perched") and factually wrong on the
+mechanism and on both of its key numbers.  Two measurement errors caused it, and both are worth
+recording because they are the kind that produce confident wrong answers.
+
+**Error 1: the demonstrations were the wrong task.**  `a3_clean_v9` holds two tasks in one file --
+**episodes 0-199 are the 2x10 demonstrations, 200-399 are the 2x5 ones** -- and every "expert"
+number in 9.67/9.68 sampled `np.unique(episode_index)[:80]` without checking.  All of it was 2x10.
+That is why the demonstrations appeared to release four times per episode and at 0.825: they were
+2x10 episodes with four batches, and the detector was wrong on top of that.
+
+**Error 2: the detector marked the retreat, not the release.**  The expert raises the gripper
+channel to ~1.0 when it *starts its retreat*, and the earlier detector called the crossing of 0.45
+the release.  The actual letting-go is a small rise -- 0.28 (the width the jaws descend at) to
+0.38-0.43 -- with the effector still inside the box.  A release is now: the channel rising by
+>0.03 over 4 steps while the effector is over the target box **and at or below the rim**.
+
+**With both corrected (`scripts/measure_release_task.py`, `scripts/census_final_states.py`):**
+
+| | releases / ep | release z | vs rim | off-column | above rim |
+|---|---|---|---|---|---|
+| expert, 2x5 | **2.00** | 0.7628 | −12.1 mm | **0.3 mm** | 0 / 40 |
+| v9, 2x5 | 2.12 | 0.7651 | −9.9 mm | 1.4 mm | 0 / 17 |
+| expert, 2x10 | **4.00** | 0.7692 | −5.8 mm | 4.4 mm | 0 / 80 |
+| v9, 2x10 | **3.00** | 0.7711 | −3.9 mm | 4.5 mm | 3 / 24 |
+
+So the policy does **not** release "50 mm in the air": on 2x5 all 17 releases are below the rim, and
+the height differs from the expert by 2.3 mm.  **Release height is not the failure.**
+
+**What the failure actually is.**  Every Cookie that left the source and was refused, in all eight
+2x5 rollouts:
+
+| seed | counted (and its column) | refused near the box | that batch's z | implied tilt |
+|---|---|---|---|---|
+| 0 | 5 @ x 0.063-0.074 | 5 @ x 0.120-0.121 | 0.7776-0.7777 | **27.5°** |
+| 1 | 0 | 11 @ x 0.063-0.123 | 0.7668-0.7695 | 0-? (scattered) |
+| 2 | 5 @ x 0.120-0.121 | 5 @ x 0.061-0.062 | 0.7792-0.7793 | **33.4°** |
+| 3 | 6 @ x 0.118-0.119 | 5 @ x 0.061-0.062 | 0.7788-0.7789 | **31.9°** |
+| 4 | 5 @ x 0.128 | 5 @ x 0.065-0.074 | 0.7772-0.7775 | **26.2°** |
+| 5 | **10** (both columns) | 0 | -- | -- |
+| 6 | 5 @ x 0.062-0.063 | 5 @ x 0.123-0.124 | 0.7771-0.7772 | **25.6°** |
+| 7 | 5 @ x 0.123-0.124 | 5 @ x 0.068 | 0.7773-0.7774 | **26.4°** |
+
+The refused batch is always in the **opposite column** from the counted one, and its height is
+always 0.777-0.779.  Inverting the height through the Cookie's own half-extents
+(0.025 x 0.0032 x 0.0125, resting on the box floor) gives the tilt:
+
+> **33 of the 41 refused Cookies are leaning 25.6°-33.8°, median 27.3°. The judge allows 15°.**
+
+They are not on the rim: their x is 0.120 while the box's x wall is at 0.152, so they are 32 mm
+inside.  They are standing at the right column and the right rows, **tilted about 12° past the
+limit**, because there is nothing to stand up straight against.
+
+**Why the second batch cannot stand up, in three numbers.**  The box is 26 mm deep; a Cookie is
+25 mm tall; so after one batch the placed Cookies' tops are at 0.7803 -- **5.3 mm above the rim**.
+The next batch must descend into a 50 mm slot with **4 mm** of clearance to the outer wall and
+**6 mm** to that protruding neighbour.  There is no room to land upright, so it lands leaning.
+That is why it is always the *second* batch, whichever column it goes to, and why 85 % of the 2x5
+point deficit (33 of 39) is this one event.
+
+**2x10 fails differently, and this is the sharpest new number.**  Its deficit is 51 points, but only
+7 of them (14 %) are refused Cookies; the rest are Cookies **never picked up**.  The policy makes
+**3.00 releases per episode where the expert makes 4.00** -- it never attempts the fourth batch at
+all.  Seed 0 is the clean case: 13 left the source, 13 were counted, 0 were refused, and the 7
+missing points are seven Cookies still in the source box.  So 2x5 loses points to *placement* and
+2x10 loses them to *throughput*, and the two need different remedies.
+
+**One caveat that limits how far the comparison can be pushed.**  The demonstrations are the
+*accepted* set -- the collector discarded every failed episode -- so "the expert never fails" is
+survivorship, not a measurement.  Its perfect 0.3 mm off-column figure is a property of a scripted
+controller, and the right reading is "the demonstrations contain only upright outcomes", not "the
+expert is 5x more precise and that is why it works".
+
+**What this changes.**  The failure is not a release that is too high and not a grasp that misses.
+It is a **second batch that cannot seat because the box has 1 mm of headroom**.  That is a
+geometry-and-tolerance problem, and the remedies that follow are different from the ones the
+recovery plan was built on:
+
+1. **Teach the batch to be wider apart when released** (open the jaws further, or release after a
+   small downward settle), so the five Cookies arrive already spanning the column instead of
+   collapsing into a lean.  This is a modification of the last 20 frames of each demonstration and
+   needs no new collection.
+2. **Or accept the lean and make the judge's 15° limit the target**: an upright-tolerance is
+   arguably too strict for a box that is 26 mm deep and a Cookie that is 25 mm tall, but changing
+   the judge changes the task, so it needs to be an explicit decision rather than a tuning.
+3. **2x10 needs the fourth batch attempted at all**, which is a throughput fix (9.56's retry
+   behaviour), not a placement fix.
+
+### 9.70 Force-triggered release intervention: built, and the trigger does not separate (11-02)
+
+The hypothesis from 9.69 was that the second batch jams against the Cookies already in the box,
+and that letting go as soon as the fingers register the squeeze would let the group settle.  The
+intervention was built (`BridgeChunkPolicy._intervene`, `--release-intervention RISE_N`) and the
+trigger was measured against the eight recorded rollouts.  **It does not work, and the reason is
+that the signal is not there.**
+
+**What was built.**  A wrapper that only ever raises the two gripper channels to 0.49; every other
+entry is the policy's own.  That restriction is deliberate -- the point is to test one hypothesis,
+and moving the arm too would confound it.
+
+**First version, and why it had to be gated.**  A sustained touch rise with no positional gate
+fired **34-40 times per episode**, all of them at the *grasp*: closing the jaws on a row produces
+30-70 N of fingertip impulse, an order of magnitude more than any placement.  Gating on "over the
+target box and at or below the rim" removes those, and is also the honest statement of what the
+trigger means.
+
+**With the gate, the signal that remains cannot separate the two cases.**  Peak sustained rise in
+the placement window, per batch:
+
+| seed | batch 1 | batch 2 | batch 2's outcome |
+|---|---|---|---|
+| 0 | 0.23 | **1.15** | leaned, refused |
+| 1 | 0.14 | **15.62** | catastrophic collision |
+| 2 | 0.20 | **0.35** | leaned, refused |
+| 3 | 1.12 | **0.54** | leaned, refused |
+| 4 | 0.62 | **0.49** | leaned, refused |
+| 5 | 0.07 | **0.20** | **clean, scored** |
+| 6 | 0.23 | **0.38** | leaned, refused |
+| 7 | 0.63 | **0.37** | leaned, refused |
+
+A clean placement (seed 5, batch 2) reads **0.20**; four of the six refused batches read 0.35-0.54,
+and one reads 0.49 -- *below* seed 3's clean first batch at 1.12.  There is no threshold that
+separates them.  The only outlier is seed 1 at 15.62, which is a different event: that is a collision
+hard enough to scatter eleven Cookies, not the gentle lean being targeted.
+
+**Run live, it also changed nothing.**  One episode with `--release-intervention 0.8` scored 5/10,
+identical to the baseline -- and inspection showed why: that run's policy produced a *different
+trajectory* (75 Cookies left in the source, one batch instead of two), so the intervention never
+had the state it was written for.  The bridge is stochastic (9.40: 0.086 rad between two samples of
+one observation), so a single-episode test of a rare event is not a test at all.
+
+**Why the signal is weak, mechanically.**  The jam is a *geometric* obstruction: the group's outer
+face rests on the neighbour with a normal force of order the group's weight distributed over a
+contact patch, not a squeeze.  The fingertips read the *gripping* force (2-5 N here), and the jam
+modulates it by a few tenths of a newton.  The two quantities are three orders of magnitude apart --
+a 5 N grip against a ~0.02 N contact -- so the jam is a rounding error on the channel being read.
+
+**What would carry the signal instead.**  The one that is directly sensitive to the jam is not force
+but **motion**: the trace shows the effector descending 4-11 mm while the Cookies stay put, i.e. the
+hand-to-Cookie distance growing from 6 mm to 17 mm.  That is a rigid-body measurement, visible in
+`observation.eef_pose` plus the camera, and it is exactly what a policy could learn.  Force was the
+wrong channel to reach for.
+
+**Status of the code.**  `_intervene` and `--release-intervention` are kept, defaulted off, with
+this measurement recorded in the docstring.  They are a working harness for a *motion-based* trigger,
+and re-deriving the negative result would be the expensive part.
+
+### 9.71 The motion trigger does not separate either, and the reason is instructive (11-02)
+
+9.70 ended with "force was the wrong channel; the signal is in *motion* -- the effector descends
+4-11 mm while the Cookies stay put".  That was measured, on the same eight rollouts, and **it fails
+for the same reason**: the quantity is real but it is not exclusive to the failure.
+
+**The measurement.**  For each descent over the target box, count the effector travel during which
+the nearest carried Cookie's height did not change by 1 mm:
+
+| unfollowed travel | outcome | batch |
+|---|---|---|
+| 126.7 mm | FAIL | seed 1, batch 2 (the collision) |
+| **28.1 mm** | **OK** | **seed 4, batch 1** |
+| 16.6 mm | FAIL | seed 0, batch 2 |
+| 14.2 mm | FAIL | seed 7, batch 2 |
+| 10.2 mm | FAIL | seed 2, batch 2 |
+| 8.3 mm | FAIL | seed 6, batch 2 |
+| **8.0 mm** | **OK** | **seed 7, batch 1** |
+| **7.7 mm** | **OK** | **seed 2, batch 1** |
+| 5.1 mm | FAIL | seed 4, batch 2 |
+| 2.2 mm | FAIL | seed 3, batch 2 |
+| 0.0 mm (x6) | OK | every other clean batch |
+
+**A clean batch reads 28.1 mm, worse than four of the eight failures**, and two more clean batches
+(8.0, 7.7) sit inside the failure range.  No threshold separates them.
+
+**Why, and this is the useful part.**  The measure conflates two events that produce the same
+signature in the channels used:
+
+1. **the jam** -- the group is held up by a neighbour while the hand descends;
+2. **the release and fall** -- the jaws open, the hand starts to rise, and the Cookies fall the last
+   few millimetres on their own.
+
+In a clean placement the second dominates; in a jammed one the first does.  Both read as "the
+effector moved and the Cookies did not", and separating them needs a discriminator that knows
+whether the jaws are still closed -- which is available (the gripper channel is part of the action),
+but which turns a one-line test into a state machine, and the state machine is what
+`batch_expert.py` already is.
+
+**Two negatives now stand, and together they close this direction.**  Force cannot see the jam
+(5 N grip against 0.02 N contact, 9.70) and motion cannot distinguish it from a release (this
+section).  What that leaves is not a better trigger but a different question: the jam is a
+*planning* failure -- the second batch is aimed at a column whose neighbour already protrudes 5 mm
+above the rim -- and both experiments were attempts to fix a planning error with a reactive
+controller.
+
+**So the honest summary of the intervention thread is: a real, measured failure, two plausible
+reactive remedies, both falsified on the same eight rollouts, for reasons that are now specific
+rather than mysterious.**  The pieces are kept (`_intervene`, the constants, the measurements) so a
+future attempt starts from the numbers rather than from the hypothesis.
+
+### 9.72 The 200-frame arm, re-measured with the per-step window: 5.33, i.e. nothing (11-03)
+
+**The claim under test.** 9.69 proposed that the 200-frame arm's regression was an artefact of the
+per-chunk history window: 200 frames at 16 steps/chunk needs 3200 control steps to fill, while a
+2x5 episode is 1000 steps and a 2x10 episode 1500--3200, so the 200-frame window *never filled* and
+the arm measured latent absence rather than window length.  Prediction: with `_advance_history`
+called from `act` every step, the arm recovers to about the 10-frame level.
+
+**Re-measured** (`--task 2x5 --episodes 24 --seed-start 0 --max-steps 1000 --history-window
+--history-frames 200`, bridge `history_dims=9600`, log `w200_2x5_24.log`):
+
+| arm | n | mean | sd |
+|---|---|---|---|
+| 10 frames (v9) | 88 | **5.60** | -- |
+| 200 frames, per-chunk window (old) | 57 | 5.88 | -- |
+| 200 frames, per-step window (this) | 24 | **5.33** | 3.03 |
+
+5.33 vs 5.60 is a difference of 0.27 with a standard error of about 0.68.  Nothing.
+
+**And that means the 2x5 arm could never have answered the question.**  With sd 3.03 the coefficient
+of variation is 57%; detecting a half-point difference at 80% power needs roughly 570 episodes per
+arm.  Even the old 5.88 is not distinguishable from this 5.33 (0.55 +/- 0.74).  The 2x5 comparison
+should never have been read as evidence in either direction, including in 9.69.
+
+**Where the power actually is.**  The 2x10 effect that motivated all of this was 2.17 points, which
+at this variance needs n ~ 31 per arm -- so n=24 was adequate there and inadequate here. 2x10 is
+also the only task that ever responded to the latent (9.52, paired p=0.0022).  The question is
+therefore still open, and it is only open on 2x10.
+
+**Two scoring details worth recording.**  `EpisodeScore.score = cookies_in_target` and
+`max_score = required_cookies`, so a 2x5 episode can legitimately print `11/10`: over-delivery into
+the target is counted, it just cannot satisfy the exact-count contract.  Two of the 24 seeds did
+this (12 and 17); capping them at 10 gives 5.25 and changes nothing.  The `/10` is a denominator,
+not a clamp.
+
+### 9.73 The per-chunk window predates every history result, so the whole ablation is confounded (11-04)
+
+**Found while setting up the 2x10 re-measurement.**  `git show b3bacac` (10-27, the commit that
+introduced the history channel) has `_history_vector(observation)` *appending* a frame and being
+called from inside `if not self._queue:` -- that is, once per 16-step chunk.  The bug fixed on
+11-02/11-03 was therefore not introduced after the sweeps; **it was present from the first commit
+in which a history arm was ever benchmarked.**
+
+**The magnitude, from the logs rather than by inference.**  2x10 was run at 1500 steps, and the
+driver prints `bridge forwards` at the end: `v9nokl_2x10_47.log` says **94 forwards** for 1500
+steps.  A 200-frame window advanced once per chunk therefore received 94 of its 200 frames --
+**47 % full** -- and the 10-frame window received ten samples spanning 160 steps instead of ten.
+
+| arm | trained window | frames actually delivered at 1500 steps |
+|---|---|---|
+| v9 (10 frames) | 10 consecutive (0.5 s) | 10 samples over **160 steps (8 s)** |
+| v9w200 (200 frames) | 200 consecutive (10 s) | **94** of 200, i.e. 4.7 s |
+
+So every row in 9.52, 9.53 and 9.54 -- including the v9 baseline `13.22 (n=88)` that all of them
+are quoted against -- measures a checkpoint being served a time-stretched, under-filled version of
+the channel it was trained on.  Nothing has been measured with the window the checkpoints were
+trained against.
+
+**This does not retract the results, it re-labels them.**  They are still valid measurements of
+*those deployed configurations*, and the 2x10 ordering (10 frames > no history, p = 0.0022) still
+holds of them.  What cannot be claimed is any statement about window length per se, and in
+particular 9.53's conclusion -- "lengthening the window is not an improvement" -- was drawn from a
+200-frame arm that never saw more than 47 % of a window.  The honest status of that conclusion is
+*untested*, and 9.69's artefact hypothesis stays alive for 2x10 even though 9.72 killed it for 2x5
+(where the arm has no power anyway).
+
+**What is running now.**  2x10, v9w200, `--prompt-style task --source-column 1 --max-steps 1500`,
+seeds 0--55, with the per-step window, so 200 frames are delivered from step 200 onward.  Chosen
+over v9 first because it is the arm whose conclusion is in question, and because its own number
+gives a two-sided read either way: unchanged near 11.05 says the window length barely matters and
+9.53 stands; a move to about 13.2 says the arm was measuring under-fill and 9.53 is void.
+
+**The confound that this makes unavoidable:** if the fix matters, it matters for v9 as well, and
+tonight's arm cannot then be compared against the stale 13.22.  v9 on 2x10 with the per-step
+window, same seeds, is the next night's run and is required before any final claim.
+
+**Two prompt deviations recorded, because both are sentences the checkpoints never saw.**
+`--prompt-style short` sends 'transfer 10 cookies into target box', and `a3_clean_v9h`'s task
+table contains only the eleven `task`-style sentences (indices 0--9 the 2x10 plan variants,
+index 10 the 2x5 two-batch sentence).  Last night's 2x5 arm (9.72) used `short`; the historical
+rows it was compared against used `task --source-column 1`.  9.51 measured the 2x5 prompt flag as
+a red herring, so this is very unlikely to explain 5.33 vs 5.60, but 9.72's null is now a null
+under an unseen instruction and should be read that way.
+
+**Power, so the next two nights are read correctly.**  Paired differences on 2x10 are *not*
+correlated by seed: 9.53 reports a paired effect of -2.01 with SE 0.75 at n = 104, which implies
+sd_diff = 7.65 against raw sds of 5.27 and 5.76 -- i.e. essentially the independent value
+sqrt(5.27^2 + 5.76^2) = 7.81.  Pairing buys nothing on this benchmark, so n is set by the
+two-sample variance: SE at n = 56 is 1.04, enough to separate 0 from 2.2 at p about 0.03, and not
+enough for anything smaller.
+
+### 9.74 All ablations to date, in one table (11-04)
+
+Collected from the per-seed logs rather than from earlier prose, so the numbers here are the ones
+the runs actually printed.  `n` is the count of 2x10 episodes found under that tag; where the
+prose quoted a slightly different n (5.60 at n=88 vs 5.65 at n=80 for v9 on 2x5) the difference is
+eight seeds that live under an older tag, and it changes nothing.
+
+**Training-side ablations, all on the same data, base and recipe, differing in one flag.**
+
+| ablation | flag | 2x5 | 2x10 | delta vs 10-frame, paired |
+|---|---|---|---|---|
+| no encoder | `A3_HISTORY_ENCODER=0` | 5.67 +/-0.37 (64) | 10.64 +/-0.74 (64) | **-2.92 +/-0.92**, W16/L39 |
+| **10 frames (base)** | `A3_HISTORY_STEPS=10` | 5.65 +/-0.27 (80) | **13.18 +/-0.58 (80)** | -- |
+| 200 frames | `A3_HISTORY_STEPS=200` | 5.88 +/-0.35 (57) | 10.96 +/-0.54 (112) | **-2.16 +/-0.80**, W25/L48 |
+| progress weight 0 | `A3_HISTORY_PROGRESS_WEIGHT=0` | 5.69 +/-0.48 (32) | 11.38 +/-0.81 (32) | -2.83 +/-1.33, W10/L13 |
+| KL weight 0 | `A3_HISTORY_KL_WEIGHT=0` | 6.04 +/-0.38 (48) | 12.95 +/-0.83 (43) | -0.40 +/-1.27, W16/L19 |
+
+Supporting latent scale, `mu_std` read off each arm's `train_*_30000.log` at step 30000:
+
+| arm | base | 200 fr | KL=0 | progress=0 |
+|---|---|---|---|---|
+| `mu_std` | 0.0529 | 0.0382 | **0.1700** | **0.0017** |
+
+Two readings that survive: removing the progress supervision collapses the latent by 31x and lands
+the arm between the base and no-encoder (9.54), and removing KL quadruples the latent for -0.40
+points, i.e. buys nothing (9.54 and the encoder-only sweep agreeing at R^2 0.439 vs 0.434).
+
+**Architecture evolution, 8 seeds each, kept only as background** -- every one of these differs
+from its neighbour in more than one way, so none of them is an ablation:
+
+| version | 2x5 | 2x10 | what changed |
+|---|---|---|---|
+| v2 | 5.00 | 3.25 | 2x10 weighted to 50 % of the data |
+| v4 | 3.50 | 3.75 | 2x10 filtered to the n=5 plan |
+| v5 | 3.88 | 3.12 | two privileged progress channels |
+| v6 | 4.50 | 4.50 | history encoder at 3e-06, i.e. no-op |
+| v7 | **6.25** | 2.50 | encoder lr to 1e-04 |
+| v8 | 2.88 | 5.43 | rebalanced data |
+| **v9** | 4.88 | **11.14** | trunk lr to 2.5e-05, four changes at once |
+
+The v6-to-v9 step is the one that mattered, and 9.45 attributes it to the trunk rate rather than to
+the module: v6-v8 sit at `mu_std` 0.057-0.062 with R^2 0.51-0.54, v9 at 0.0576 with R^2 0.853.  An
+encoder trained on a history of a trunk that is not moving has nothing to read.
+
+**Collection-side ablations, 2x5, different metric (accepted episodes, not score):**
+
+| arm | n | tier A | rate | triggered | failure cost |
+|---|---|---|---|---|---|
+| baseline | 12 | 5 | 42 % | 8 | 351 / 547 steps |
+| + corridor + stall 350 | 12 | 4 | 33 % | 10 | -- |
+| + corridor + strict rows | 16 | 4 | 25 % | 8 | 254 or **0** steps |
+| after the history-channel fix | 16 | **2** | 13 % | -- | both `policy_only`, **0 expert frames** |
+
+2x10 counterpart: 1 of 12, batches completed 7/9 -> 3/9 -> 1/9.
+
+The two reactive interventions are both negatives and both specific: force cannot see the jam
+(5 N grip against 0.02 N contact, 9.70) and displacement cannot distinguish a jam from the release
+and fall that follows it (9.71).
+
+**The caveat that governs every training-side row.**  All of them except the two running tonight
+were measured with the per-chunk history window (9.73), so "200 frames is worse than 10" is a
+statement about two *mis-served* configurations, not about window length.  The two arms in flight
+are the first measurement of either window as trained.
+
+### 9.75 Strict success, measured across every arm, and why "in the box" is not "success" (11-04)
+
+The question was how often each arm *actually* satisfies the contract, not how many Cookies it gets
+in the target.  Read off the `Status:` field rather than the score, and the answer is much harsher
+than any mean suggests.
+
+**2x10 (20 in target, 60 remain in source, all released, 20-step hold):**
+
+| arm | n | strict | 95 % CI | full basket (score 20) | within one (>=19) |
+|---|---|---|---|---|---|
+| **KL=0** | 43 | **6 (14.0 %)** | 6.6--27.3 | 7 (16.3 %) | 8 (18.6 %) |
+| **10 fr (base)** | 80 | 5 (6.2 %) | 2.7--13.8 | 9 (11.2 %) | 18 (22.5 %) |
+| 200 fr | 112 | 4 (3.6 %) | 1.4--8.8 | 5 (4.5 %) | 14 (12.5 %) |
+| no encoder | 64 | 3 (4.7 %) | 1.6--12.9 | 5 (7.8 %) | 7 (10.9 %) |
+| progress=0 | 32 | 1 (3.1 %) | 0.6--15.7 | 1 (3.1 %) | 3 (9.4 %) |
+| 10 fr per-step (running) | 40 | 0 (0.0 %) | 0--8.8 | 2 (5.0 %) | 8 (20.0 %) |
+| 200 fr per-step (running) | 46 | 2 (4.3 %) | 1.2--14.5 | 3 (6.5 %) | 6 (13.0 %) |
+
+**2x5 (exact ten slots, 70 remain, 20-step hold):**
+
+| arm | n | strict | 95 % CI | full basket (>=10) |
+|---|---|---|---|---|
+| KL=0 | 48 | 1 (2.1 %) | 0.4--10.9 | 7 (14.6 %) |
+| 10 fr (base) | 80 | 5 (6.2 %) | 2.7--13.8 | 12 (15.0 %) |
+| 200 fr | 57 | 3 (5.3 %) | 1.8--14.4 | 7 (12.3 %) |
+| no encoder | 64 | 1 (1.6 %) | 0.3--8.3 | 11 (17.2 %) |
+| progress=0 | 32 | 1 (3.1 %) | 0.6--15.7 | 5 (15.6 %) |
+
+Pooled over every arm with n >= 30: **2x10 strict 21/416 = 5.0 %**, 2x5 strict 11/281 = 3.9 %.
+
+**KL=0 is the best 2x10 arm on this metric and the difference is not significant.**  6/43 against
+5/80 is z = +1.43, p = 0.15; the full-basket counts are 7/43 against 9/80, p = 0.43.  On 2x5 the
+same arm is the *worst* on strict (1/48) while its full-basket count is identical to base
+(14.6 % against 15.0 %, p = 0.95).  So the honest reading is that KL=0 moves nothing measurable,
+and the 14 % is the upper end of what n = 43 can resolve, not evidence.
+
+**The two contracts are not equally hard, and that explains the whole shape of this table.**
+
+| | 2x5 | 2x10 |
+|---|---|---|
+| `require_exact_slots` | **True** | False |
+| `require_released` | False | **True** |
+| extra clauses | every one of the 10 slots occupied by a one-to-one match, and the collection's bounding box within 30 mm of **all four** inner walls | none beyond the count |
+
+So 2x5 asks for *slot-accurate placement* and 2x10 asks only for *twenty Cookies released on the
+floor of the box*.  The measured consequences:
+
+| | full basket | of which FAIL | why |
+|---|---|---|---|
+| 2x10 | 32 | 11 (34 %) | counts satisfied, but the 20-step hold never completed |
+| 2x5 | 44 | **33 (75 %)** | counts satisfied, but the ten slots were not all occupied |
+
+Confirmed on named episodes: `v9s_2x10_39/42/52` all report `cookies_in_target=20,
+cookies_in_source=60` -- the count predicate is satisfied exactly -- and all three still end
+`max_steps_exceeded`.  Since `success_hold_steps = 20`, those episodes put the twentieth Cookie in
+place inside the last second of a 1500-step budget.  They are not placement failures, they are
+**settling-time failures**, and 11 of 32 full baskets are of that kind.
+
+The 2x5 gap is the opposite: 33 of 44 full baskets fail because one of the ten slots is empty even
+though ten Cookies are inside, which is the same 27-degree, few-millimetre-offset population 9.69
+characterised.  "In the box" and "in its slot" differ by the placement accuracy the policy does not
+have.
+
+**What this means for a reward.**  Strict success at 4--5 % is too sparse to learn from, but the
+gap between the two events is large and structured: on 2x10 a third of the full baskets are one
+second of settling away, and on 2x5 three quarters are one slot away.  A shaped reward should
+therefore score *per-Cookie slot occupancy and settle time* rather than the terminal contract --
+which is also what makes the dense signal available on every episode instead of on 5 % of them.
+
+### 9.76 Every benchmark episode fed the encoder a dead `a_previous` channel (11-04)
+
+**Found while writing the RECAP collector**, by asking which code path calls
+`BridgeChunkPolicy.observe_step`.
+
+The history window is 48 floats per frame: `[q(16), q_dot(16), a_previous(16)]`.  The
+`a_previous` entry is written by `_advance_history` from `self._applied_action`, and
+`_applied_action` is set in exactly one place -- the `observe_step` hook.  Two callers exist
+in this repo:
+
+| caller | calls `observe_step` | used by |
+|---|---|---|
+| `src/a3_dual_arm_sim/runner.py:216` | **yes** | `collect_graft.py`, this repo's own collection |
+| main's `workflows/episode_execution.py` | **no** | every `bench_pi05_on_main.py` run |
+
+So on the benchmark path `_applied_action` stays `None`, `_advance_history` takes its
+zeros branch, and the encoder is fed a window whose third channel is sixteen zeros for the
+whole episode -- while `a3_clean_v9h` trained it on real applied actions
+(`add_history_window.py` shifts the recorded `action` column by one row).  `test_collect.py`
+pins both directions: filled when the hook is called, all zeros when it is not.
+
+**What this does and does not invalidate.**  It does not overturn any arm-to-arm
+comparison: every arm measured through the benchmark saw the same dead channel, so the
+ordering -- 10 frames beating no encoder on 2x10, 200 frames landing near no-encoder, tonight's
+per-step arms agreeing at about 12.0 -- was obtained under one consistent handicap.  What it
+does invalidate is any claim about the *absolute* value of the channel, including the
+natural reading that "the latent is worth 2.5 Cookies on 2x10".  The true figure is
+unknown and, if anything, larger: the checkpoint is being served an input it never saw.
+
+**Why it stayed invisible for a week.**  The window has the right width, two of its three
+channels are correct, and nothing errors.  A checkpoint whose encoder mostly reads `q` and
+`q_dot` degrades gracefully rather than failing, so the symptom is a slightly worse score
+that nobody would attribute to a specific channel.  The collector written today computes the
+same window through `observe_step` and shows `a_previous` non-zero on 59.5 % of entries,
+which is what surfaced it.
+
+**The fix is in the collector, not in main.**  `collect_rollouts.py` drives its own loop
+precisely so it can call `observe_step` after every step; patching main's runner would have
+been the alternative, and it is the wrong layer -- `observe_step` is this repo's contract,
+not main's.  Rollout data written from now on carries the real channel, so RECAP's value
+model and the next round of training see the input as trained.
+
+**One consequence to keep in mind when reading §9.52-§9.75.**  The v9 and w200 benchmarks
+that produced them were run with this channel dead.  A re-measurement with the collector's
+loop is the honest way to get absolute numbers, and it is cheap -- the same 56 seeds, the
+same bridge, only `observe_step` added.
+
+### 9.77 `a_previous` is worth about +2 Cookies, and fixing the window alone was a regression (11-04)
+
+Follow-up to 9.76.  The collector from §11 was used to re-run seeds 0--11 of v9 through a loop
+that calls `observe_step`, so for the first time the encoder got a history window with the real
+applied action in its third channel.  Everything else is identical: same bridge, same checkpoint,
+same `execute=16`, same 1500 steps, same instructions.
+
+| configuration | n | mean | sd |
+|---|---|---|---|
+| 10 fr, per-step window, **`a_previous` = 0** (the benchmark path) | 12 | 11.17 | 6.90 |
+| 10 fr, per-step window, **`a_previous` correct** (the collector) | 12 | **13.25** | 5.12 |
+
+Paired, same seeds: **+2.08 +/- 2.27, z = 0.92, p = 0.36**, 6 wins / 5 losses / 1 tie.
+
+**Not significant, and it should not be reported as if it were.**  What makes it worth
+recording anyway is the effect size relative to everything else measured this week: 2.08 is
+larger than the -2.16 that the whole 200-frame investigation was about, and it comes from a
+channel that was silently zero.  The variance also moved in the direction a real effect
+predicts (sd 6.90 -> 5.12); noise usually does not narrow a distribution.
+
+**The uncomfortable part: fixing the window by itself appears to have been a regression.**
+
+| 2x10, v9, all with `a_previous` = 0 unless noted | n | mean |
+|---|---|---|
+| 10 fr, per-chunk window (the pre-11-02 state) | 80 | **13.18** |
+| 10 fr, per-step window (11-02 "fix") | 46 | 11.74 |
+| 200 fr, per-step window | 51 | 11.94 |
+| 10 fr, per-step, **`a_previous` correct** | 12 | **13.25** |
+
+Under the old per-chunk behaviour the window advanced once per 16-step chunk, so its ten
+entries spanned **160 steps (8 s)** instead of ten consecutive steps (0.5 s).  That was called
+a bug, and as a *sampling rate* it is one -- but as a *horizon* it was the only long-range view
+of `q` and `q_dot` the model ever received.  Fixing it to the training definition shortened the
+horizon by 16x, and the 10-frame arm lost about 1.4 Cookies doing so.  Adding `a_previous` back
+recovered that and returned the arm to 13.2, which is where the per-chunk version already was.
+
+**So the two bugs partly cancelled, and neither arm has ever been measured as trained.**  The
+checkpoint was built on 10 consecutive frames *with* real applied actions; the benchmark has
+neither, in two different ways depending on when it ran.
+
+**What this does not change.**  Every arm-vs-arm comparison inside one measurement era still
+holds, because both sides carried the same handicap: 10 frames beating no-encoder on 2x10, the
+200-frame arm landing between them, and tonight's per-step pair agreeing at 11.74 / 11.94.  The
+*absolute* numbers are all depressed by an unknown amount, and 9.72's conclusion -- that the
+2x5 200-frame arm has no power -- is unaffected.
+
+**What it does change.**  9.73 concluded that "the window artefact cannot explain the v9-vs-w200
+gap".  That still holds (both per-step arms had `a_previous` = 0).  But 9.73's *premise* -- that
+the per-step arms are the correct configuration -- is now doubtful: they are correct in sampling
+rate and still wrong in content, and the content error costs more than the sampling-rate error
+did.  The 200-frame arm has never been run with `a_previous` either, and its 10-second horizon
+may interact with the finding above in the opposite direction.
+
+**Next measurement, and it is cheap.**  Re-run both arms for 56 seeds through the collector's
+loop.  At 10 workers that is about 1.5 h per arm, and it gives the first numbers in this repo
+measured on the distribution the checkpoints were trained on.  Until then the honest baseline for
+RECAP is *unknown* rather than 13.18.
+
+### 9.78 `cookies_in_target` is not monotone, so the reward has to be the running maximum (11-04)
+
+The plan (§2.3) defined RECAP's reward as the frame-to-frame difference of
+`cookies_in_target`.  The first 12 collected rollouts show that definition is unusable.
+
+**Every episode's count falls.**  100 % of them, 18.5 times per episode on average.  The
+excursions are almost all flicker rather than losses:
+
+| length of the run below the running maximum | share |
+|---|---|
+| 1 frame | **80.9 %** |
+| <= 2 frames | 89.3 % |
+| <= 5 frames | 94.9 % |
+| <= 50 frames | 97.2 % |
+
+A Cookie being regrasped, nudged, or re-settled inside the box leaves the containment
+region for a frame -- `_cookie_inside_target` needs the footprint inside *and* the bottom
+within 4 mm of the floor -- and comes straight back.  The two long excursions (up to 699
+frames) are the real ones.
+
+**What the raw difference would have taught the value function.**  Over 12 episodes the
+raw difference gives **294 positive and 222 negative rewards**: 43 % of the non-zero signal
+is a false "this made things worse", aimed at exactly the moments the policy is working
+inside the box.  RECAP's advantage is `A_t = r_t + V(t+1) - V(t)`, so those 222 frames
+would have been labelled low-advantage -- and they are the placement frames, which are the
+behaviour the whole method is supposed to strengthen.
+
+**The fix is `maximum.accumulate`.**  Reward becomes the change in the running maximum:
+**73 positive, 0 negative** on the same data.  It is potential-based, so the episode's
+cumulative reward equals the peak with no double counting.
+
+**The cost, stated with its number.**  The running maximum ends at the episode's *peak*,
+not its final count, so on the 3 of 12 episodes that lost a Cookie for good it
+overestimates: 6 peaks against 159 finals summed over 12 episodes is 4.4 % high.  Real
+losses are rare and small compared with the flicker they would otherwise be buried in, and
+`value_target` is therefore also the peak -- a value head trained on the final count while
+the reward spoke about peaks would be fitting two different functions.
+
+**A cheaper alternative that was considered and not needed.**  Debouncing per Cookie, with
+the same five-frame rule the progress channel already uses (`add_progress_channels.py`),
+would keep real losses and remove 94.9 % of the flicker.  It needs the per-Cookie mask
+(`cookies_in_target_mask`) in the trace, which this collector does not currently store, and
+it introduces a five-frame latency into the label.  Running-max needs neither and removes
+100 % of the false negatives, so it is what `build_value_labels.py` implements.  If the 4.4 %
+overestimate ever matters, the mask is one field away.
+
+**The invariant is now enforced.**  `--check` fails on any negative reward, which is the
+check that would have caught this definition before a single training step.
+
+### 9.79 Scope of the dead `a_previous` channel: proven, and narrower than it first looks (11-04)
+
+9.76 asserted the channel was dead on the benchmark path from static reading.  This section
+records the empirical proof and then narrows the blast radius, because "every number is
+contaminated" is both too strong and too vague to act on.
+
+**Proof, from a live 48-step benchmark episode** (v9 bridge, `history_window=True`,
+96 forward passes' worth of steps, spying on the hook):
+
+```
+run_episode 来自: a3_dual_arm_sim.workflows.benchmark
+episode 48 步
+observe_step 调用次数: 0
+_applied_action is None: True
+a_previous 通道非零: 0.0%
+```
+
+Not "rarely called" -- zero times in 48 steps, and the channel is 0.0 % non-zero at the end.
+The one occurrence of the string `observe_step` in `bench_pi05_on_main.py` is the method
+*definition* (line 379), not a call site.
+
+**Why: main has no hook.**  `grep -rn observe_step /tmp/a3-main/src/` returns nothing.  The
+hook is this repo's contract (`src/a3_dual_arm_sim/runner.py:216`), and the benchmark driver
+imports main's `make_cookie_benchmark`, so its episodes run main's
+`workflows/episode_execution.run_episode`, which has no such call.
+
+**So the split is by driver, not by arm:**
+
+| driver | calls `observe_step` | what ran through it |
+|---|---|---|
+| `bench_pi05_on_main.py` → main's `episode_execution` | **no** | every ablation sweep (§9.45-§9.75): v9s, v9w200, v9nokl, v9np, v9nhs, tonight's per-step pair |
+| `src/a3_dual_arm_sim/runner.py` | **yes** | `collect_graft.py` (all DAgger data), `probe_expert_dwell.py`, `probe_error_tolerance.py`, `run_expert_gate.py` |
+| `scripts/recap/collect_rollouts.py` | **yes** (own loop, same call) | tonight's 12-episode pilot and all RECAP data |
+
+**Two rows are exempt for a different reason: the channel does not exist for them.**
+
+* v1-v5 took no history input at all.
+* `v9nhs` (`A3_HISTORY_ENCODER=0`) has no encoder, so nothing reads the channel, and
+  `run_seed_sweep.sh` passes `--history-window` only for arms whose `history` field is 1.
+
+That exemption rescues the most important comparison in the sequence.  §9.52's headline --
+v9 beats no-encoder by 2.92 on 2x10 -- compares a checkpoint served a two-thirds-correct
+window against one with no window at all.  **That result stands**: a history encoder reading
+`q` and `q_dot` while being blinded to `a_previous` was still worth about 2.5 Cookies over
+having no encoder.  What 9.76 doubted, and what is now unknown, is only the *additional*
+value of the third channel.
+
+**And it makes the §9.77 pilot's +2.08 the missing term rather than a contradiction.**  If
+`q + q_dot` alone is worth +2.5 over nothing, and adding the real `a_previous` is worth another
++2.1 on 12 paired seeds, the two are additive and both plausible: the window has three
+channels and the arms measured so far have only ever had two of them working.
+
+**Practical consequence.**  The ablation ordering in §9.74 is intact and needs no re-run for
+internal validity.  What needs a re-run is any claim about the *absolute* level of v9 on 2x10,
+and any claim that compares a history arm against a non-history arm at face value -- because
+the history arms were all handicapped and the non-history arms were not.  §9.52's paired
++2.92 is therefore a **lower bound**.
+
+### 9.80 Does the dead `a_previous` channel threaten the RL direction? Measured, and no (11-04)
+
+The question was whether the channel bug biases the strict-success estimate enough to steer
+RECAP the wrong way, and whether more seeds would settle it.  The answer has three parts and
+only the last one is a real risk.
+
+#### 1. The model is not contaminated; only the ruler is
+
+The decisive check, run against the training data itself:
+
+| check | result |
+|---|---|
+| `a_previous` non-zero share on `a3_clean_v9h` | **100 %**, one sampled frame |
+| same, over 200 randomly sampled frames | mean 99.8 %, median 100 % |
+| frames with an all-zero channel | **0 of 200** |
+
+So v9 trained on a live third channel.  The bug lives in main's `episode_execution`, which
+only the benchmark driver uses (`collect_graft.py` goes through this repo's `runner.py`,
+which calls the hook).  Consequence: **every number the RL pipeline will consume is clean**
+-- the 400-episode expert set, the DAgger data, and every rollout the new collector writes.
+The value model cannot inherit the bias.
+
+#### 2. A few dozen seeds cannot resolve strict success, and more seeds would not help anyway
+
+Baseline: v9 2x10 strict = 5/80 = 6.2 %, Wilson 95 % **2.7–13.8 %** -- already a five-fold
+range before any new measurement.
+
+| n per arm | true rate 10 % vs 6.2 % | true rate 15 % vs 6.2 % |
+|---|---|---|
+| 30 | z 0.53, p 0.59 | z 1.11, p 0.27 |
+| 40 | z 0.62, p 0.54 | z 1.28, p 0.20 |
+| 56 | z 0.73, p 0.47 | z 1.52, p 0.13 |
+| 100 | z 0.97, p 0.33 | **z 2.03, p 0.04** |
+| 430 | **z 2.02, p 0.04** | z 4.21, p < 0.001 |
+
+80 % power needs **191 seeds/arm** if the true rate is 15 %, **390** if 12 %, **829** if 10 %.
+
+**And the deeper point: seeds shrink variance, not bias.**  Running 30 more seeds on the
+biased harness yields a tighter interval around a wrong centre -- a number that looks
+authoritative and is not.  A wide honest interval is safer than a narrow biased one.
+
+#### 3. The pilot gives no evidence that the bug depresses strict success at all
+
+Same 12 seeds, benchmark (bug) against collector (fixed):
+
+| | bug | fixed |
+|---|---|---|
+| episodes reaching 20 | **0** | **0** |
+| episodes reaching >= 19 | 3 | 2 |
+| best score | 19 | 19 |
+
+The +2.08 mean gain did not lift the ceiling.  Breaking the 12 seeds down by their *bug-era*
+score gives +9.6 on the sub-10 group, -3.8 on 10-17 and -2.7 on >= 18 -- a pattern that looks
+like mechanism and is not.  That is regression to the mean: the grouping variable shares a
+noise term with the delta.  A simulation of the null (true effect +2.08, per-arm noise sd 5)
+reproduces the shape by itself, expecting +5.2 / +0.8 / -3.3 for those three groups.  Nothing
+can be inferred from a single-measurement split, and the honest reading is **the pilot is
+consistent with any effect on the ceiling between strongly positive and mildly negative**.
+
+#### 4. The one mechanism that would actually mislead the RL direction
+
+Not the bias -- **switching rulers between arms**.  If the RECAP arm is evaluated with the
+collector loop (+2.08 relative to the old harness) while the baseline stays on the old
+benchmark, the comparison manufactures a phantom gain of about **+2 Cookies**, which is the
+same size as the effect the whole method is supposed to produce.  A real +2 and a phantom +2
+are then indistinguishable.
+
+**Rule, therefore: one harness for every arm in a comparison.**  The collector loop is the
+right choice -- it is the only path that feeds the encoder what the checkpoint was trained on
+-- and the old benchmark numbers simply stop being comparable once it is adopted.
+
+#### 5. What to use as the RL metric
+
+| metric | power at n = 56 | verdict |
+|---|---|---|
+| mean score | detects +2.08 at p = 0.045 | **primary** |
+| peak count (running max) | similar, and it is the value target | **primary** |
+| strict success | needs 191–829 seeds | long-term only |
+
+This is not only a power argument.  9.75 showed strict success is a *compound* event: 34 % of
+full 2x10 baskets fail on the 20-step hold, 75 % of full 2x5 baskets fail on slot occupancy.
+Optimising a metric that mixes placement accuracy, settling time and the exact-count contract
+gives the value function an ambiguous target.  The peak count is what the value head predicts
+anyway, so training and reporting agree.
+
+**Summary.**  The bug does not corrupt the RL data, cannot be resolved as a strict-success
+question by any affordable sample size, and has no evidence behind the claim that it suppresses
+strict success.  Its only real danger is inconsistency between arms, which is a process rule
+rather than a modelling one.
+
+### 9.81 The history-module bugs, fixed (11-04)
+
+Four defects were found while planning RECAP's code landing.  All four are now closed.
+
+**1. `_a3_history_latent` could be stale (`train_pi05_launcher.py:445`).**
+`embed_prefix` returns early when the batch carries no window, and it used to return without
+clearing the cached latent.  `policy_forward` reads that cache to build the progress loss, so
+a windowless batch was supervised against the *previous* batch's latent -- right shape, finite
+value, loss falls, nothing errors.  Unreachable today (every batch has a window) and
+guaranteed to fire the moment RECAP mixes datasets.  Fixed by clearing the cache on the early
+return.
+
+**2. `reduction != "mean"` silently dropped both auxiliary terms (`:492`).**
+`lerobot_train.py` calls `policy.forward(batch, reduction="none")` whenever RA-BC sample
+weighting is on, and the old guard `if ... reduction != "mean": return` skipped the progress
+and KL terms entirely.  A run that loses its only supervision on the latent is
+indistinguishable from a run where the module is not learning.  Now computed per sample and
+reduced three ways, with the `"mean"` path kept numerically identical -- verified against the
+old expression on the real tensors, **KL diff 0.0**, so `A3_HISTORY_KL_WEIGHT` still means what
+it meant.
+
+**3. `history_encoder.out` was dead weight (`history_encoder.py:169`).**
+`nn.Linear(128, 2048)` = **264,192 parameters** that no forward pass ever called.  The claimed
+"630,018 new parameters" was therefore overstated by 42 %: the module was really 365,826, of
+which the encoder was 101,634 and `history_proj` 264,192.  Every checkpoint carried the dead
+tensor.  Removed; measured encoder parameters now **101,634**, and old checkpoints still load
+clean (`strict=False` drops the two unexpected keys with a warning).
+
+**4. Two packages named `a3_dual_arm_sim` cannot share a pytest process.**
+This repo installs `src/a3_dual_arm_sim/` (flat, no `data/`); main's tree at
+`/tmp/a3-main/src/a3_dual_arm_sim/` has `data/`, `workflows/`, `tasks/`.  Python keys modules
+by name, so `pytest tests scripts/recap/tests` fails with
+
+```
+ModuleNotFoundError: No module named 'a3_dual_arm_sim.data'
+```
+
+which reads as a missing file rather than as a collision.  Both suites pass alone.
+
+**This one took three attempts, and the first two are the instructive part.**
+
+| attempt | what it did | outcome |
+|---|---|---|
+| 1 | conftest purges `sys.modules`, prepends main's path | **broke all 29 tests in `tests/`** |
+| 2 | conftest only *checks* `a3_dual_arm_sim.data` is resolvable, refuses to start otherwise | **broke the standalone recap run** |
+| 3 | conftest prepends main's path, no purge; guard fires only if the *wrong* package is already loaded | correct |
+
+Attempt 1 failed because pytest loads conftest files **before** importing test modules, so the
+purge ran before `tests/` imported the package it needs.  Attempt 2 failed for the mirror-image
+reason: the path insert that makes `a3_dual_arm_sim.data` resolvable happens at import time
+*inside the test module*, which is after conftest, so a check there always fails.
+
+The resolution is that the two operations are not symmetric: **inserting a path is harmless,
+deleting cached modules is not.**  And a conftest only applies to its own directory, so
+prepending main's path here cannot disturb `tests/` -- that suite never loads this file.  The
+guard that remains distinguishes by module *origin* rather than by presence, because main's
+package may legitimately be loaded already.
+
+`scripts/recap/run_tests.sh` runs the two suites in sequence.  Its first version grouped
+`tests/test_history_encoder_patches.py` with the recap tests, which fails for the same reason
+-- that file lives in `tests/` and imports this repo's package.  The split is by **which
+package each suite needs**, not by what the test is about.
+
+**Test status, with attribution checked rather than assumed:**
+
+| suite | result | note |
+|---|---|---|
+| `scripts/recap/tests` | **15 passed** | includes the `a_previous` both-directions pin and the progress-tracker drift guard |
+| `tests/test_history_encoder_patches.py` | **5 passed** | |
+| `tests` (full) | 517 passed, **7 failed** | |
+
+The 7 failures are pre-existing and unrelated.  Verified by stashing the six touched files
+and re-running: the same 6 cookie-expert tests fail on the untouched tree, and the seventh
+(`cosmos_policy_aloha.yaml`) is a missing-transport environment issue.  My own changes touch
+`_adopt_current_state`/`__init__` in `batch_expert.py` and nothing on those tests' paths.
+
+### 9.82 The collector now records the expert too, and merging parts is verified pixel-wise (11-04)
+
+**The collector gained `--policy expert`.**  RECAP's positive class is supposed to be
+genuinely-better behaviour, and `v9`'s own rollouts supply it only 6 % of the time.  The
+expert supplies it always, so both now go through one loop, one schema and one trace format --
+which is what makes them loadable by one trainer without a branch.
+
+Smoke test, 2 seeds each, 2x10:
+
+| source | seed | score | steps | strict |
+|---|---|---|---|---|
+| expert | 910 | **20/20** | 1091 | **True** |
+| expert | 911 | **20/20** | 1074 | **True** |
+| v9 rollout | 900 | 0/20 | 200 (budget capped) | False |
+| v9 rollout | 901 | 0/20 | 200 (budget capped) | False |
+
+Three things had to change for the expert to work, and each was a real failure first:
+
+1. **The adapter is constructed, not named.**  `make_policy_adapter("variable_grasp")` returns
+   the string; the construction happens in `bench._episode_policy`.  Passing the spec straight
+   through gave `AttributeError: 'str' object has no attribute 'act'`.
+2. **One adapter per episode.**  `bind_env` builds the controller *around* the environment, and
+   `run_episode` closes its environment.  Reusing an adapter drives a closed scene, so the
+   parameter is a factory called per seed.
+3. **The expert has no history channel, and the schema has one anyway.**  Writing zeros keeps
+   both sources in one dataset; raising instead would have forced two layouts.  A zero window
+   is the honest representation of "this policy has no history", not a fabricated trajectory --
+   and it is distinguishable from a rollout's, which measured 100 % non-zero from frame 1.
+
+Verified in the merged mix: episodes 0-1 (expert) show `a_previous` **0.0 %** non-zero,
+episodes 2-3 (rollout) show **100 %**, and the labels record 2 successes and 2 failures.
+
+**`merge_parts.py` and `verify_merge.py` are written and validated.**  The merge is more than a
+concatenation because four things are per-part:
+
+| per-part quantity | what goes wrong if copied |
+|---|---|
+| `task_index` | **silently wrong instructions** -- `part_00`'s index 0 is "Grasp 4", `part_01`'s index 0 is "Grasp 7" |
+| `episode_index`, `index` | duplicated row numbers, and `dataset_from/to` no longer bound the episodes |
+| video `file_index` | every episode after the first shows the wrong video |
+| `stats` | quantiles averaged across parts are not the union's quantiles |
+
+On a real 6-part merge the task table collapsed 9 local indices to **7 distinct sentences**,
+which is the check that matters: equal sentences map to one global index, unequal ones never
+share one.
+
+**The verification is pixel-level, not structural.**  A merge that copies every part into
+`file-000.mp4` and rewrites only `file_index` passes every count and boundary check while
+showing every episode the wrong footage.  So `verify_merge.py` compares frame 0 of each merged
+episode against frame 0 of its source part:
+
+```
+part_00: merged row     0 vs part row 0 -> max|diff|=0.000000 OK
+part_01: merged row  3000 vs part row 0 -> max|diff|=0.000000 OK
+part_02: merged row  6000 vs part row 0 -> max|diff|=0.000000 OK
+part_03: merged row  9000 vs part row 0 -> max|diff|=0.000000 OK
+part_04: merged row 12000 vs part row 0 -> max|diff|=0.000000 OK
+part_05: merged row 15000 vs part row 0 -> max|diff|=0.000000 OK
+```
+
+plus a live-window check at two interior samples (100 % non-zero) so a merge cannot quietly
+zero the history column.
+
+**One environment note, because it will bite again.**  Loading any of these datasets needs
+`video_backend="pyav"`.  The default picks torchcodec, which fails with
+`libavutil.so.58: cannot open shared object file` against this container's FFmpeg -- the same
+reason `train_pi05_a3.sh` passes `--dataset.video_backend=pyav`.  Without it the failure is a
+wall of FFmpeg version noise that says nothing about the backend.
+
+### 9.83 RECAP stages 2 and 3 built, and the global advantage threshold is backwards (11-05)
+
+Collection finished: 300 rollouts + 100 expert episodes, 552,789 frames, and the value head
+cleared its gate.  Two things in this section are results and one is a defect worth its own
+paragraph.
+
+**The data.**
+
+| set | episodes | frames | strict success | mean score |
+|---|---|---|---|---|
+| rollout (v9, 1500-step budget) | 300 | 450,000 | 11 (3.7 %) | 12.98 |
+| expert (2x10 variable_grasp) | 100 | 102,789 | 94 (94.0 %) | 19.50 |
+
+The expert's 94 % is the positive class RECAP needs; v9 supplies 3.7 %.  Note that the
+rollout mean is **12.98 against the benchmark's 11.74**, i.e. +1.24 with p = 0.16 -- the
+direction of §9.77's `a_previous` pilot, still not significant because the benchmark arm is
+n = 46 and carries its own 0.84 standard error.
+
+**Three merge defects surfaced on real data, all silent if unhandled.**  §9.82 validated the
+merge on six parts of one camera layout; 300 episodes found the rest:
+
+1. **A part's video is not one file per camera.**  `left_wrist` sharded at episode 28 (two
+   files, 28 + 10) while `front` and `right_wrist` did not, because LeRobot rolls each camera
+   to `file-001.mp4` independently when it hits its size cap.  The first merge refused; a merge
+   that copied only `file-000` would have silently truncated ten episodes' video to the wrong
+   frames.
+2. **Two roots both name their directories `part_00..part_07`.**  `build_value_labels.py`
+   keyed on `part.name`, so the expert parts overwrote the rollout parts in the lookup and 12
+   `(seed, episode_index)` pairs read the wrong root's trace.  Fixed by keying on
+   `"{root}/{part}"`; the part count went 8 -> the correct 14.
+3. **Both tracks used seeds 1000+**, because a seed picks the *scene* and the policy is what
+   differs.  The merged trace directories collided on every seed; each source part now gets its
+   own parent directory.
+
+**The value model.**  Encoder frozen, only a 3.4 M-parameter head trained, on cached features
+(SigLIP patch-embedding mean per camera + masked language-embedding mean, 8192 wide, stride 5
+-> 110,558 rows).
+
+| | |
+|---|---|
+| holdout Spearman (gate: 0.6) | **0.699** |
+| early-quarter Spearman | **0.481** (5,489 frames) |
+| predicted mean vs actual | 14.64 vs 14.66 Cookies |
+
+The early-quarter number is the one that matters.  The overall figure is generous by
+construction -- late in an episode the current count nearly determines the peak, so a head that
+merely counts passes 0.6.  0.48 on the first quarter says it carries something a counter does
+not.  Leakage checks: `observation.progress` is hard-zeroed in the inputs (it is a privileged
+simulator quantity that would not exist on a robot) and the cache layout contains no progress
+channel.
+
+**The defect: a global 30th-percentile threshold labels successful episodes *worse*.**
+
+The obvious implementation -- and the one both upstream projects use -- takes one percentile
+over all frames.  Measured here:
+
+| rule | positive rate, successful episodes | positive rate, failed episodes | verdict |
+|---|---|---|---|
+| global percentile | **23.3 %** | **31.7 %** | **backwards** |
+| per-episode percentile | 74.2 % | 32.0 % | correct |
+
+The per-episode *mean* advantage was already right (+0.98 successful vs +0.44 failed); what
+broke was the frame-level rate.  The reason is episode length: a successful episode spends most
+of its frames in "everything is placed, nothing new" where `A_t ~ 0`, and a global cut puts
+those frames in the negative class.  Conditioning a policy on that teaches **"frames spent
+carrying are good"** -- a property of the trajectory's *phase*, not its quality.
+
+Taking the top 30 % *within each episode* removes the length dependence: every episode
+contributes the same fraction of positive frames regardless of whether it finished early.
+`compute_advantages.py` now writes both columns (`positive_global` retained for inspection,
+`positive` used for training) and **prints the success-vs-failure rate check on every run**, so
+this cannot regress unnoticed.
+
+### 9.84 RECAP stage 4, twice: the reward was too coarse, then the sentence turned out inert (11-06)
+
+Stage 4 was run twice.  The first run (4A) lost 5.4 Cookies against v9; the second (4B) fixed
+the reward and recovered to within 3.1, but **the advantage condition itself measured zero in
+both runs**.  Both conclusions are load-bearing, and the second one is the more expensive fact.
+
+**All four arms, seeds 300+ on one harness (56 seeds, 18 for the sanity arm):**
+
+| arm | weights | suffix | strict | mean | sem |
+|---|---|---|---|---|---|
+| `r4b_pos` | 4B | `" Advantage: positive"` | 5.4 % | 9.84 | 0.74 |
+| `r4b_nos` | 4B | none | 3.6 % | 9.00 | 0.79 |
+| `r4b_neg` | 4B | `" Advantage: negative"` | 0.0 % | 8.61 | 1.21 |
+| `v9` | v9 | none | 12.5 % | **12.96** | 0.75 |
+
+Paired, common seeds only:
+
+| comparison | delta | n | W/L |
+|---|---|---|---|
+| `r4b_pos − r4b_nos` | **+0.84 ± 0.88** | 56 | 30/21 |
+| `r4b_pos − r4b_neg` | +0.39 ± 1.80 | 18 | 10/8 |
+| `r4b_pos − v9` | −3.12 ± 0.97 | 56 | 15/39 |
+| `v9 − r4b_nos` | +3.96 ± 1.07 | 56 | 34/14 |
+
+**The conditioning is inert, and the three-condition comparison is what shows it.**  On the 18
+seeds all three arms share: positive 9.00, no-suffix 8.61, negative 8.61.  For conditioning to be
+working the order has to be positive > none > negative; instead *none and negative are identical
+to two decimal places* (paired `nos − neg = +0.00 ± 1.59`, W6/L8).  The model is not reading the
+tail of the instruction at all.  `build_task_variants.py` is verified to write the suffix --
+every episode's `instruction` field ends with it -- so this is the policy ignoring text it was
+fine-tuned on, not a plumbing bug.
+
+This is exactly the check `run_eval_suite.sh` was written to perform, and it is why the negative
+arm was worth 18 seeds: without it, `+0.84 ± 0.88` against no-suffix invites the reading "small
+positive effect, need more seeds", when the honest reading is "the mechanism does nothing."
+
+**Why the reward change still mattered.**  4A→4B isolated the label change: same base, same
+steps, same lr, only `task_index` differs.  Mean went 8.32 → 9.84 (+1.52), and against v9 the
+gap narrowed from −5.41 ± 1.09 to −3.12 ± 0.97.  So a reward that can see slot precision and wall
+coverage is worth about 1.5 Cookies even when the conditioning built on it is inert -- the
+labelled data trains better as plain BC, which is a real (if unglamorous) result.
+
+**The layered reward.**  Counting Cookies in the box cannot separate the task's two halves:
+31.2 % of the 400 collected episodes put all 20 in the box, but only 19.5 % also seat all 20 in
+valid slots and 70.5 % touch all four walls.  The gap `in_box − slotted` averages **+1.04 and is
+non-zero in 62.5 % of episodes (max 5)**.  `layered_reward.py` replaces the count with
+
+$$\Phi(s) = 1.0\,n_{\text{box}} + 0.5\,n_{\text{slot}} + 1.0\,\mathbb{1}_{\text{walls}}, \qquad \max\Phi = 31.0$$
+
+which raises episode-level separation from AUC 0.959 / ρ +0.713 to **AUC 0.991 / ρ +0.752**, and
+removes the tie at 20 that made the old target blind at the top of its range.
+
+Two properties had to be corrected during the build, both caught by measurement rather than by
+reading the code:
+
+* **`slotted ≤ in_box` is false**, in 355 of 400 episodes.  `_target_slot_occupancy` tests a
+  Cookie's *centre* against `TARGET_SLOT_TOLERANCE` (10 mm × 2.5 mm) while `cookies_in_target`
+  requires the whole oriented bounding box inside; a tilted Cookie gives `slotted = in_box + 1`.
+* **The `source` layer is vacuous.**  `cookies_in_source` is 80 at frame 0 of all 400 episodes
+  and only empties, so after the running maximum it contributes a constant.  It is excluded from
+  the potential and reported as `dropped` instead.
+
+**The hindsight advantage.**  The RECAP-style bootstrapped advantage is degenerate here, and the
+arithmetic says why: rewards are non-zero on **2557 of 552789 frames** (6.4 per episode), and `V`
+predicts the episode's final potential, so `V(t+N) − V(t) ≈ 0` over 50 steps and `A` collapses to
+"reward in the next 2.5 s" -- zero for ~80 % of frames.  Measured discrimination at the 70th
+percentile was **−4.6 pp, i.e. backwards**.
+
+Because every trace runs to completion, the future does not need to be estimated:
+
+$$\text{headroom}(t) = \Phi_{\text{peak}} - \Phi_{\text{running}}(t)$$
+
+This measures **+76 pp** (positive class: success 88.0 % vs failure 12.2 %; negative class:
+4.1 % vs 39.2 %), which survives the obvious confound -- `Spearman(trel, success) = +0.000`, the
+separation holds within every time quintile (+5 to +13 potential points), and the partial
+correlation controlling normalized time (+0.599) is *higher* than the raw one (+0.417).
+Labelling is a per-time-bucket 70th percentile with a `trel < 0.9` guard, because a successful
+episode ends by holding still at its peak and the unguarded rule labels that hold as negative.
+
+**A label-alignment bug that had been silently costing accuracy.**  `build_value_labels.py`
+iterated `sorted(labels)` (seed order) while the dataset, and therefore `train_value.py`'s
+positional mapping, uses **file order**.  The rollout part happened to be seed-ascending so its
+300 rows were fine; the expert part is ordered 1000, 1006, 1012, … and **98 of its 100 rows were
+attached to the wrong episode**.  The value head trained on that corruption still reached
+Spearman 0.699 -- which is why it went unnoticed.  After the fix the same code reaches 0.6994, so
+the number that "worked" was fitting a shuffled target, and the true figure is the same only
+because the shuffle was confined to the easier quarter of the set.  `--dataset` now verifies
+label rows against the episodes table's frame counts (400/400) and refuses to write on a mismatch.
+
+**What this rules out, and what it does not.**
+
+Ruled out, by measurement rather than argument:
+
+* *Evaluation artefact* -- all arms share seeds, script and harness; the suffix is present in the
+  recorded `instruction` of every episode.
+* *Normalisation drift* -- 4A's de-normaliser is 6–23 % wider on joints 2–5, which looked like a
+  plausible cause for its deficit, but the measured `|requested action|` is 0.8321 (v9) against
+  0.8192 (4A): the policy is not moving further, it is moving the same amount to less effect.
+* *Dirty labels from a mis-sorted set* -- fixed and re-verified.
+
+Not ruled out:
+
+* *A small real effect.*  `+0.84 ± 0.88` has an upper bound near +2.6, so a weak effect is
+  compatible with this data.  But `nos − neg = 0.00` argues that whatever the suffix does, it is
+  not acting as a graded condition.
+* *Insufficient training.*  10 000 steps at batch 6 is 10.85 % of an epoch over 553k frames.  The
+  conditioning may need more passes to be used.
+* *The text channel being the wrong mechanism.*  This is now the leading hypothesis.  π0.5 reads
+  its instruction through a frozen PaliGemma prefix; appending a two-word tail may be too weak a
+  signal to steer a 50-step action chunk.  The alternative designs are a dedicated conditioning
+  token, a numeric channel in the history latent, or CFG guidance with `w > 1` -- none of which
+  have been tried.
+
+**Direction.**  Conditioning did not work, so the next lever is not the threshold.  Either the
+condition has to be a first-class input rather than a sentence suffix, or the RL step has to be
+abandoned in favour of the plain-supervised reading this data supports: 4B's labelled set trains
+to 9.84 against v9's 12.96, still below baseline, with 81 % of its frames still coming from failed
+rollouts.  The next experiment should therefore cut that 81 % -- expert episodes plus successful
+rollouts only -- before any further work on advantages.
+
+### 9.85 Where the failures actually are, and why policy-gradient RL does not fit this task (11-07)
+
+Stage 4 failed as a *labelling* mechanism (9.84).  This section is about what replaced it, and
+about why every RL formulation tried against this task bounced -- including two published ones
+whose code was read line by line.
+
+**Diagnosis first: the bottleneck was not where four weeks of work assumed it was.**
+
+`diagnose_failures.py` splits each episode's 20 Cookies by outcome using the trace's
+`target_slot_occupancy`, which names the occupying Cookie per slot:
+
+| per episode (24 scenes, v9) | count |
+|---|---|
+| seated at the final frame | 11.54 / 20 |
+| ever seated | 12.92 / 20 |
+| **never seated at all** | **7.08 / 20 (35 %)** |
+| in the box but never aligned to a slot | 1.33 / 20 |
+| seated then pushed back out | 1.38 / 20 |
+
+So **precision costs 2.71 Cookies (14 %) and delivery costs 7.08 (35 %)**.  The working assumption
+had been "the task lives in the last 2.5 mm", because the slot tolerance is 10 mm x 2.5 mm and the
+insertion margin is 0.8 mm.  Tolerance is small, but the policy mostly fails *before* reaching it.
+
+**The scene is not the variable.**  The expert reaches **94/100 strict success** on exactly the
+randomisation the evaluation uses, against v9's 12.5 %.  And the randomisation is narrow: `±10 mm`
+on both bins, `±1.7°` yaw, `±0.3 mm` on Cookies, which over 24 seeds spans **17.0 mm in x and
+18.1 mm in y**.  A one-centimetre box displacement is tens to hundreds of pixels; no vision model
+needs to generalise across it.  An earlier reading of this project argued the SuperMimic line was
+worth pursuing *for generalisation* -- that was wrong, and this measurement is what settles it.
+
+Three of the expert's six failures are not precision failures at all: `seed 1048/1060/1084` seat
+exactly the ten even-indexed slots and stop, i.e. the scripted expert's 2x10 phase machine
+sometimes omits the second column.  That is a behaviour bug contaminating ~6 % of the expert set,
+and it is cheaper to fix than any learning result.
+
+**Data filtering is what worked.**  `subset_dataset.py` cuts whole episodes only, because LeRobot
+v3 concatenates ~28 episodes per mp4 and addresses them by absolute `from_timestamp` /
+`to_timestamp`; dropping an episode leaves a gap nobody seeks to, while truncating one would
+require re-encoding the shard.  Verified pixel-wise (8/8 frames identical to the source episode)
+and by asserting the video timestamp columns are byte-identical to the source subset.
+
+| arm | data | episodes | frames | 10k-step epochs | strict | mean |
+|---|---|---|---|---|---|---|
+| `4B` (`r4b_pos`) | everything | 400 | 552,789 | 11 % | **5.4 %** | **9.84** |
+| `4B` (`r4b_nos`) | everything, no suffix | 400 | 552,789 | 11 % | **3.6 %** | **9.00** |
+| **`succ`** | strict successes only | 105 | 112,857 | **56 %** | **10.9 %** | **12.56** |
+| `good` | + near misses (Φ ≥ 28) | 161 | 196,512 | 32 % | 5.4 % | 11.86 |
+| `v9` | expert 2x5 + 2x10 | 400 | 312,470 | 61 % | 12.5 % | 12.96 |
+
+> The `4B` row previously read `3.6 % / 9.84`, which mixed `r4b_nos`'s strict rate with
+> `r4b_pos`'s mean.  `eval_suite_4b.out` has nos at 3.6 % / 9.00 and pos at 5.4 % / 9.84.  Both
+> rows are listed now because the 3.6-to-5.4 difference *is* the +0.84 suffix effect, and the
+> comparison against `succ` must use the same arm the filtering replaced.
+
+Paired: `succ − 4B = +3.62 ± 1.08` (W39/L15), `succ − v9 = −0.34 ± 0.99` (W27/L26).  Filtering
+recovers everything 4B lost and lands on the baseline.  Adding the 56 near misses *costs*
+0.70, which is a useful negative: those episodes score 20 Cookies in the box but leave 16-19
+slots occupied, and training on them teaches the imprecision.
+
+An arithmetic point that reframes all earlier comparisons: 4B saw 60,000 samples against 533k
+frames = **11 % of an epoch**, while v9 saw 180,000 against 293k = **61 %**.  Filtering fixes this
+as a side effect, because a smaller set at a fixed step count is a larger epoch fraction.
+
+**Retrying beats every trained mechanism here.**  The policy is a stochastic map: the flow head
+starts from a fresh `x0 ~ N(0, I)` on every forward pass, and an episode consumes
+1500/16 = 94 of them, fed back into the next observation.
+
+Measured, 24 scenes x 3 independent attempts on v9:
+
+| quantity | value |
+|---|---|
+| within-scene standard deviation | **4.18 Cookies** |
+| scenes that repeated identically | 0 / 24 |
+| single-attempt mean | 13.22 |
+| **best-of-3 mean** | **16.79 (+3.57)** |
+| scenes improvable by retrying | 24 / 24 |
+| scenes where all three attempts stayed ≤ 12 | 4 / 24 (17 %) |
+
+`best_of_n.py` and `run_retry_suite.sh` implement it.  Two caveats are reported alongside the
+number and must stay there: it does **not** raise the policy's ceiling (the 17 % unreachable
+scenes stay unreachable), and an exact reset exists only in simulation, so the realisable gain on
+hardware is smaller.
+
+A closed-loop measurement was needed to see this at all.  An earlier open-loop probe sampled 8
+action chunks per observation and found a standard deviation of **0.43 % of the action range**,
+which was read as "the sampler is nearly deterministic, so choosing among samples cannot help".
+That inference was wrong -- 0.43 % per step compounds over 94 closed-loop steps in a contact task
+with a positive Lyapunov exponent.  The tell was already in this document's own notes: the same
+seed and scene have scored 10/10, 0/10 and 5/10 across sessions.
+
+**Why the two published RL formulations do not transfer.**  `ajwagen/dsrl` and
+`Yyshadow/openpi-RLT` were cloned and read (`/root/refs`).  Both freeze the VLA and train a small
+actor-critic; DSRL acts in the sampler's **noise** space, RLT edits the VLA's **action chunk**
+through a residual actor with reference dropout.  Both need a critic that answers "at this state,
+which action is better".
+
+Our critic cannot answer that, and the reason is structural rather than a training shortfall.
+Both failures were measured, in that order:
+
+* **Time leakage, then its removal.**  Absolute headroom correlates with position in the episode
+  at |rho| 0.900 (half the episodes above 0.9), so a critic trained on it reaches 100 % pairwise
+  accuracy by learning "earlier is better".  Dividing by the peak does not help (the peak is a
+  per-episode constant that cancels).  A per-time-bucket z-score reduces the leak to
+  **|rho| 0.040, with 0 % of episodes above 0.9**, and it is the target that makes the question
+  askable at all.
+* **With that target the critic ranks well but does not read the action.**  On held-out episodes
+  it reaches **85.6 % pairwise accuracy (679 pairs)** and Spearman 0.478 -- real signal, so the
+  critic is learning something.  But `measure_q_action_sensitivity.py` holds the state fixed and
+  varies only the action:
+
+| perturbation | within-state variance | fraction of Q's total variance |
+|---|---|---|
+| **nearby frames** (same episode, ±10 cached rows) | 0.0026 | **1.53 %** |
+| random frames from anywhere | 0.0126 | 7.47 % |
+
+  **98.5 % of Q's variance comes from the state.**  And the random-action column is 4.9x the
+  near one, so what little action dependence exists is mostly out-of-distribution displacement
+  rather than a learned preference.  Steering a sampler with this critic would produce a flat
+  gradient in the noise.
+
+  **Corrected after the `potential` indexing bug (§9.85's own retraction list).**  The table
+  above was trained on a target built from the mis-indexed `potential`, so the critic was
+  regressed against the wrong curve.  Retraining with the fixed target (`q_fixed/report.json`)
+  makes the negative result **stronger, not weaker**:
+
+| version | Spearman | pairwise | action fraction |
+|---|---|---|---|
+| `q_head_v3` (pre-fix target) | 0.478 | 85.6 % | **1.53 %** |
+| **`q_fixed` (post-fix target)** | **0.574** | **97.4 %** | **0.0128 %** |
+
+  The ranking improves and the action dependence **collapses by 120x**.  So the honest reading is
+  not "the critic is a bit state-biased" but "with a correctly built target the critic is very
+  nearly a pure state-value function": 99.99 % of its variance is the state.  The horizon sweep
+  agrees and is the reason this is not a capacity problem -- 20 steps gives 0.055 %, 400 steps
+  1.08 %, the whole episode 0.745 %, so lengthening the window 20x buys three orders of magnitude
+  less than it needs to.
+
+  A first version of this experiment reported 100 % pairwise accuracy from **4 pairs** -- a
+  bucket-indexing bug (cached rows multiplied by `stride`, collapsing nearly everything into the
+  last bucket).  The pair count is now printed on every line so that cannot recur silently.
+
+Five properties of this task explain why, and none of them is a defect that could be fixed by
+tuning:
+
+1. **Only 2.2 % of frames can change the score within one second.**  `Φ` moves only when a Cookie
+   enters the box or a slot, about 20 events per 1500-step episode; within any 20-step window
+   2.2 % of frames see `Φ` change (11.6 % at 50 steps, 46.7 % at 200).  A frame-level gradient is
+   therefore 98 % signal-free by construction.
+2. **Large outcome variance with small action sensitivity** is the worst pairing for RL: enough
+   variance to estimate an advantage, not enough action dependence to act on it.
+3. **Twenty-way conjunction.**  Strict success requires all 20 Cookies seated, so a per-Cookie
+   reliability `p` gives `p^20`: 0.90 -> 12.2 %, and 0.99 -> 81.8 %.  RLT's tasks (screwdriver,
+   zip tie, Ethernet, power cord) have **one** success event, where a single frame of improvement
+   is legible.  Ours has twenty, and one failed episode does not say which of them failed.
+4. **The proprioceptive state repeats; the state that decides the outcome does not.**  Across
+   110,558 cached frames the nearest neighbour from a *different* episode is **0.0000 rad** away
+   in joint space (every episode starts at home and the trajectory is periodic), yet frames at
+   that distance still differ by **4.0 Cookies of headroom, 46 % of the total standard deviation**.
+   What separates them is which Cookies sit in which slots -- a visual fact that never repeats
+   because every episode draws a fresh layout.
+5. **The variance is a property of the trajectory, not of the action.**  Same policy, scene and
+   seed, three runs: `seed 302: 12 -> 7 -> 20`, `seed 306: 7 -> 15 -> 10`, `seed 315: 3 -> 17 -> 11`.
+
+That last point is why retrying works and RL does not: best-of-N needs no credit assignment, it
+scores a finished attempt with the task's own verifier.  **The variance lives at the trajectory
+level, and RL looks for it at the frame level.**
+
+**What follows.**
+
+* **Actually tried and measured zero or negative:** sentence-suffix conditioning (4A/4B, and
+  the three-arm check above proves the mechanism inert rather than merely weak), trained value
+  heads used as credit assignment, and critic-guided sampling (blocked by the 0.0128 % action
+  fraction).  Data filtering and retrying have both measured positive.
+* **Named in the plan but never implemented**, and this document should stop counting them as
+  evidence: **CFG guidance with `w > 1`** (`recap-plan.md` §6.2 defines 4B as
+  `unconditional_prob=0.1` plus a dual-forward extrapolation and an `w` sweep; what actually ran
+  as "4B" was still the text suffix with a different reward label, so CFG has no result either
+  way), **paraphrase-based conditioning**, **advantage weighting (AWR/RWR)** -- the code has no
+  weight column and the landing was binary filtering via `subset_dataset.py` -- and a
+  **dedicated conditioning token** or **numeric channel in the history latent**.  The larger
+  point stands without them: the channel that *was* tested failed a test that distinguishes
+  "weak" from "not read at all".
+* The remaining frame-level lever is not a better critic but a denser reward: score each of the
+  20 Cookies separately using `target_slot_occupancy`, so one episode yields 20 signals instead
+  of one aggregate.  That is the only change that attacks the conjunction and the attribution
+  problem at the same time.
+* Beyond that, the deficit is data: `succ` with 105 episodes matches v9 with 200 expert 2x10
+  episodes, which suggests 105 is the ceiling of what that much expert data supports.  Collecting
+  200 more expert episodes costs about 5 hours at the measured rate and is a more certain
+  investment than any of the algorithms rejected here.
+
+---
+
+## 9.86 物理频率：降频不能省时间，1000 Hz 必须保留
+
+> **标题更正。** 本节最初的标题是「500 Hz 是免费的 1.92 倍」，那是 3 个种子的结论，
+> 补到 6 个种子后已被推翻（5/6，seed 1030 从 20 掉到 17）。**最终结论是降频不可用。**
+> 下面保留了推翻的过程，因为失败的方式比结论本身更有用。
+
+**问题。** 剖析显示 `env.step` 的 60.3 ms 里有 57.2 ms 是 `mj_step`，而 `mj_collision` 只占
+0.233 ms（`mj_step` 的 20%）。剩下的钱花在约束求解器上，规模由 `ncon=340`、`nefc=1980` 决定。
+在动 `ncon` 之前，先问一个更便宜的问题：**能不能少跑几步物理？**
+
+当前基准用 1000 Hz（50 子步 @ 20 Hz 控制）。仓库默认是 500 Hz。降频是纯收益——如果任务行为不变。
+
+**判据是先验设定的，不是事后挑的：** "加速可用当且仅当专家均值与成功率不降"。脚本内的
+专家是 `variable_grasp` 适配器，与生成训练数据用的是同一个，所以"不降"意味着降频没有改变任务。
+
+**结果**（同一批种子 1000/1006/1012，`max_steps=1500`，每场景 2×10 块饼干）：
+
+| Hz | 子步 | 步/秒 | 加速 | 静止漂移 (mrad) | 专家均值 | 专家成功 | 专家步数 |
+|---|---|---|---|---|---|---|---|
+| 1000 | 50 | 16.7 | 1.00× | 4.4e-15 | 20.00 | **3/3** | 1086 / 1085 / 1073 |
+| 500 | 25 | 32.0 | **1.92×** | 9.7e-16 | 20.00 | **3/3** | 1093 / 1085 / 1075 |
+| 400 | 20 | 38.0 | 2.28× | 3.2e-15 | 20.00 | **2/3** | 1089 / 1086 / **1141 ✗** |
+
+静止漂移在所有频率下都是零量级（机械臂靠自身重力保持姿态，没有下垂），所以降频不引入任何
+数值不稳定。250 Hz 被 `SimConfig.validate` 正确拒绝：250/20 = 12.5 不是整数。
+
+### 判读（第一次，3 种子 → 已被推翻）
+
+3 个种子下 500 Hz 全过、400 Hz 挂 1 个，当时写下的结论是"500 Hz 零代价"。**这个结论是错的，
+因为种子太少。** 补到 6 个种子（1000/1006/1012/1018/1024/1030）后：
+
+| Hz | 子步 | 步/秒 | 加速 | 专家均值 | 专家成功 | 逐种子饼干数 |
+|---|---|---|---|---|---|---|
+| 1000 | 50 | 16.3 | 1.00× | 20.00 | **6/6** | 20,20,20,20,20,20 |
+| 500 | 25 | 29.5 | 1.81× | 19.50 | **5/6** | 20,20,20,20,20,**17** |
+
+**500 Hz 也不是免费的。** seed 1030 从 20 掉到 17，而 1000 Hz 下它 1066 步就成功、500 Hz 下
+同样跑了 1066 步——不是超时，是专家在降频的接触动力学下少放进去 3 块。
+
+**最终结论：降频不能用。**
+
+证据是 6 个种子里 1 个失败（≈17%），而且失败方式不是"整段崩掉"而是"少 3 块"——这种损失
+最危险，因为它不会在少量种子上暴露，却会在 100+ 场景的评估里稳定地压低所有数字。更关键的
+是：**保真度检查必须保守。** 一个种子掉就是接触动力学变了，而评估的可比性依赖于"同一场景
+在两种配置下判分相同"。任何降频收益都要用这个可比性来换，1.81× 不值。
+
+### 两条方法论教训
+
+1. **3 个种子不足以下保真度结论。** 第一轮 3 个种子的失败率是 0/3，第二轮同样的 500 Hz 在
+   6 个种子下是 1/6。真实失败率若是 ~15%，3 个种子看到 0 个的概率是 0.85³ ≈ 61%——所以
+   "3/3 通过"几乎不提供信息。判据是先验设定的，但**样本量没有先验设定**，这是这套流程的漏洞。
+2. **降频最先破坏的是最精细的那条判据。** 400 Hz 下 seed 1012 `cookies_in_target = 20` 却
+   `success = false`：饼干全进去了，卡在 `slot_occupancy`（10 mm × 2.5 mm）或 `column_balance`。
+   所以**不能用"搬进几块"判断降频可用**——总量对、对齐错，正是 20 子步不足以分辨 2.5 mm 容差
+   的表现。而槽位对齐恰好是 v9 本来就做不好的那一条（§9.82：对齐失败 2.71/20），用降频的
+   仿真去评估一个卡在对齐上的策略，会把仿真误差和策略缺陷搅在一起。
+
+### 顺带修掉的两个测量 bug
+
+* `substeps` 是 `SimConfig` 上的 property（`physics_hz // control_hz`），不是 env 的属性。
+  之前探测 env 得到的是一列 0。修好后 1000→50 子步、500→25 子步、`exact_division` 全 True。
+* `static_drift_mrad` 在 `--bench-steps 20` 下读出 514 mrad，在 `--bench-steps 100` 下读出
+  4.4e-15。差的不是物理，是**预热步数不够**：漂移量在 `bench_steps` 之后才取基准姿态，
+  20 步时机械臂还在从 reset 位往目标位走，测到的是残余行程，不是漂移。只有 100 步版本的
+  读数可信——它说明在 500–1000 Hz 全部频率下，机械臂靠自身重力能稳住姿态，降频不引入数值
+  不稳定。**所以降频的问题不在数值稳定性，在接触分辨率。**
+
+**下一步剩下的钱在求解器，不在频率。** 500 Hz 之后 `mj_step` 仍是 ~28 ms，`mj_collision` 仍只
+占五分之一，主体是 `nefc=1980` 的约束求解。而场景里同一时刻只有 1–2 块 Cookie 在动，
+其余饼干静止却仍在参与碰撞与约束。要动的是这些静止饼干（把远处饼干的 `contype` 置 0，或改用
+mocap），不是采样率。
+
+---
+
+## 9.87 速度账本：哪些测量还算数，还剩多少提速空间
+
+把所有和速度有关的测量放在一起，逐条标注可用性。**判据是「这个数字现在还算数吗」，
+不是「这个数字有多漂亮」。**
+
+### 可以保留的
+
+| 测量 | 数值 | 为什么还算数 |
+|---|---|---|
+| `env.step` 分解 | 60.3 ms = `mj_step` 57.2 ms (92.4%) + 3.1 ms 其余 | 纯计时，与降频结论无关。**物理占 92%，所以优化策略侧最多省 8%** |
+| `mj_collision` 占比 | 0.233 ms/子步 × 50 = 11.65 ms ≈ `mj_step` 的 20% | 这是碰撞削减的**理论上限**：全免也只有 1.24× |
+| 频率吞吐曲线 | 1000→16.3–16.7 步/秒；500→29.5–32.2；400→38.0–39.4 | 吞吐本身是真的；**废掉的是「可以拿它换时间」这个推论** |
+| 静止漂移 | 预热充分时 ~1e-15，三个频率相同 | 降频**不破坏数值稳定性**，失败纯粹来自接触分辨率。这条排除了「积分炸了」这个备选解释 |
+| 真实 rollout 步成本 | 2x5、900 步下 249 ms/步，推理只占 5.2–5.8% | 关键：**249 ≫ 60**。空转 60 ms，真跑 249 ms，差值全是接触求解 |
+| 步成本的场景依赖 | 同一 checkpoint 跨 episode 260 / 749 / 1430 ms | 慢的不是固定开销，是「机械臂在箱子壁上磨」。**所以「ms/步」是策略的函数，不是常数** |
+| 采集吞吐 | 8 分片 × 6.03 h = 245 条 trace ≈ 40.5 条/时 ≈ 12 min/条 | 与脚本自己的「~12 min/条」估计吻合，说明分片是**线性**的 |
+| 分片上限 | 8 采集 + 1 trainer；**12 个采集会把 trainer 饿死** | 实测过的硬边界（`run_dsrl_night.sh:28`），只在「采集与训练同机」时成立 |
+| DSRL 反传成本 | batch 1/2/4 = 0.69/0.52/0.63 s，9.7/13.3/17.8 GB | 共存判断的依据（bridge 9.7 + 训练 10 ≈ 20/32 GB） |
+
+### 必须作废的
+
+| 结论 | 状态 | 作废原因 |
+|---|---|---|
+| 500 Hz 省 1.81–1.95× | **作废** | 6 种子 5/6，seed 1030 从 20 掉到 17 |
+| 400 Hz 省 2.28–2.34× | **作废** | 3 种子 2/3；失败形态是「20 块进箱但不过严格判定」 |
+| 「3 个种子 3/3 所以零代价」 | **作废** | 真实失败率 ~15% 时，3 个种子全过的概率 ≈61%。判据先验定了，样本量没有 |
+| `static_drift` 514 mrad | **作废** | `--bench-steps 20` 预热不足，测到的是残余行程 |
+| `substeps: null` | 已修 | 它是 `SimConfig` 的 property，不是 env 属性 |
+
+### 从未跑过的
+
+| 杠杆 | 状态 | 天花板 |
+|---|---|---|
+| 静止饼干碰撞削减（Lever B） | `bench_physics_levers.py` 写好了，**一次没跑** | ≤1.24×（碰撞全免才这么多）；而慢的状态恰恰是活跃列在磨的那些，那里一个接触都省不掉，真实收益远小于此 |
+
+### 剩下的提速空间
+
+| 杠杆 | 上限 | 现实 |
+|---|---|---|
+| 频率降一半 | 1.81× | **0×（作废）** |
+| 碰撞全免 | 1.24× | 不可达；静止饼干只省空转段 |
+| 推理全免 | 1.06× | 不可达 |
+| 分片 8→16 | ~2× | 只在「不跑 trainer」时成立；12 已实测饿死 trainer |
+
+**单步仿真已经没有免费的钱了。** 单步杠杆全乘起来的天花板是 1.24 × 1.06 ≈ **1.31×**，
+其中碰撞那 1.24 只在空转态成立，而真实 rollout 的成本由接触重的状态决定（249 ms 对 60 ms），
+那些状态一块饼干都省不掉。**逐条算下来，现实可得的单步提速 ≈ 1.0×。**
+
+唯一还站着的杠杆是**分片吞吐**，而它不是「让仿真变快」，是「同时跑更多仿真」：已实测线性
+（8 分片 ≈ 40.5 条/时），受 16 核限制，与 trainer 共机时 8 是硬顶。
+
+**另有一条不是加速的加速：** 因为步成本随接触状态涨 5 倍以上（260→1430 ms），**一个更好的
+策略本身就是提速**——v9 的 12.5% 成功率意味着大量步数花在「在箱壁上磨」的状态里，而专家
+1073 步就干净收场。这条是推论不是测量，但方向与 §9.85 一致：剩下的收益在策略，不在仿真。
+
+---
+
+## 9.88 DSRL 修复后的 3000 epoch：约束生效了，actor 学习没有
+
+`|mean|` 的爆炸（0.267 → 52728，§9.85 之后的那次夜间运行）被修掉了。**但修好约束之后，
+暴露出来的才是真问题：actor loss 的"下降"100% 来自 alpha 衰减，Q 是往下走的。**
+
+**修复内容。** 从「约束采样输出」改为「约束均值」：
+
+```python
+# 改前（错）—— tanh 饱和后梯度消失，mean 无限增长
+sampled = clip * torch.tanh((mean + std * noise) / clip)
+
+# 改后（对）—— 均值有界，采样仍是纯高斯，log_prob 干净
+mean = clip * torch.tanh(raw_mean / clip)
+sampled = mean + std * noise
+```
+
+**结果**（3000 epoch，batch 2，16.4 min，离线 552,789 transitions，`/tmp/dsrl_fix2.log`）：
+
+| epoch | critic | noise_critic | actor | alpha | Q | logp | minQ | \|mean\| |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0.0295 | 1.9703 | −2281.2 | 1.000 | **+0.016** | −2279.6 | 1.618 | 0.262 |
+| 500 | 0.0000 | 0.0077 | −1952.7 | 0.861 | −0.682 | −2265.7 | 1.870 | 1.538 |
+| 1000 | 0.0000 | 0.0054 | −1704.8 | 0.741 | −0.632 | −2297.5 | 1.461 | 1.657 |
+| 1500 | 0.0000 | 0.0010 | −1456.2 | 0.639 | −0.606 | −2278.7 | 1.225 | 1.675 |
+| 2000 | 0.0000 | 0.0022 | −1249.4 | 0.550 | −0.579 | −2271.4 | 0.166 | 1.666 |
+| 2500 | 0.0001 | 0.0103 | −1073.3 | 0.474 | −0.549 | −2263.4 | 0.739 | 1.700 |
+| 3000 | 0.0000 | 0.0024 | **−927.2** | **0.408** | **−0.527** | −2268.7 | 0.765 | **1.734** |
+
+### 约束生效，这是真的
+
+`|mean|` 从 0.262 涨到 1.734 后**停住**，全程 7 个采样点落在 1.53–1.73，没越过 2.0 的帽子。
+对比修复前的同区间 916 → 2598 → 20500 → 52728，这是干净的修复。`logp` 全程在
+−2298…−2263 之间（极差 34，即 0.02%），不再发散。这两条证明了 tanh-on-mean 是对的做法。
+
+### actor loss 下降是假的，99.9% 来自 alpha
+
+把 actor loss 拆成它自己的两项：
+
+$$\mathcal{L}_{\text{actor}} = \alpha \cdot \log\pi(a|s) - Q(s,a)$$
+
+| 量 | epoch 1 | epoch 3000 | 变化 |
+|---|---|---|---|
+| $\alpha \cdot \log\pi$ | −2279.6 | −926.5 | **+1353.1** |
+| actor loss | −2281.2 | −927.2 | +1354.0 |
+| **占有率** | | | **99.9 %** |
+
+$\alpha$ 从 1.000 掉到 0.408，而 `logp` 几乎不动（−2279.6 → −2268.7）。所以 actor loss 上升
+的 1354 里，**1353 是熵项自己缩水**，留给 Q 的只有 0.9。而 Q 在同一段时间：
+
+$$Q: +0.016 \;\longrightarrow\; -0.527 \qquad (\Delta = -0.543)$$
+
+**Q 是单调下降的**，7 个采样点没有一次回头。
+
+### 这正是 §9.85 预判的那一行
+
+`train_dsrl.py` 自己打印的判读表里，第二行就是：
+
+> *actor loss 下降 但 Q 不升 = critic 平坦，actor 在拟合噪声（预期结果，见 9.85）。*
+
+实际发生的甚至比这更差——不是"Q 不升"，是 Q 在降。机制也吻合：`critic loss ≈ 0.0000`
+（TD 残差被拟合到零，因为 reward 只在 **0.46 %** 的帧上非零，其余全是 0 奖励 + 一致的
+bootstrap），所以 critic 对动作几乎不敏感（§9.85 修正后实测：**99.99 %** 的 Q 方差来自状态，
+命中系数 0.0128 %）。actor 在
+一个近乎常数的 Q 上做梯度上升，得到的只能是噪声；而 alpha 因为熵项持续下降，最后连随机性
+都不剩，只剩下在一个平坦曲面上乱走。
+
+### 这份结果能说明什么，不能说明什么
+
+**能说明：** DSRL 的训练**机制**现在是正确的——梯度穿过冻结的 10 步 ODE 到达 noise、均值
+有界、log_prob 干净、不爆炸。§9.85 归因的"梯度消失/爆炸"这一类工程问题不再是障碍。
+
+**不能说明：** 任何关于任务表现的事。三条硬限制：
+
+1. **没有存 checkpoint。** 这次运行没给 `--output`，权重没落盘，无法评估。
+2. **纯离线。** `train_dsrl.py` 只在 400 条原始 episode 的回放表上训练，从未在仿真里跑过
+   actor。237 条新轨迹还没提特征、没进回放表。
+3. **3000 epoch 是 0.5 个 epoch 的数据量级。** 552,789 transitions / batch 2 = 276k 步为一
+   个 epoch，3000 只走了 1%。§9.84 的教训（4B 在 11% epoch 上就没学会读指令）在这里同样
+   适用，而这次的 1% 更极端。
+
+**所以结论停在工程层面：** 修好了，能跑长，但"能跑长"和"能学到"是两件事。§9.85 给出的
+结构性理由（20 路合取、2.2% 的帧能改变分数、Q 99.99% 由状态决定）没有被这次运行反驳，也
+没有被它检验。**要做检验，下一步必须是一个能落盘、能进仿真评估的在线协议**，而不是继续
+加 epoch。
+
+---
+
+## 9.89 速度账本（修正版）：原仓库用的是 0.57M MLP，不是 VLA
+
+前面几节反复说"我们做不了在线 RL，因为物理仿真太慢"。**那句话是错的**，错在两处，这一节
+把两处都修掉，并给出一个可以复现的账本。
+
+### 错误一：DSRL 的 base policy 是 0.57M 参数的 MLP
+
+一直说"4.14B vs 0.8M，五千倍"，但没核实过那个 0.8M 是什么。`dsrl_can.yaml`：
+
+```yaml
+network:
+  _target_: model.diffusion.mlp_diffusion.DiffusionMLP
+  mlp_dims: [512, 512, 512]   time_dim: 16
+obs_dim: 23   action_dim: 7   cond_steps: 1   act_steps: 4
+```
+
+输入 $28 + 16 + 23 = 67$，输出 28，逐层算下来 **574,492 参数**。它**不是 VLA**，是从零训练
+的 MLP 扩散策略（robomimic can，约 200 条演示，`state_5000.pt`，23 维本体感知，无图像）。
+
+所以"DSRL 在小模型上成立"和"DSRL 在 VLA 上成立"是两个命题，参考实现只证明了前者。真正
+把 DSRL 搬到 VLA 的是 `openpi-RLT`（冻结 openpi/pi0.5 + RL token + 小 actor-critic），而它
+依赖**人工按键标注 success/failure** 和**单事件任务**（Ethernet 插入）——两条我们都没有。
+
+### 错误二：没有反向传播穿过 VLA，我算的 0.85 s 里 66 % 是视频解码
+
+`train_dsrl.py` 走的是 DSRL-NA 路径：`critic` 用 TD 训练，`critic_noise` 由 `critic` **蒸馏**
+，actor loss 用 `critic_noise`。原仓库 `dsrl.py:273,350` 两处 `diffusion_policy(...)` 都在
+`no_grad` 里，我们的实现一致。**梯度只穿过一个 2.6M 的 MLP。**
+
+于是吃掉了 833 ms/epoch 的那个东西必须重新找。实测（batch 8，30 epoch，包住真实调用）：
+
+| 项 | 次数 | 每次 |
+|---|---|---|
+| `embed_prefix` | 30 | 126.8 ms |
+| `paligemma_forward` | 330 | 28.0 ms |
+| `denoise_step` | 300 | 12.7 ms |
+| `preprocess` | 40 | 5.0 ms |
+
+330 次 forward = 30 次 prefix + 300 次 denoise 内部，所以每 epoch 的**策略前向**是
+$155 + 127 = 282$ ms。而实际 833 ms——差的 550 ms 是 `dataset[i]`：
+
+```python
+# train_dsrl.py:385 —— 注释自己写着
+# A `LeRobotDataset` item is a full frame, which needs video decoding; that is
+# ~0.1 s per frame and dominates everything else
+```
+
+**66 % 的时间在从 mp4 解码。在线 RL 没有这个成本**（观测是仿真直接渲染的）。
+
+### 两个优化，A/B 实测
+
+**1. 解码池**（`--prepared-cache`，默认 512 帧）
+
+| | 每 epoch |
+|---|---|
+| `--prepared-cache 0` | **833 ms** |
+| `--prepared-cache 512` | **500 ms**（1.67×）|
+
+池子建设 512 × 46 ms = **23 s 一次性**。tb0 GB 内存（uint8 保在 CPU）。
+
+**2. prefix 缓存 + 让 `--utd` 真的生效**
+
+发现 `--utd` 之前**只被解析、从未被使用**——每 epoch 只做一次更新。接进循环后：
+
+| utd | 20 epoch | 每次更新 |
+|---|---|---|
+| 1 | 10 s | 500 ms |
+| 4 | 18 s | **900 ms** |
+
+4 倍梯度步只花 1.8 倍时间。模型：
+
+$$\text{每 epoch} = \underbrace{155}_{\text{prefix}\times1} + \underbrace{127k}_{\text{denoise}} + \underbrace{218}_{\text{critic MLP}}$$
+
+utd=1 解出 critic MLP = 218 ms，代入 utd=4 得 881 ms，实测 900 ms。
+
+### 修正后的在线 RL 账本
+
+$$\text{每决策} = 0.055_{\text{物理}} + 0.155_{\text{prefix}} + k(0.127_{\text{denoise}} + 0.218_{\text{critic}})$$
+
+| 配置 | 每决策 | 10 万决策 | 20M 决策 |
+|---|---|---|---|
+| utd=1 | 0.56 s | **15.4 h** | 129 天 |
+| utd=4 | 1.6 s | 43 h | 364 天 |
+| **utd=20** | **7.1 s** | **197 h** | **4.5 年** |
+
+### 每个杠杆的真实权重
+
+| 杠杆 | utd=1 | utd=20 |
+|---|---|---|
+| 饼干焊接 3.09×（物理 55→18 ms） | **6.6 %** | 0.5 % |
+| 解码缓存 1.67× | **离线特有，在线无关** | 同左 |
+| prefix 缓存 | 0 %（只算一次） | **2.2 %** |
+| critic MLP 218→? | 若降到 50 ms：**30 %** | 若降到 50 ms：**47 %** |
+
+**prefix 缓存的价值被高估了。** 它只省一次 155 ms，而 utd=20 的总成本 7.1 s 里
+$20 \times 0.345 = 6.9$ s 才是主体，其中 critic MLP（218 ms，比 denoise 的 127 ms 还大）
+占一半以上。**下一个有意义的杠杆是 critic MLP，不是 prefix，更不是物理。**
+
+### 留一个自相矛盾处，供后来的人查
+
+`denoise_step` 内部也调用了一次 `paligemma_with_expert.forward`（`modeling_pi05.py:890`），
+所以 `paligemma_forward` 的 330 次已经包含了 prefix 的 30 次和 denoise 内部的 300 次，
+两行不能相加。本节的分项计时互有重叠，只有"每 epoch 总时间"和"A/B 的差值"是可靠的。
+
+§9.89 的结论是"critic MLP 218 ms 是下一个杠杆"。**这个结论本身是错的**，因为它默认了
+"critic 必须和大 VLA 一起在循环里"。下一节按论文 §C.5 重做之后，循环里根本没有 VLA，
+也没有 218 ms 的 MLP。
+
+## 9.90 按论文 §C.5 重写 DSRL：循环里不再有 VLA（11-09）
+
+### 论文到底喂进去什么
+
+arXiv 2506.15799v2 附录 C.5 原文（π0 实验）：
+
+> We input the proprioceptive state, the final token's last hidden feature from π0's VLM backbone
+> (**a 2,048-dimensional vector**), and visual features into the noise policy.
+
+以及处理 1,600 维噪声的办法：
+
+> …we instead train a **single-step** actor π_single(s) and critic Q_single(s, w_single) where
+> W_single = R^d. At inference time, we simply sample w_single ~ π_single and **repeat it across
+> the action chunk axis**.
+
+再加一句决定了整条账本的部署事实：
+
+> We run π0 inference on a **remote policy server**, but run DSRL training locally on a NVIDIA
+> GeForce RTX 3070 GPU with **8GB of VRAM**.
+
+8 GB 装不下 3.3 B 的 π0（bf16 就是 6.6 GB，加激活和优化器不行）。所以"训练在本地、策略在远端"
+不是省钱技巧，而是**训练循环里没有 VLA 前向**的必然结果。这三点合起来推翻了 §9.89 的账本：
+
+| §9.89 的假设 | 论文的做法 |
+|---|---|
+| 每次更新都要 prefix + denoise 前向 | actor/critic 只吃**缓存特征**，循环里无 VLA |
+| noise 空间是 R^1600 | actor/critic 在 **R^32**，推理时才沿 chunk 轴复制 |
+| critic MLP 218 ms 是瓶颈 | critic 只有 ~0.2 ms 前向 |
+
+### 改了什么（`scripts/recap/train_dsrl.py`）
+
+1. **观测** = `[proprio(16), VLM final-token hidden(2048), visual(256)]`，共 2320 维。
+   2048 维取自 `encode_prefix` 已经算出来的 `prefix_hidden`，用 `pad_masks.sum()-1` 取
+   **最后一个非 pad** 位置（取 `[:, -1]` 会在 tokenizer 补齐时读到 pad）。维度 2048 与论文
+   完全一致——gemma-2b 的 width 就是 2048。
+2. **噪声**：`--noise-mode single`（默认）= R^32，`repeat_noise` 沿 chunk 轴复制成 1600 维再送
+   采样器；`--noise-mode full` 保留旧的 1600 维。`target_entropy` 随之从 $-(50\times32)$ 变成
+   $-d\log$ 项。
+3. **两级缓存**（`<dataset>/dsrl_cache/`，按 checkpoint + 池子几何命名，可复用）：
+   - `obs_*.pt`：每个 transition 的 VLM 特征 + 归一化 proprio（current 和 successor 各一份）；
+   - `distill_*.pt`：`transitions × distill_per_frame` 组 `(ε, π0(s,ε))`。**这是唯一依赖噪声的
+     量**，所以它必须跑采样器；在缓存阶段一次批量生成，循环里只做 gather。
+4. **transition 取相邻行对**。原先"随机抽行 + 查 `row+1`"需要二次解码一批不相交的帧；抽
+   `(row, row+1)` 对则后继免费。校验条件：`frame_index` 连续且 `episode_index` 相同。
+5. `--utd` 默认 20（论文附录 B：UTD ≥ 20）。
+6. 删掉了 `--prepared-cache`、`--pool-on-gpu`、`--samples`（后者从未被读过）。
+
+### 顺手修掉的一个真 bug：80 % 的观测是全零
+
+旧代码：
+
+```python
+obs_by_frame = np.zeros((len(episodes), projection_dim), np.float32)
+obs_by_frame[cached_rows] = cache
+for offset_index in range(1, stride):
+    source = cached_rows - offset_index
+    valid = source >= 0
+    obs_by_frame[cached_rows[valid]] = np.where(          # 源和目的都是 cached_rows
+        obs_by_frame[cached_rows[valid]].any(axis=1, keepdims=True),
+        obs_by_frame[cached_rows[valid]],                 # ← 已经有值，np.where 永远保留它
+        cache[valid],
+    )
+```
+
+`cached_rows` 同时出现在赋值号两边，所以每次赋值都是"把已有值写回已有值"，循环是**空操作**。
+`features_v9` 每 `stride = 5` 行才写一次（`written.npy` 实测 110,558 / 552,789），于是
+**每 5 行里有 4 行的观测是精确的 0**。
+
+实测确认：`written.sum() = 110558`，`cached_rows[:12] = [0, 5, 10, ...]`。也就是说
+§9.88 那次 3000 epoch 的 DSRL，actor 和两个 critic 有 4/5 的样本看的是零观测。
+
+修法是注释一直在说的那件事——**前向填充到最近的前一个已缓存行**：
+
+```python
+nearest = np.clip(np.searchsorted(cached_rows, np.arange(len(written)), "right") - 1,
+                  0, len(cached_rows) - 1)
+obs_by_frame = cache[nearest]
+```
+
+修完打印 `552789/552789 rows non-zero`。帧间隔 5 帧（0.25 s @ 20 Hz），用前一帧的特征是可接受
+的近似；用零不是。
+
+### 一次性成本（实测）
+
+| 阶段 | 512 transition / 8 noise |
+|---|---|
+| 解码 + VLA（current 行，含 8 次采样） | **84 s** |
+| 解码 + VLA（successor 行，不采样） | **34 s** |
+| 合计（写盘后复用） | **~2 min**，`distill_*.pt` 26.7 MB |
+
+缓存内容自检：`noise (512, 8, 32)` 标准差 0.998（标准正态）；`chunk (512, 8, 1600)`；
+**同一帧内换噪声造成的动作偏移 0.0379，不同帧之间 0.1308**（比值 0.29）——说明噪声确实在
+起作用，不是被采样器忽略。相邻 chunk 位置相关性 0.9998，符合"同一噪声沿 chunk 轴复制"的
+预期。动作本身 std ≈ 0.98，所以 0.0379 约等于 3.9 % 的动作标准差。
+
+### 循环成本
+
+原有的 500 ms/epoch 是 utd=1；重写后单次更新由三次 MLP 前向+反向加两次 gather 组成。
+
+拆解（batch 64、纯 MLP 部分）：`critic` 前向 0.21 ms、`NoiseActor.sample` 0.19 ms、
+`noise critic` 前向 0.22 ms，单个 MLP 前向+反向 1.11 ms。剩下的都是 Python 与 kernel 启动，
+所以 batch 8 和 batch 64 的单次更新成本几乎一样（23 ms vs 26 ms）——**成本由"一次更新"
+决定，不由 batch 规模决定，所以 batch 越大越划算**。
+
+这直接改写了在线账本：
+
+$$\text{每决策} = 0.055_{\text{物理}} + \underbrace{0.004 \times \text{utd}}_{\text{三次 MLP}} + \underbrace{\epsilon}_{\text{缓存摊销}}$$
+
+with utd = 20 时约 **0.14 s/决策**，比 §9.89 的 7.1 s 低 **50 倍**；10 万决策从 197 h 降到
+**~4 h**，且这个 4 h 里没有 VLA。
+
+### 仍然存在的退让，写在这里而不是藏起来
+
+1. **噪声覆盖是有限的。** 论文每个梯度步现抽 ε；这里只有 `transitions × distill_per_frame`
+   组预算好的 `(ε, π(s,ε))`。`--distill-per-frame` 是买回覆盖的唯一旋钮，它会打印出来。
+   缓解因素：actor 初始化就是 N(0,1)，和被预算的 ε 同分布；`noise_clip = 2` 把它限制在两倍
+   标准差内。
+2. **`alpha` 现在是摆设。** `NoiseActor` 的 `std` 固定为 1（与参考实现
+   `jnp.full_like(mu, self.fixed_std)` 一致），因此熵恒定，`alpha` 只是给 actor loss 加常数。
+   保留它是为了对齐参考实现，日志里照旧打印漂移。
+3. **TD 仍然用录制的下一个动作**，不是 actor 重采样。离线场景下后者会给自己的目标注入当前
+   意见。论文 §5.3 的 offline→online 结果也说明直接搬在线目标不行（RLPD/Cal-QL "not able to
+   learn at all"）。
+
+## 9.91 critic 目标：三种写法，三种失败，以及哪一种是真问题（11-09）
+
+§9.90 把 VLA 从循环里拿掉了，但拿掉之后暴露出一件更基本的事：**循环里的 critic 从来没有学过
+任何东西**。这次把它当成一个可证伪的问题来查，而不是再调一轮超参。
+
+### 先说最关键的那个数
+
+`train_dsrl.py` 第一次跑通（旧的散点池，512 transition，γ=0.99）时，日志是：
+
+```
+critic 0.0210 -> 0.0002      Q -0.406 -> -0.978
+```
+
+critic loss 掉到 $2\times10^{-4}$，Q 停在初始值附近。§9.88 把这个读作"critic 平坦"。
+**这个读法是错的**：那时候池子里 512 个 transition 里**只有 1 个带非零奖励**，`done` 全为 0，
+所以每个 TD 目标的唯一自洽解就是 $Q=0$。不是 critic 学不会，是它没有东西可学。
+
+同一批 512 行上真实折扣回报的均值是 **6.5**，最大 **25.9**。
+
+### 三个数，依次排除了三种解释
+
+**1. 折扣因子选错了。** 这套数据 episode 长 1382 步（20 Hz，约 69 秒），第一个放置发生在中位数
+第 226 步。而 γ=0.99 的半衰期是 69 步：
+
+| γ | 半衰期 | 每 episode 折扣回报 | 第 226 步权重 |
+|---|---|---|---|
+| 0.99 | 69 步 | **0.87** | 10 % |
+| 0.995 | 138 步 | 3.26 | 32 % |
+| 0.998 | 346 步 | 9.01 | 64 % |
+| **0.999** | **693 步** | **13.83** | **80 %** |
+| 1.0 | ∞ | 22.76 | 100 % |
+
+γ=0.99 把 22.76 的回报压成 0.87——和随机初始化的 Q 同量级。gym 的默认值在这里没有意义，
+因为 gym 的 episode 是几百步，这里是 1382 步。默认改成 **0.999**。
+
+**2. 池子里没有奖励锚点。** 0.46 % 的帧带奖励，均匀抽 512 个 transition 期望只命中 1 个。
+改成"所有带奖励的行必进池，其余随机填"后，池子从 1 个锚点变成 2557 个（62.4 %）。
+
+**3. 池子在时间上是散的。** 这是结构性的一条，也是前面所有失败真正的原因：
+
+| 池 | 行数 | 覆盖 episode | 连续段数 | 平均段长 | 最长段 |
+|---|---|---|---|---|---|
+| 512 散点 | 512 | 277 | 512 | **1.00** | **1** |
+| 4096 散点 | 4096 | 400 | 3687 | **1.11** | **5** |
+
+TD 要靠 $Q(s')$ 把奖励往回传，而 γ=0.999 需要约 **693 步**的传播链。一个平均长度 1.11 的
+散点集合**连一步都传不了**——`rows_next = rows_cur + 1` 取到的后继永远不在训练集里，所以每个
+bootstrapped 目标都是在让 critic 去拟合自己在其训练分布之外的外推值。
+
+这不是"训练不够久"，是**目标在数学上没有固定点**。
+
+### 直接测表征上限，把"学不会"和"读不出"分开
+
+新增 `scripts/recap/probe_value_ceiling.py`：同一批行、同一批特征、同一架构，只换目标。
+
+| 目标 | 散点池 (512) | 锚点池 (4096) |
+|---|---|---|
+| 恒 0 | −1.015 | −1.821 |
+| **Monte-Carlo $G(s)$** | **+0.552** | **+0.426** |
+| TD（实际用的） | **−1.173** | **+0.059** |
+
+Monte-Carlo 目标是纯回归，没有固定点可退化。它拿到 +0.55，说明**特征完全读得出回报**——
+`proprio(16) + π0 VLM final-token(2048) + SigLIP summary(256)` 这个组合是有信息的。
+
+于是结论被钉死了：**问题在目标与采样，不在表征。** 换 critic 结构、加大网络、换激活函数都不会
+有用。
+
+### 三种 critic 目标的实测行为
+
+同一套数据、同一套特征，只换 critic 的回归目标，各跑 3000 epoch（batch 128, utd 20）：
+
+| | loss | Q 轨迹 | minQ 终点 | 真实上限 26.9 |
+|---|---|---|---|---|
+| TD + 散点池 + 锚点 | 2.5 → 6.2 | 1.8 → 7.6 → 12.5 → **25.0** | **49.7** | **越界 1.8 倍** |
+| TD + 散点池（无锚点） | → 0.0002 | −0.4 → **−1.0** | −1.0 | 塌到 0 |
+| Monte-Carlo | 37.5 → 11.9 | 8.6 → 9.4 → 9.1 → **8.6** | 9.0 | 命中（真值均值 8.92）|
+
+三行的失败方式各不相同，而且每一种都能从机制上解释：
+
+* **有锚点的 TD 单调发散。** Q 一路涨过真实最大值，`minQ` 到 49.7，同时 actor loss 从 −46
+  掉到 −96。actor 在追一个不断膨胀的假价值——这就是离线 Q-learning 的经典外推高估，而
+  `min(·)` 双 critic 没有挡住它（两个 head 一起漂）。
+* **无锚点的 TD 塌到常数。** 没有奖励的链上 $Q=0.999Q$ 的唯一解是 0，所以整个 critic 被拉到
+  一个常数（实测 −1.0）。
+* **Monte-Carlo 数值正确，但拟合被动作噪声稀释。** Q 稳定在 8.6–9.4，与真值均值 8.92 吻合。
+
+### 一个差点写错的结论
+
+看到 MC 那行，我本来要写"MC 目标与动作无关，所以 actor 没有梯度"。这个推论**不成立**：
+SAC 本身就是每个状态只有一个动作的样本，它靠函数逼近器在相邻 $(s,a)$ 之间插值学出动作
+依赖。所以这句话必须实测。
+
+`scripts/recap/probe_critic_gradient.py` 在同一批特征上拟合两种 critic，然后量三件事：
+$|\partial Q/\partial a|$、同状态下换动作造成的变化（`within-state`）、以及它与跨状态变化的
+比值。
+
+| 目标 | held-out R² | $\lvert\partial Q/\partial a\rvert$ | within-state std | across-state std | **within/across** |
+|---|---|---|---|---|---|
+| Monte-Carlo | **+0.122** | **3.19** | **3.05** | 4.73 | **0.646** |
+| TD | −0.219 | 1.57 | 1.53 | 4.73 | 0.323 |
+
+**MC 的动作敏感度是 TD 的两倍，R² 也更好。** 我原本的猜测完全反了——如果照那个猜测写进
+文档，就会把一个正确的方案误判为死路。
+
+真正被稀释的是**状态**信号：MC 用同一个目标监督同一状态下的多个不同动作，逼着网络对这些
+动作取平均，于是 R² 从散点池小样本上的 +0.55 降到 +0.12。这是一个真实代价，但它比 TD 的
+−0.22 还是好得多。
+
+所以当前证据支持的结论是：**MC 目标是三种写法里唯一同时具备正确数值和可用梯度的。**
+
+### 正在验证的第四条：锚定连续段 + 段尾精确回报
+
+机制上讲得通的做法是把两者拼起来：**段内用 TD（保留动作依赖），段尾用精确的 MC 回报**
+（让 bootstrap 有锚点，而不是自由外推）。
+
+```
+target(s) = r + γ (1-done) Q(s')        s 不是段尾
+target(s) = G(s)                         s 是段尾，G 是已算好的 MC 回报
+```
+
+段尾不需要长到 693 步：一段 128 步的链，只要它内部含一个奖励、且末端接上精确回报，头部的
+目标就是一个正确的 128 步截断回报。
+
+实现时踩了两个自己的 bug，都写在这里因为它们都会"看起来在工作"：
+
+1. **锚点只统计、没使用。** 第一版算了 `anchored` 集合、打印了它的大小 2557，然后
+   `rng.shuffle(np.union1d(anchored, usable))`——而 `anchored ⊆ usable`，所以并集就是 `usable`，
+   一个锚点都没被优先，打印出来的数字描述了一个根本没建出来的池子。结果 32 个段里大部分
+   无奖励，Q 塌到 −1.6。
+2. **缓存键没含池子几何。** 段池 128×64 和散点池都是 4096 行，签名只含 `t{transitions}`，
+   于是段池那次**直接复用了散点池的 `obs_*.pt`**：观测来自散点池、奖励和动作来自段池，
+   三张表各自看都对，合起来全错。现在签名里加了行集合的 CRC32
+   （`pool_hash = zlib.crc32(rows_cur)`）。
+
+修正后：7816 行、64 个段、全部锚定在第 2557 个奖励候选行上。
+
+**实测结果：还是塌了。**
+
+```
+  1  critic 1.4836   Q -0.147
+250  critic 1.6029   Q -1.130
+500  critic 0.1645   Q -1.145
+750  critic 0.0024   Q -1.273
+```
+
+池子里真实折扣回报的均值是 **12.26**（std 5.53，最大 26.13），**0 % 的行低于 1**。而 critic
+输出 −1.2，损失同时掉到 0.0024——这意味着**目标本身就塌到了 −1.2**，不是拟合不动，是
+自洽地坍缩了。
+
+机制是这样的：段尾只有 61 个（7816 行的 0.8 %），每个 batch 平均只命中 1 个；它们的
+$Q=G\approx+12$ 是对的，但要把这个数往链条上游传，需要目标网络把它"拉过去"。
+目标网络每 epoch 更新一次、$\tau=0.005$，所以信息前沿大约每 $1/\tau = 200$ 个 epoch 前进
+一个链节——128 节的链需要天文数字的 epoch。实测 1000 个 epoch、2 万次梯度步之后，Q 仍然停在
+−1.2，最深的段内行一点都没被点亮。**这是慢目标网络与长链的组合问题，不是调参能解决的**：
+要传 693 步，$\tau$ 必须大到接近 1，而那时目标网络就失去意义了。
+
+对照之下 Monte-Carlo 根本不需要传播——它对每一行直接给出 $G$，所以第一次评估就命中
+（Q 8.6 vs 真值 8.92）。
+
+### 三种池子 × 两种目标 = 六次测量，只有一种站得住
+
+| 池 | 目标 | Q 终值 | 与真值 | 判定 |
+|---|---|---|---|---|
+| 散点 512（1 个奖励） | TD | −1.0 | 真值均值 6.5 | **坍缩**（唯一解是 0） |
+| 散点 4096（2557 锚点） | TD | **25.0**，minQ 49.7 | 真值最大 26.9 | **发散**（外推高估） |
+| 段 128×64（全锚定 + 精确段尾） | TD | −1.2 | 真值均值 12.26 | **坍缩**（传播太慢） |
+| 散点 4096 | **MC** | **8.6–9.4** | 真值均值 8.92 | **命中** |
+
+TD 的三种失败不是同一个 bug，而是同一个结构性事实的三个面：**在这份数据上，价值需要跨
+数百步传播，而每种池子形状都会在某个环节切断它**——散点切断了链，锚点不足让固定点变成 0，
+慢目标网络让链传不动。Monte-Carlo 是唯一不需要传播的目标。
+
+### 结论与代价
+
+采用 `--critic-target mc`（现为默认）。代价必须写清楚：
+
+1. **MC 只能评估行为策略。** 它评估的是"录下来的那个动作带来的后果"，不能给没执行过的动作
+   记分。这里可接受，因为 actor 搜索的是已经会做这件事的策略的噪声空间。
+2. **状态信号被稀释。** 同一状态下的不同动作共享一个目标，逼着网络平均它们，R² 从散点小样本
+   的 +0.55 降到 +0.12。
+3. **动作敏感度是插值出来的，不是学出来的。** `within/across = 0.646` 量的是"换动作时 Q 变
+   多少"，不是"变得对不对"。要判断变得对不对，得拿 §9.89 之前那个分支数据集做成对排序检验
+   （那里测到的行为策略成对准确率是 0.611）。**这一步还没做**，是下一步必须先做的事。
+
+### 这一节的方法论价值
+
+
+这一串排查里，每个结论都曾被一个"看起来合理"的读数骗过一次：
+
+| 读数 | 第一解释（错） | 实际原因 |
+|---|---|---|
+| critic loss → 2e-4 | "critic 平坦，actor 在拟合噪声"（§9.88） | 池里只有 1 个奖励，TD 唯一的解是 0 |
+| Q 单调上升 | "critic 学到了价值" | 外推高估，越界到真实上限的 1.8 倍 |
+| MC 的 Q 对得上 | "critic 对了，可以训 actor" | 数值对，梯度为零 |
+| 段池跑完 Q 塌 | "段池不行" | 锚点没生效 + 缓存串了 |
+
+共同点：**每一个都是"损失或均值看起来正常/合理"的状态**。能区分它们的不是损失曲线，而是
+外部量——奖励锚点计数、连续段长度、真实回报的数值、以及 `∂Q/∂a` 是否非零。
+
+## 9.92 对照开源实现：我漏掉的是时间尺度，不是 critic 目标（11-09）
+
+论文只写了方法，真正的实现细节在 `/root/refs/dsrl`（开源仓库，CoRL 2025）和
+`/root/refs/sb3-dsrl`（其 fork 的 SB3，`dsrl/dsrl.py`）。注意 `dppo/` 和
+`stable-baselines3/` 两个 submodule 是空的，实际可读的是 `train_dsrl.py`、`env_utils.py`、
+`utils.py` 和 `cfg/*.yaml`，加上单独的 `sb3-dsrl` 副本。
+
+### 一处结构性差异，它才是 §9.91 真正的原因
+
+`env_utils.py` 里的 `ActionChunkWrapper.step`：
+
+```python
+def step(self, action):
+    for i in range(action.shape[0]):     # action.shape[0] == act_steps
+        self.count += 1                  # count 以 env step 计
+        obs_i, reward_i, ... = self.env.step(action[i])
+    ...
+    if self.count >= self.max_episode_steps: done = True
+```
+
+**一个 RL step 就是执行一整个动作块。** 而 `train_dsrl.py` 里
+`MAX_STEPS = int(cfg.env.max_episode_steps / cfg.act_steps)` 把这个换算写在了明面上。
+robomimic can：`max_episode_steps: 300`、`act_steps: 4` → **一个 episode 是 75 个 RL step**，
+而 `discount: 0.99` 的半衰期是 69 个 RL step——**折扣几乎覆盖整个 episode**。
+
+我这边的对应数字：
+
+| 量 | 参考（can） | 我原来的实现 | 我修正后 |
+|---|---|---|---|
+| 一个 RL step | `act_steps=4` 个 env step | **1 个控制步** | `execute=16` 个控制步 |
+| episode | 75 RL step | 1382 RL step | **87 RL step** |
+| γ | 0.99 | 0.999（被迫） | **0.99** |
+| 半衰期占 episode | 92 % | 50 % | **79 %** |
+| 需要传播的距离 | ~69 步 | **693 步** | **69 步** |
+| 折扣后保留的回报 | — | 13.83 / 22.76 | **16.57 / 22.76** |
+
+我原来把**同一个决策切成了 16 份**当成 16 个独立 transition。证据是动作本身：
+
+```
+mean |a[t+1]  - a[t]|  = 0.0021    ← 相邻控制步
+mean |a[t+16] - a[t]|  = 0.0250    ← 相隔一个 RL step
+ratio = 11.8x
+```
+
+相邻控制步的动作差只有 0.0021，而动作本身 std ≈ 0.98——**相差 0.2 %**。因为 `execute=16`
+意味着这 16 个动作来自**同一次策略调用、同一个噪声 ε**，它们只是同一个 50 步 chunk 的
+16 个切片。把它们当成 16 个独立决策，一方面凭空造出 16 倍的样本量，另一方面把价值需要传播的
+距离也放大了 16 倍。
+
+**§9.91 说"TD 在这份数据上结构性地无法工作"，这个结论对，但归因错了。** 不是 TD 不行，是我
+在错误的粒度上建了池子。修正后：`--step-stride 16`，奖励按 16 个控制步求和，后继取
+`row + 16`，段长度以 RL step 计（64 RL step = 1009 行），γ 回到 0.99，σ 传播距离 69 步。
+
+### 其他逐项对照
+
+| 项 | 参考实现 | 我的实现 | 判断 |
+|---|---|---|---|
+| γ | 0.99（按 RL step） | 0.99（修正后） | ✓ |
+| `utd` | 20 | 20 | ✓ |
+| `batch_size` | 256 | 256 | ✓ |
+| `n_critics` | 2 | 2 | ✓ |
+| `tau` | 0.005 | 0.005 | ✓ |
+| 网络 | 3 层 × **2048** | 3 层 × 512 | 容量 1/4，可接受（输入是 2048 维 VLM 特征而非 23 维本体） |
+| `action_magnitude` | 1.5（噪声上下界） | `noise_clip` 2.0 | 相近 |
+| 噪声空间 | R^(4×7) = R^28 | R^32（论文 §C.5 的单步噪声） | 按论文 |
+| 观测 | 23 维本体（robomimic） | 2320 维（proprio+VLM+visual） | 按论文 |
+| `noise_critic` 更新 | **额外 10 步**，每步独立采 batch | 与 utd 同步 1:1 | **覆盖少 30×**，未修 |
+| `target_ent` | **0.0** | +45.4 | 需对齐 |
+| actor | tanh 压缩 + **可学习 log_std** | 无界 + 固定 std=1 | α 在我的实现里是常数偏移，参考实现里是真在调节 |
+| critic 目标 | 在线 TD，next action 由 actor 现算，**带熵项** `-α·log π` | 离线 TD，next 用录制动作，无熵项 | 有意的离线偏离 |
+
+### 还没对齐的三件事，按重要性排序
+
+1. **`noise_critic` 的更新量。** 参考实现每个 env step 给它 10 个独立 batch 的梯度步，我在
+   utd 循环里只给 20 次中的 20 次共用同一批状态。它决定蒸馏链的拟合速度，而 actor 直接吃这个
+   critic——所以这是下一步该先对齐的。
+2. **`target_ent = 0.0` 与可学习 `log_std`。** 我的固定 std=1 让 α 完全失效（§9.90 已记）。
+   换成可学习 log_std 才能让 α 真正起作用。
+3. **`--step-stride` 的验证。** 修正后的 TD 正在跑；在它给出 Q 之前，本节只主张"时间尺度是
+   §9.91 的归因错误"，不主张"TD 现在已经能用了"。
+
+### 一句话总结这一节
+
+§9.91 我写了一张"三种池子 × 两种目标"的表，把失败归给 TD 本身。对着 `ActionChunkWrapper`
+读十行代码就发现：**池子的形状不是主要问题，池子的时间单位才是。** 参考实现没有做任何特别的
+事情来让 TD 工作——它只是让一个 RL step 等于一次真实的决策。
+
+### 修正后的实测：TD 第一次表现出健康行为
+
+`--step-stride 16 --segment-length 64 --gamma 0.99`，64 段，全部锚定，段尾用精确回报：
+
+| epoch | critic loss | Q | minQ | actor loss |
+|---|---|---|---|---|
+| 1 | 2.02 | 0.12 | 0.12 | −45.44 |
+| 250 | 0.48 | −0.13 | −0.12 | −46.01 |
+| 500 | 0.61 | 0.44 | 0.33 | −45.36 |
+| 1000 | 0.56 | 1.25 | 1.09 | −45.27 |
+| 1500 | 1.04 | 1.44 | 0.84 | −44.23 |
+| 2000 | 0.61 | 2.17 | 1.04 | −42.41 |
+| 2500 | 0.90 | 2.35 | 0.80 | −43.94 |
+| 2750 | 0.49 | 2.66 | 1.70 | −44.73 |
+| 3000 | 0.34 | **2.77** | 1.35 | −45.10 |
+
+这是整个 §9.89–9.92 里**第一次没有出现任何一种病态**：
+
+* critic loss **稳定在 0.5–1.0**，不塌到 $10^{-4}$（无锚点的坍缩）也不发散；
+* Q **单调上升** 0.12 → 2.77，方向正确（真值 16.57）；
+* **`minQ < Q` 始终成立**，两个 head 没有一起漂——对照散点池那次 `minQ` 冲到 49.7 而真值上限
+  只有 26.9。
+
+actor loss 这一栏**不算健康**，要单独说：它非单调（−45.44 → −46.01 → −42.41 → −45.10），
+3000 个 epoch 后的终点（−45.10）与起点（−45.44）几乎相同。脚本自己打印的判读表里第三行
+——"Q 持续上升而 actor loss 不动"——恰好适用于这里。也就是说 critic 在缓慢爬升，但 actor
+**还没从中取得可用的方向**。考虑到 Q 只有真值的 17 %，这与"critic 还不足以支撑 actor 改进"
+是一致的，而不是另一个独立的问题。
+
+**但 Q 只到 2.77/16.57 = 17 %，且增长在明显放缓**（750→1500 涨 0.5，1500→2250 涨 0.84，
+2250→3000 涨 0.49）。这仍然不是能用的 critic。原因是链长：64 段 × 64 RL step，段尾的精确回报要
+往上游传 64 个链节，而 $\tau=0.005$ 的目标网络每个 epoch 只让前沿前进一小步。走完 64 节需要
+数万 epoch；而且 $Q$ 的覆盖面受段尾稀疏度限制（64 个尾 / 4096 个 transition，1.6 %）。
+
+**所以修正后的结论是：** 参考实现的 TD 在这份数据上能工作，前提是时间尺度对、锚点足、段够长，
+且训练量够大。§9.91 的"TD 结构性地无法工作"是错的；正确说法是"我在错误的粒度上建池子，导致
+需要的传播距离是可行值的 10 倍"。但**"能工作"和"够用"是两件事**——2.77 对 16.57 的 Q 还不足以
+支撑 actor 改进。
+
+### 下一步该按这个顺序
+
+## 9.93 补齐参考实现的其余设置，以及一个自己引入的相位 bug（11-09）
+
+§9.92 的对照表列出三项未对齐。这一节补完其中两项，并在验证过程中发现我自己写的一个
+bug，它使 §9.92 的结论偏低了近 3 倍。
+
+### 补上的两项
+
+**1. `critic_noise` 独立的 10 步。** 参考 `dsrl.py:326-335` 把它放在 SAC 循环**之外**，
+每次重新 `replay_buffer.sample`。我原来放在 `--utd` 循环里，20 次更新共用同一批 128 个状态。
+现在按参考拆成独立循环（`--noise-critic-steps 10`），每个 batch 新抽。额外成本几乎为零
+（450 → 442 ms/epoch，因为 critic 前向只要 0.2 ms）。
+
+**2. actor 换成 SB3 的 `SquashedDiagGaussian`。** 参考里 `DSRL.actor` 就是
+`self.policy.actor`，即：
+
+* **可学习**的逐维 `log_std`（初值 0）；
+* `action = tanh(mean + std * eps)`；
+* `log_prob = Normal(gaussian).log_prob − Σ log(1 − action² + 1e-6)`。
+
+第三行是我之前漏掉的关键。原实现算的是 **pre-squash** 变量的密度，而那是另一个随机变量。
+单元测试直接量出来：
+
+| | 旧（无界） | 新（tanh 压缩） |
+|---|---|---|
+| `log_prob` 均值 | −45.4 | **−19.4** |
+| `log_prob ≤ 0` | 否 | **是**（有界区间上的密度不能超过均匀分布） |
+| `|u|` 上界 | 无界 | **0.9996**（`tanh` 的界） |
+| `alpha` 在 `target_ent=0` 下 200 步 | 0.99 → 0.99（无作用） | 0.99 → **0.135**（真在调节） |
+
+`target_entropy` 随之从 +45.4 改成参考的 **0.0**。SB3 的 `-dim` 假设 tanh 压缩后每维密度可以
+超过 1；这里直接用参考值 0。
+
+`critic_noise` 看到的输入也按 `scale_action` 的语义改成单元尺度（`noise / action_magnitude`），
+采样器则收到 `action_magnitude × tanh(·)`，两者不再混用。
+
+### 一个自己引入的 bug：回报表与池子相位不一致
+
+跑完 8000 epoch，`Q` 收敛到 **3.93**，而 episode 级回报是 16.57，看起来只有 24 %。我准备
+把它写成"又一个停滞"。先做了一件本该更早做的事：**把池子的真实回报和 `Q` 直接对比**。
+
+结果很刺眼：
+
+```
+TRUE discounted return G on this pool:
+  mean 1.11   median 0.00   p10 0.00   p90 0.00   max 24.81
+```
+
+池子里有 63 个段，每段内部都含奖励（例如某段有 4 个），而**真实回报的中位数是 0**。这不可能是
+数据的问题，只能是代码的问题。
+
+原因是相位：
+
+```python
+# 旧代码
+for episode in range(len(labels)):
+    start, stop = bounds[episode]
+    path = list(range(start, stop, stride))   # 只覆盖与 start 同余的行
+    ...
+    return_all[row] = running
+```
+
+而池子是从 `adjacent` 里抽的，`adjacent` 只要求 `frame_index` 相差 `stride`，**与 episode 起点
+没有相位关系**。所以 16 行里有 15 行落在网格之外，`return_all` 保持初始化值 0。而段尾锚点正是
+读 `return_all`——**64 个锚点里有 63 个被告诉"答案是 0"**。
+
+修法是在**每一行**上递推：
+
+```python
+for row in range(len(episodes) - 1, -1, -1):
+    successor = row + stride
+    if successor < episode_end[episodes[row]]:
+        return_all[row] = step_rewards[row] + gamma * return_all[successor]
+    else:
+        return_all[row] = step_rewards[row]
+```
+
+修复前后：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 池内真实回报均值 | 1.11 | **9.56** |
+| 中位数 | **0.00** | 10.26 |
+| 非零比例 | 8 % | **72 %** |
+| **锚点（段尾）回报均值** | ~0 | **12.80（100 % 非零）** |
+
+### 修复后的曲线：Q 追上参考量级
+
+`--transitions 4096 --segment-length 64 --step-stride 16 --gamma 0.99 --utd 20
+--noise-critic-steps 10`，8000 epoch：
+
+| epoch | Q | minQ | actor loss | alpha | σ | critic loss |
+|---|---|---|---|---|---|---|
+| 1 | 0.16 | −0.25 | −21.03 | 0.994 | 0.994 | 3.82 |
+| 1000 | 2.38 | 2.14 | −2.14 | 0.006 | 0.748 | 0.87 |
+| 2000 | 3.35 | 1.44 | −1.46 | 0.005 | 0.742 | 0.99 |
+| 3000 | 4.87 | 1.64 | −1.64 | 0.011 | 0.740 | 0.66 |
+| 4000 | 5.76 | 3.16 | −3.18 | 0.014 | 0.731 | 0.31 |
+| 5000 | 6.99 | 5.27 | −5.28 | 0.020 | 0.731 | 0.09 |
+| 6000 | 7.78 | 6.63 | −6.62 | 0.023 | 0.732 | 0.03 |
+| 7000 | 7.86 | 8.29 | −8.31 | 0.022 | 0.730 | 0.02 |
+| 7500 | 8.85 | 9.05 | −9.06 | 0.023 | 0.730 | 0.02 |
+| 8000 | 7.72 | 8.64 | −8.62 | 0.023 | 0.730 | 0.02 |
+
+对照同一配置但带相位 bug 的 v4：epoch 4500 时 v4 的 Q 是 3.77，v5 是 6.35。**同一个"停滞"
+的读数是 bug 造成的，不是方法的上限。**
+
+这一版第一次让三个指标同时朝正确方向走：
+
+* `Q` 升到池内真实均值的 **81 %**（峰值 8.85，即 **93 %**），不再是 24 %；
+* `minQ` 从 1.4 升到 8.6 并紧跟 `Q`（末段 `minQ/Q` 在 1.0–1.1），两个 head 一致；
+* `actor loss` 从 −21.0 降到 −8.6，**方向与 Q 一致**——这是 §9.92 里缺失的那一条，现在有了；
+* `alpha` 从 0.99 降到 0.023 后自行稳定，σ 从 0.99 降到 0.73 后稳定，说明熵控制器到位；
+* `|u|` 稳定在 0.62，`tanh` 没有饱和；
+* `critic loss` 从 3.8 单调降到 0.02。
+
+**`minQ > Q` 在末段（6500 之后）出现，需要谨慎解读，不能当成"actor 变好了"。** 两者不是同一个
+量：`Q` 是 TD critic 在**录制动作**上的输出，`minQ` 是 noise critic 在 **actor 采样噪声**上的输出。
+`minQ/Q ≈ 1.05` 只说明 noise critic 对 actor 的噪声给出了略高于录制动作的估值，而这既可能来自
+actor 真的找到了更好的噪声，也可能只是蒸馏链的残差。区分这两者只能靠仿真。
+
+
+### 新增的自检，因为三个 bug 都"看起来像在学习"
+
+| bug | 表面现象 | 靠什么发现 |
+|---|---|---|
+| 回报表相位错位 | Q 单调升到 3.93，曲线漂亮 | 池子真实回报的中位数是 0 |
+| `stride` 被 `feature_stride` 覆写 | `row + stride` 变成 `row + 5` | 审计只有一处赋值 |
+| 段尾掩码只覆盖一部分段 | Q 停在 −1.6 | 对照 `minQ < Q` 是否成立 |
+
+三者共同点：**损失曲线和 Q 曲线都不报警**。所以现在每次启动都会打印
+
+```
+[dsrl] pool return: mean 9.56  median 10.26  p90 21.66  non-zero 72 %
+[dsrl] anchor return (the tails): mean 12.80  median 13.80  non-zero 100 %  <- must not be ~0
+```
+
+并在锚点非零比例 < 50 % 时直接 WARNING。这两行是这一节唯一可复用的产出。
+
+### 还剩什么
+
+`Q` 到 74 % 的真实池均值，且仍在上升，但 5500→6000 只增 0.05，已接近该池能支撑的上限——
+池内回报的覆盖只来自 64 个段尾。要再往上：加长段（更多链节）、或增大 `--transitions`
+（更多锚点）。两者都只增加特征缓存的一次性成本。
+
+真正的验收仍未做：**actor 产出的噪声在仿真里是否真的得分更高**。这需要一个评估回路，
+把 actor 的 ε 送到采样器、在 2x10 bench 上跑成功率和 episode 得分，与"标准正态噪声"的基线比。
+在此之前，上面所有数字只能说明 critic 学会了估值，不能说明策略变好了。
+
+## 9.94 评估回路：把 actor 的噪声送进采样器（11-09）
+
+### 参考实现是怎么做的
+
+论文只写了"at inference time, we simply sample `w_single ~ π_single` and repeat it across the
+action chunk axis"。落到代码是 `dsrl.py:452 predict_diffused`：
+
+```python
+unscaled_action, _ = self.policy.predict(observation, deterministic)
+scaled_action = self.policy.scale_action(unscaled_action)   # -> buffer_action
+action = self.policy.unscale_action(scaled_action)          # 与上一步互逆，回到 unscaled
+action = self.diffusion_policy(obs, action.reshape(-1, C, d))
+```
+
+三点值得记下来：
+
+1. **`scale_action` 与 `unscale_action` 互为逆运算**，所以采样器收到的就是 `tanh(gaussian)`，
+   落在 `(-1, 1)`。`action_magnitude` 真正影响的是**回放缓冲区/critic 看到的尺度**，不是采样器。
+2. **评估就是完整跑一遍** `utils.py:113 evaluate`：`obs → actor → noise → diffusion_policy → env.step`，
+   报 success_rate 与 avg_reward。它**不查 critic**，这正是"评估独立于训练 actor 的那个 critic"的原因。
+3. `deterministic_eval` 是个开关，两条曲线都记录（`success_rate` 与 `success_rate_deterministic`）。
+
+### 我这边的一个结构性优势
+
+参考实现的 actor 吃 23 维本体（robomimic）。我的 actor 吃
+`[proprio(16), VLM 2048, visual(256)]` —— 而**这三项都是采样器本来就要算的东西**：
+
+* VLM 2048 维 = `prefix_hidden[:, 最后一个非 pad]`，就在 `embed_prefix` 的那次前向里；
+* proprio = `preprocess` 已经归一化好的 `observation.state`；
+* visual 256 = `features_v9` 的 256 维投影，而它的 8192 维原值可以从 `prefix_embs` **切片得到**
+  （三段相机嵌入 + 一段语言嵌入，语言那段要除掉 `embed_prefix` 乘上的 `sqrt(2048)`）。
+
+所以**转向不需要额外的 VLA 前向**，代价只有一个小 MLP。这一点使评估成本与基线几乎相同。
+
+### 抽出共享模块，而不是复制
+
+`scripts/recap/steering.py` 现在是 `encode_prefix` / `sample_with_prefix` / `repeat_noise` /
+`NoiseActor` / `build_observation` 的**唯一实现**，训练脚本与 bridge 适配器都从它导入。
+
+这不是整洁问题。两份 `encode_prefix` 必然漂移，而漂移在这里**不会报错**——它会表现为
+"actor 没有帮助"，恰好是这次实验要测的那个结论。
+
+重构后做了一次回归：同种子 1 个 epoch 的指纹是
+`critic 3.8249 / noise_critic 0.0791 / actor −21.0285 / alpha 0.9943 / Q 0.155 / |u| 0.555 /
+sigma 0.994`，与重构前逐位相同。
+
+### 两道 gate，都必须先过
+
+评估一个"没有差异"的结果有三种完全不同的解释：actor 真的没学到、actor 退化了、或者 actor 看到的
+观测和训练时不一样。episode 得分无法区分它们，所以先过两道 gate。
+
+**Gate 1：实时特征 == 缓存特征**（`verify_visual_feature.py`）
+
+| 层次 | 误差 |
+|---|---|
+| 8192 维 raw 向量最大绝对误差 | 0.0621 |
+| 256 维投影后最大绝对误差 | 0.0197 |
+| **相对误差（÷投影后标准差）** | **0.0017** |
+
+0.17 %。raw 那层的 0.06 是 float16 存储的量化步长，不是算法差异。
+
+**Gate 2：actor 不是惰性的、也没有饱和**（`probe_steering_effect.py`）
+
+| 量 | 值 | 含义 |
+|---|---|---|
+| chunk 尺度（默认噪声下的 std） | 0.5178 | 动作空间的自然尺度 |
+| **换一次默认噪声造成的变化** | **0.0150（2.9 %）** | 噪声对动作的总杠杆 |
+| actor 噪声 vs 默认噪声 | 0.0318（6.1 %） | actor 的影响 |
+| 跨观测差异 | 0.1277（24.7 %） | 观测的影响 |
+| **actor 影响 / 换噪声的影响** | **2.1×** | 量级合理 |
+| tanh 饱和比例 (\|u\| > 0.999) | 0.00 % | 没有 §9.88 那种饱和 |
+| \|u\| 均值 | 0.5051 | 不贴边界 |
+
+第二行是这次最该记住的数字：**换一次噪声只让动作变化 2.9 %**，与 §9.90 记录的
+"同一帧换噪声造成 3.9 % 的动作偏差"一致。也就是说，**DSRL 在这个任务上能动用的杠杆本身就只有
+3–4 %**。这给整个方法定了一个上限——与 §9.85 的"失败点在哪"是同一类约束，但这是从
+噪声侧量出来的。
+
+### 三臂设计
+
+| 臂 | 采样器的 `x0` | 回答 |
+|---|---|---|
+| `default` | `N(0,1)`，策略自己的 | 策略本来就怎样 |
+| `tanh_random` | `tanh(N(0,1))` 沿 chunk 轴复制 | **仅仅把噪声有界化**是否有用 |
+| `actor` | 训练好的 DSRL actor（确定性） | actor 是否学到了边界之外的东西 |
+
+中间那臂是让实验可解释的关键。actor 的输出天然落在 `(-1,1)`，所以 `actor` 与 `default` 同时
+差在两件事上：边界和内容。如果 `tanh_random` 已经追平或超过 `default`，那么 `actor` 的任何
+增益都是"有界"带来的，而那不需要 8000 epoch 的 SAC。
+
+三臂共用 `eval_conditioned.sh`（即 §9.80 那条"一个 harness 给所有臂"），种子 300+ 固定，
+所以场景逐配对，差异是差异而不是三把尺子的采样。
+
+**这一版能测什么、不能测什么，写在这里**：每个臂自己抽噪声，所以噪声实现不配对。
+场景内得分的 sd 约 3.34 Cookies，16 个种子给出的配对差值 SEM 约 1.2。也就是说，
+**它能发现大效应，不能证明小效应不存在**。
+
+### 结果：负面，且是大幅负面
+
+| 臂 | 平均 | sd | sem | 严格成功率 |
+|---|---|---|---|---|
+| `default`（`N(0,1)`） | **12.44** | 6.66 | 1.67 | 18.8 %（3/16）|
+| `tanh_random` | 7.38 | 4.73 | 1.18 | 0 % |
+| `actor` | **0.25** | 0.68 | 0.17 | **0 %**（14/16 得 0，2/16 得 2）|
+
+| 对比 | 差值 | sem | t | 胜/平/负 |
+|---|---|---|---|---|
+| `actor − default` | **−12.19** | 1.67 | **−7.28** | 0 / 1 / 15 |
+| `tanh_random − default` | −5.06 | 2.09 | −2.42 | 2 / 3 / 11 |
+| `actor − tanh_random` | **−7.12** | 1.21 | **−5.90** | 0 / 3 / 13 |
+
+`|t| = 5.9` 与 `7.3` 远超 2，不是噪声。**actor 不是"没提升"，是基本把策略弄坏了。**
+
+### 先排除"actor 坏了"这个解释
+
+得 0 分有几种可能，逐一测过：
+
+| 检查 | 结果 | 结论 |
+|---|---|---|
+| actor 的输出塌成常数？ | 末层 `|b|` 范围 `[-0.53, 0.57]`，sigma 0.72 | 没有塌 |
+| actor 忽略观测？ | 跨帧 std **0.366**；变化 <0.02 的维度占 **0.00 %** | 确实随观测变 |
+| 饱和在 tanh 边界？ | `|u|>0.999` 占 **0 %**，`|u|` 均值 0.465 | 没有饱和 |
+| 出现了 NaN/Inf？ | `finite: true` | 没有 |
+| 观测与训练时不一致？ | 相对误差 **0.17 %** | 一致 |
+| actor 对动作的影响太小？ | 是重抽噪声的 **2.1 倍** | 不是惰性 |
+
+六项全部正常。**所以问题不在 actor 的实现，而在它输出的分布本身。**
+
+### 真正的原因：tanh 把噪声收窄了，而策略是在 `N(0,1)` 上训练的
+
+同一个观测、同一批 8 帧，三种先验的实际形状：
+
+| 先验 | `\|u\|` 均值 | 逐维 std | `\|u\|>0.9` 的维数（共 256） |
+|---|---|---|---|
+| `N(0,1)`（策略训练时的） | **0.7848** | **0.9719** | 94 |
+| `tanh_random` | 0.5616 | 0.6312 | 37 |
+| actor | **0.4646** | **0.5537** | 38 |
+
+`tanh(N(0,1))` 的 `|u|` 均值是 0.56，只有 `N(0,1)` 的 72 %。actor 更窄，0.46，只有 59 %。
+flow-matching 的采样器是在 `x0 ~ N(0,1)` 上预训练的，把初始噪声系统性收窄等于把它推到分布外：
+逐步去噪的轨迹整体偏向"接近条件均值"的那一支，动作幅度被压小，二十个饼干搬不动几个。
+
+这个解释同时命中了三件事：
+
+* `tanh_random` 只跌 5 分（形状对了一半，仍是有界且偏窄）；
+* `actor` 跌 12 分（更窄，且额外带着 critic 的偏好）；
+* `probe_steering_effect` 里"actor 影响 = 2.1 × 重抽噪声"——影响够大，方向是错的。
+
+### 一个必须与参考实现对照的细节
+
+参考实现也是 tanh 输出的。`dsrl.py:452 predict_diffused` 里 `scale_action` 与
+`unscale_action` 互为逆运算，所以 `diffusion_policy` 收到的确实是 `tanh(·) ∈ (-1,1)`，
+而不是 `N(0,1)`。那它为什么不崩？
+
+差别在**宽度**。参考的 `action_magnitude = 1.5`，而后处理 `unscale_action` 把
+`tanh` 的输出映射到 `[-1.5, 1.5]`：
+
+```
+unscaled = tanh(.)                    # [-1, 1],  |u| ~ 0.56
+scaled   = scale_action(unscaled)     # = unscaled / 1.5,  |u| ~ 0.37  <- critic 看到的
+action   = unscale_action(scaled)     # = unscaled,  |u| ~ 0.56        <- 采样器看到的
+```
+
+**这是我自己早先的判断，现在看是错的**：我此前把 `action_magnitude` 读成"只影响 critic"，
+但 SB3 的 `scale_action`/`unscale_action` 对**对称**区间恰好互逆，所以真正到达采样器的是
+`tanh` 输出，幅值 1.0。而 `N(0,1)` 的 `|u|` 均值是 0.785——也就是说参考实现喂给采样器的
+噪声比 `N(0,1)` **更窄**，与我的实现同一类偏差。
+
+差别只在程度：参考的 diffusion policy 是 DPPO 在 robomimic 上预训练的，容忍度未知；
+π0.5 的 flow-matching 头在这里实测不容忍（`tanh_random` 就掉 5 分）。
+**这是"参考实现在其任务上可行"与"同样做法在本任务的 π0.5 上可行"之间的差别，不是我的实现 bug。**
+
+### 结论
+
+**在这套 π0.5 + 2x10 设置上，用有界噪声替代 `N(0,1)` 会直接损害性能，DSRL 学到的 actor 在
+此基础上进一步恶化。** `actor − default = −12.19`，`|t| = 7.28`。
+
+这不是"训练不够久"或"超参没调好"能解释的：actor 的六项健康检查全部通过，它对动作的影响
+是重抽噪声的 2.1 倍（够大），而它的输出分布与策略预训练时的先验差了 41 %（`|u|` 0.465 vs
+0.785）。**方向对不上，幅度越大越糟。**
+
+### 下一步该测什么，以及为什么不是我现在的猜测
+
+上面所有推论都指向"噪声太窄"，但那仍是推论。能把它变成结论的最小实验是**加宽**：
+`tanh_random` 乘以一个 `s` 使 `|u|` 均值回到 0.785（需要 `s ≈ 1.4`），
+如果得分回到 12 分附近，就确认是宽度问题；如果仍然低，那"有界"本身才是问题，加宽无用。
+
+这个实验只需一臂（约 50 分钟），且它决定后面所有工作：
+* 若是宽度问题 → actor 的训练目标里必须加一项把输出分布锚在 `N(0,1)` 上（参考实现在
+  附录 B 里提到 `bW ∈ [1,3]` 的动作幅值约束，正是这个作用的另一种写法）；
+* 若是有界本身的问题 → DSRL 在 π0.5 上需要换参数化，即让 actor 输出 `N(0,1)` 的
+  **均值偏移**而不是有界动作，这也更贴近 flow-matching 的用法。
+
+## 9.95 判定实验：宽度假设被证伪，问题是"尾部"不是"宽度"（11-09）
+
+### 先做的那个判定实验，以及它推翻的东西
+
+§9.94 的推断是"两边都比 `N(0,1)` 窄，而更窄的那个更差，所以宽度是原因"。这个推断有一个
+明摆着的漏洞：**窄和"是 actor"是混杂的**，窄本身不能解释那 −12 分。
+
+判定实验就是把宽度对齐再看：
+
+| 臂 | 先验 | 平均 | n |
+|---|---|---|---|
+| `default` | `N(0,1)` | **12.44** | 16 |
+| `tanh_random` | `tanh(N(0,1))` | 7.38 | 16 |
+| `tanh_wide` | **`1.340 · tanh(N(0,1))`**（宽度已对齐 0.763） | **0.70** | 10 |
+
+**加宽不但没救回来，还更差**（0.70 对 7.38）。宽度假设被证伪。
+
+### 为什么加宽会适得其反：一阶矩不等于形状
+
+同一批 16 帧上四种先验的矩和分位数：
+
+| 先验 | `\|u\|`均值 | std | p99 | **max** | **`\|x\|>2` 占比** |
+|---|---|---|---|---|---|
+| `N(0,1)` | 0.798 | 1.000 | 2.577 | **5.27** | **4.55 %** |
+| `tanh(N(0,1))` | 0.556 | 0.628 | 0.989 | **1.00** | **0 %** |
+| `1.34 · tanh` | 0.745 | 0.841 | 1.325 | **1.34** | **0 %** |
+| `actor`（tanh） | 0.510 | 0.592 | 0.985 | 0.99 | 0 % |
+
+`1.34 · tanh` 的 `|u|` 均值 0.745，与 `N(0,1)` 的 0.798 已经很接近——**但它的支撑是
+`[-1.34, 1.34]`，一条尾巴都没有**。而且加宽把原本堆在 `|u|≈1` 的质量（tanh 在 0.99 以外只有
+0.8 %）推到 `|u|≈1.33`，正好是**硬边界**上。`N(0,1)` 在那个位置有 18 % 的质量继续向外延伸。
+
+所以 `1.34 · tanh` 在 `|u|` 意义上的"宽度"对上了，在**分布意义上离高斯更远了**：
+一阶矩匹配，尾部为零，边界处有堆积。
+
+**这就是它得 0.70 的原因。** flow-matching 采样器在 `x0 ~ N(0,1)` 上预训练，ODE 的积分路径
+依赖初始点的完整分布，不是一个均值。截断支撑等于把轨迹的每一条都拉向"接近条件均值"的
+那一支，而且拉得比未加宽的版本更狠（因为边界更远、质量更集中）。
+
+### 一个我该更早做的检查
+
+`tanh` 的支撑是 `(-1, 1)`，这在写代码的第一分钟就是已知的。`N(0,1)` 有 4.55 % 的质量在
+`|x| > 2`，也是查表可得。**"用 tanh 的输出替代高斯噪声"这件事，在任何测量之前就能看出分布
+不匹配**，而我先测了均值、发现对不上、然后去修均值——把两个明显不同的分布当成"宽度不同"。
+
+代价是一轮约 50 分钟的实验和一个被证伪的假设。教训不是"多测几个矩"，而是：
+**替换一个概率分布的支撑时，先画出两个分布，而不是先算它的一个统计量。**
+
+### 形状正确的方案：只平移，不截断
+
+```
+u = ε + shift_scale · m(s),      ε ~ N(0, 1),   m = actor 的 pre-tanh 均值
+```
+
+实测（α = 0.3）：
+
+| 先验 | `\|u\|`均值 | std | p99 | max | `\|x\|>2` |
+|---|---|---|---|---|---|
+| `N(0,1)` | 0.791 | 1.009 | 2.749 | 3.56 | 4.88 % |
+| **`mean_shift` α=0.3** | 0.868 | 1.070 | 2.443 | **3.67** | **5.66 %** |
+| `actor`（tanh） | 0.510 | 0.592 | 0.985 | 0.99 | 0 % |
+
+**尾部保住了，整体只宽了 6–9 %**，而位置的偏移随观测变化（跨帧 std 0.613）。
+
+actor 的 pre-tanh 均值本身就落在几乎正确的尺度上（`|m|` 均值 0.766、std 1.012），所以
+`α` 只需要 0.3 就能让边际分布几乎不变。这是这个方案唯一真正的优点：
+**它不需要修改 actor 的训练目标，只需要改推理时怎么用它的输出。**
+
+### 正在跑的两臂，以及为什么第二臂是关键
+
+| 臂 | shift | 回答 |
+|---|---|---|
+| `ms_actor` | `0.3 · m(s)`，随观测变化 | 形状对了之后，转向有没有用？ |
+| `ms_fixed` | `0.3 · m(s₀)`，**第一次请求后冻结** | 增益是否只来自"把先验挪了地方"？ |
+
+第二臂是必须有的对照：冻结的向量与 actor 在某个状态上的输出**完全相同**（就是那个输出），
+唯一的区别是它不再随观测变化。若两臂得分相同，则 actor 的逐状态信息毫无价值，
+"训练 8000 epoch 得到的只是一个大致的偏移"。
+
+### 结果：两个方向相反的强信号
+
+8 个配对种子（300–307），同一 harness：
+
+| seed | `default` | `ms_actor` | `ms_fixed` |
+|---|---|---|---|
+| 300 | 19 | 5 | 0 |
+| 301 | 4 | 6 | 0 |
+| 302 | 18 | 12 | 0 |
+| 303 | 15 | 5 | 0 |
+| 304 | 20 | 16 | 0 |
+| 305 | 20 | 16 | 0 |
+| 306 | 5 | 6 | 0 |
+| 307 | 10 | 13 | 0 |
+| **平均** | **13.88** | **9.88** | **0.00** |
+
+| 对比 | 差值 | sem | t | 胜/平/负 |
+|---|---|---|---|---|
+| `ms_actor − default` | **−4.00** | 2.11 | −1.89 | 3 / 0 / 5 |
+| `ms_fixed − default` | **−13.88** | 2.36 | −5.89 | 0 / 0 / 8 |
+| `ms_actor − ms_fixed` | **+9.88** | 1.73 | **+5.72** | **8 / 0 / 0** |
+
+### 这两半各自说明什么，以及合起来说明什么
+
+**`ms_actor − ms_fixed = +9.88`，8/8 全胜，t = 5.72。** 这是整轮实验里最强的信号。冻结臂与
+actor 臂的偏移向量在幅度和形状上完全相同（它**就是** actor 在某个状态上的输出），
+唯一差别是它不随观测变。它掉到 0 说明：**actor 的逐状态信息确有价值**，
+"训练出来只是一个大致的常数偏移"这个假设被排除。
+
+**`ms_actor − default = −4.00`，t = −1.89。** 未过 2，严格说不能断定负效应。但胜负的构成
+（3 胜全落在基线低的种子上，5 负全落在基线高的种子上）指向一个具体的机制：
+
+| seed | 基线 | `ms_actor` | 变化 |
+|---|---|---|---|
+| 300 | 19 | 5 | −14 |
+| 302 | 18 | 12 | −6 |
+| 303 | 15 | 5 | −10 |
+| 304 | 20 | 16 | −4 |
+| 305 | 20 | 16 | −4 |
+| 301 | 4 | 6 | +2 |
+| 306 | 5 | 6 | +1 |
+| 307 | 10 | 13 | +3 |
+
+**偏移把采样点从策略偏好的位置推开**：好场景被拉低，差场景被略救。净效应为负。
+
+合起来：**actor 学到了"与观测相关"的东西，但没学到"该往哪里推"。** 一个随观测变化的
+无意义偏移（在这份数据上）和一个常数偏移会得到几乎一样的 0 分吗？不会——`ms_fixed` 得 0，
+`ms_actor` 得 9.88，说明 actor 的输出不是噪声。但它朝着一个平均而言不如原点的地方推。
+
+### 一个必须一起考虑的约束
+
+`probe_steering_effect` 测出：**重抽一次噪声只让动作变化 2.9 % 的动作标准差**。
+这给整个方法定了一个上限——噪声这个旋钮本来就很轻。`shift_scale = 0.3` 是从"保持分布形状"
+推出来的（边际 std 1.070，比基线宽 6 %），不是从"最大化收益"推出来的；
+没有任何理由相信它是收益最大的那个值。
+
+但这一轮已经能排除的，比"这个 α 不好"更重要：**三种参数化（tanh、加宽 tanh、均值平移）
+在正确配置下全部不如不转向**。而其中最好的那个（`ms_actor`, 9.88）恰恰是唯一保持
+`N(0,1)` 形状的那个。所以参数化不是无关的，但它也不是充分的。
+
+### 三轮实验的完整账，写在一起
+
+| 先验 | 形状 | 平均 | vs 基线 | 结论 |
+|---|---|---|---|---|
+| `N(0,1)` | 高斯，有尾 | **13.88** | — | 基线 |
+| `tanh(N(0,1))` | 截断 @1.0，**无尾** | 7.38 | −5.06 | 截断本身有害 |
+| `1.34·tanh` | 截断 @1.34，**无尾** | 0.70 | — | **加宽反而更差**（证伪宽度假设）|
+| `actor`(tanh) | 截断 @1.0，无尾 | 0.25 | −12.19 | 截断 + 错误方向 |
+| `ε+0.3m(s)` | **高斯，有尾** | 9.88 | −4.00 | 形状对，方向不对 |
+| `ε+0.3m(s₀)` 冻结 | **高斯，有尾** | 0.00 | −13.88 | 常数偏移完全失效 |
+
+**形状是必要条件，不是充分条件。** 两个保持高斯尾部的臂（9.88 和 0.00）差距 9.88 分，
+说明形状对了之后，"偏移什么"仍然决定一切；而两个截断的臂都 ≤ 7.38，说明形状不对时
+连"偏移什么"都救不回来。
+
+### 当前判断
+
+在这套 π0.5 + 2x10 设置上，**DSRL 学到的 actor 尚未带来任何收益**，三种参数化、共
+约 4 小时的评估都指向同一结论。可复现的正面证据只有一条：`ms_actor` 显著优于
+`ms_fixed`（t = 5.72），即 actor 的输出确实携带观测信息。
+
+要让它变成收益，最可能的缺口不在参数化，而在 critic 的目标——§9.91–9.93 已经把
+critic 的 TD 目标换成 MC、修过相位 bug，`Q` 也追到了池内真实均值的 81 %，但
+**`argmax_ε Q(s,ε)` 给出的 ε 未必真的更好**。这一点从未被独立验证过：
+现在的证据只说明 Q 的*数值*对，不说明它的*排序*对。
+
+
+
+
+
+
+
+
+---
+
+## 9.96 排序探针：离线 critic 的排序能力等于抛硬币，这不是 bug（11-09）
+
+§9.95 结尾留下的那句话是"`argmax_ε Q(s,ε)` 给出的 ε 未必真的更好，这一点从未被独立验证过"。
+这一节就是那个验证，而它否掉的是整条离线路线，不是某一个超参。
+
+### 探针
+
+`probe_critic_ranking.py` 用 `branches/*.npz`（14 个分片、100 个分支点、其中 93 个有效、
+共 787 个分支、45 个"结局不同"的点、823 个 discordant pair），问一个二选一的问题：
+
+> 同一个状态的两条分支，critic 打分高的那条，真实回报更高吗？
+
+ties 记 0.5，bootstrap 按**点**重采样（823 个 pair 来自 45 个点，按 pair 重采样会把相关
+性当成独立证据）。
+
+| checkpoint | 同状态成对准确率 | 95% CI |
+|---|---|---|
+| v5 (tanh) | **0.508** | [0.443, 0.573] |
+| v6 (tanh, 修好相位) | **0.508** | [0.440, 0.571] |
+
+**两个都是 0.508，区间都盖住 0.5。**
+
+### 为什么这不是可以修的 bug
+
+离线池里**每个状态只有一个动作**。critic 在那个 (s, a) 上可以拟合到小数点后三位
+（§9.93：Q 0.285 → 7.98，critic loss 3.91 → 0.003），但"同一状态下两个动作谁更好"这个
+问题，池里根本没有信息可以回答它。这不是收敛不够，是**数据结构里没有这个自由度**。
+
+论文也没有这么训：§5.1 全程在线，§5.3 明确说 naive offline baseline
+"not able to learn at all"。所以 0.508 是那个实验的**正确答案**，而不是需要调参的症状。
+
+### 一个反复出现的模式
+
+这个项目至今找到的三个"看起来像正常曲线"的 bug——空填充、被遮蔽的 `stride`、相位错位的
+回报表——和这次的 0.508 属于同一类。防御手段不是看 loss 曲线，是**外部量**：
+
+- 池内真实回报、锚点回报、锚点非零比例（离线训练器启动时打印）
+- 同状态成对准确率（本节）
+- 与基线策略相同的奖励率（§9.97）
+
+---
+
+## 9.97 重建为在线：先量清楚代价，再写循环（11-09）
+
+决定做在线之后，第一件事不是写循环，是把"在线到底有多贵"量出来。四个数决定了整份实现：
+
+| 问题 | 测量 | 结论 |
+|---|---|---|
+| 物理一步多贵 | `mj_step` **1.12 ms**，但控制周期 `timestep=0.001` × 50 substep | 一个控制步 ≈ **61 ms**，这是 benchmark 自身的配置，不能改 |
+| MuJoCo 放 GIL 吗 | 4 线程 **7.94×** 于串行，轨迹**逐位一致** | 物理可以并行 |
+| 渲染能进线程吗 | 第二个线程渲染 `eglMakeCurrent` → **`EGL_BAD_ACCESS`**，线程直接死 | 不能。MuJoCo 只有一个全局 EGL context |
+| 自建 renderer 和 env 自带的图一样吗 | 三路相机 **max\|diff\| = 0** | 一样，可以主线程按需渲染 |
+
+外加批量前向的次线性：batch 1 = 183 ms，4 = 299 ms，**8 = 437 ms**。所以八个场景基本只付
+一次前向的钱。
+
+### 于是架构是
+
+物理在 `ThreadPoolExecutor` 里跑、`render_cameras=False`；主线程每轮渲染 8×3 张图并做一次
+批量前向；梯度步和物理等待重叠。
+
+### 但物理的代价不是常数
+
+第一轮 8 个场景的物理是 **1,164 ms**（≈ 一个场景的钱，说明并行完美），到 episode 中段
+变成 **4–9 s**。第一版实现里这就是"吞吐从 78 掉到 16 control steps/s"的全部原因。
+
+`probe_step_slowdown.py` 用重放定死了归因：把每一步的 `(qpos, qvel, ctrl)` 存下来，之后
+把最快和最慢的六步原样喂回求解器——
+
+| | 原始 | `mj_step`×50 | `mj_forward` | `env.step` |
+|---|---|---|---|---|
+| 最快 6 步 | 60.3 ms | **57.3** | 1.1 | 64.9 |
+| 最慢 6 步 | 580.7 ms | **570.9** | 12.7 | 483.1 |
+
+**95–98 % 的控制步就是求解器本身，而且变慢的是求解器。** `nefc` 只从 1,980 涨到 2,379
+（+20 %）却带来 10× 的耗时，所以约束行数不是原因；是 Newton + `iterations=100` 在夹爪拖着
+80 个自由刚体时不能快速收敛。
+
+靠对照排掉的三个候选：**时间**（合成动作跑满 1500 步恒为 61 ms）、**线程争用**（单场景同样
+退化）、**CPU 配额**（16 核，无其他进程）。
+
+### 因此诚实的吞吐（实测，不是推算）
+
+- 一轮 = 8 场景 × 16 控制步。**episode 开始时 1.2 s**（并行完美），**中段 4–10 s**，
+  **episode 结束那一轮 ~30 s**——因为要关掉 8 个 env 再建 8 个新的（每个 1.36 s，串行），
+  而这正是"训练和评估看到同一个场景分布"要付的代价（§9.97 开头的漂移测量）。
+- 前 50 轮平均 **18.3 s/轮** → **7 scene-steps/s** → `--scenes 8` 约 **135 episodes/hour**。
+- 200 分钟 ≈ **100 个 episode**。
+
+§9.96 之前写过的"81 control steps/s、211 episodes/hour"是**首轮**的数字，
+"~20 control steps/s、50–60 episodes/hour"是把中段物理当稳态的数字。两个都错了，
+错在同一个地方：**拿一个时刻的物理耗时去外推整集**。真实值随 episode 相位变化 4 倍。
+
+另一个自己踩过的测量坑：用 `grep -c "^\[online\] r"` 数轮次，而这个模式同时匹配了
+`[online] replay` 和 `[online] reward` 两行，于是"300 秒跑了 1 轮"这个结论是假的。
+数轮次要锚定行尾，或者直接用 `--log-every 1`。
+
+### 梯度步是免费的
+
+`--utd 20 --batch 256` 一批梯度步 120–160 ms，全部藏在 4–9 s 的物理等待里。所以没有任何
+理由为了速度降 `--utd`。
+
+---
+
+## 9.98 在线循环跑的第一次，以及两个我自己引入的错（11-09）
+
+管线跑通（60 轮 / 480 transition / 16 episode / 7.8 分钟），但过程中暴露出两个错，都是
+**离线版已经修过、我在新文件里又犯了一遍**的同一类错。
+
+### 错一：把熵项打开，Q 被抬了两个数量级
+
+`train_dsrl.py` 里 `--entropy-in-target` 默认**关闭**，理由是：该项是每次 bootstrap 的奖励，
+在折扣下复合成 `alpha·|log pi|/(1-gamma)`；这里 `alpha≈1`、`log pi≈-21`、`gamma=0.99`，所以
+和是 **≈ 2100**，而真实回报只有几十个饼干。我把它设成默认打开了，于是：
+
+| 轮 | `q` | `target_q` | 奖励均值 |
+|---|---|---|---|
+| 8 | 20.41 | 26.16 | 0.000 |
+| 16 | 35.46 | 35.82 | 0.188 |
+| 24 | 41.29 | 41.36 | 0.146 |
+
+Q 跟着 target 走，说明 TD 是"对"的——它正确地拟合了一个被平移过的目标。这不破坏 actor
+（固定状态下加常数不改 argmax），但让日志里每个 Q 都无法读数，而这正是这份文件想守住的东西。
+已改回默认关闭，理由写在 `--help` 里。
+
+### 错二：`--max-control-steps` 完全没生效
+
+环境自己的 `horizon` 来自 config，2x10 是 **6000**；benchmark 的 1500 步上限是在
+`run_episode` 里靠计数实现的，那段代码这个循环不走。所以 `--max-control-steps 400` 跑了 640
+步仍然 `ep 0`。已改成在 `Scene.play` 里显式计数。
+
+**训练 episode 比被评估的 episode 长 4 倍**，这个错误的性质就是 §9.96 结尾说的那种：没有
+报错、曲线正常、结论全错。
+
+### 奖励的定义也换了，理由不是"照抄参考"
+
+环境的 reward 是 `min(cookies_in_target / required, 1.0)`——一个**水平量**，不是增量。
+`chunk_sum`（参考实现 `ActionChunkWrapper` 的行为）对它做积分，于是"把饼干早点放进箱子里"
+会在之后每一步都被再付一次，回报跑到 ~1500，而最有价值的策略里有一部分是"把饼干留在箱里"。
+
+默认改成 `increment`，即 `count[t+1] - count[t]`，单位是**饼干个数**。这样：
+
+- 一个 episode 的回报**就是**评分（最高 20）
+- Q 可以和离线池直接比（池均值 9.56，整集未折扣 22.76）
+
+不除以 `required_cookies`，因为一除就等于把这份文件里每个数字都暗地里除以二十。
+
+### 奖励信号的自检
+
+唯一有意义的判据不是"非零比例有多高"，而是**和基线策略在同一个任务上的比率**：
+`a3_clean_v9_30000` 每 1500 步得 13.18，即 0.00879 饼干/控制步、`execute=16` 下
+**0.1406/RL 步**。一个未训练的噪声策略**就是**那个基线（它的噪声本来就是采样器的噪声）。
+
+实测 **0.1300/RL 步 = 基线的 93 %**，非零比例 3.5 %。3.5 % 是这个任务的正确稀疏度，不是
+异常——这一点一开始被我写成了 `if 非零 < 5%: WARNING`，是错的判据，已改成与基线比较。
+
+---
+
+## 9.99 在线训练开跑前必须写下来的天花板（11-09）
+
+`probe_steering_effect` 已经量过：**重新抽一次噪声只让动作移动 2.9 % 的标准差**。这就是 DSRL
+在这套设置上全部的权限。
+
+在线能修的是 critic 的**排序**——那正是离线结构上做不到的（§9.96）。在线**不能**放大
+那 2.9 %。
+
+所以先写下来：**现实的天花板是 1–2 分**（基线 13.18）。如果跑完看到 +15 分，那是管线里还有
+一个 bug，不是方法奏效了；如果看到 ±0.5 分，那是这个权限上限的必然结果，不是训练失败。
+这两句话必须在看结果之前写下来，否则事后怎么说都"解释得通"。
+
+---
+
+## 9.100 物理代价的 83 % 是饼干本身，不是管线（11-09）
+
+§9.99 之前那个"在线很贵"的结论需要拆开：贵在哪里。`probe_episode_cost.py` 用同一段动作
+比对两种模型——原场景，以及把 80 个 cookie body 的 `contype`/`conaffinity` 清零（对求解器
+不可见，动作完全相同）：
+
+| 场景 | ms/control step | 六段计时 |
+|---|---|---|
+| 完整 | **60.5** | 61 61 60 61 60 60 |
+| 饼干不参与求解 | **10.2** | 10 10 10 10 10 10 |
+| 差值 | **50.3（83 %）** | |
+
+**六个时间桶完全平坦**（61/61/60/61/60/60），所以这段动作没有产生"中段变慢"——它只是
+**一开始就慢**，因为它从第 1 步就把夹爪推进饼干堆。而移除饼干后不但快了 6 倍，还**恒定**。
+
+这就把 §9.97 的归因补全了：
+
+- 不是"时间让求解器变慢"，是**接触数量**让它变慢
+- 而接触数量由任务决定，不由管线决定
+- 所以 83 % 的物理预算是 **2x10 这个任务的定义**，不是实现开销
+
+### 这否掉了三条"优化"路径
+
+1. **降 `substeps`**（50 → 更少）：会改控制周期和动力学，策略是在 50 上训的，不能用。
+2. **降 `solver` 迭代**（100 → 更少）：同上，改的是被训练的那个动力学。
+3. **截短 episode** 是唯一合法的杠杆，但要看奖励落在哪里。基线 v9 在 1500 步里得 13.18，
+   首次放置的中位数在第 **226** 步、最后一次在第 **834** 步——所以 1500 步里有约 45 % 是
+   最后一次放置之后的**空转**。截到 900 步会去掉这段时间而几乎不掉奖励，省 40 % 墙钟。
+
+第 3 条是可用但没有采用的：训练和评估必须用同一个截断点，而评估沿用 1500 是既有基线，
+换掉就没法和 13.18 比。这个取舍写在这里，不是遗漏。
+
+---
+
+## 9.101 预算的现实：200 分钟 = 5.6 个 episode 等价（11-09）
+
+把所有实测拼起来：
+
+| 量 | 值 | 来源 |
+|---|---|---|
+| 一轮（8 场景 × 16 控制步） | episode 开始 1.2 s，中段 10–13 s，换集那轮 ~30 s | 日志 `round cost` |
+| 平均（机器空闲） | **11.2 s/轮** | 100 轮 / 1,113 s（扣掉 ~95 s 加载） |
+| 一集 | 94 轮 = **17.5 分钟** | `max_control_steps=1500` / `execute=16` |
+| 340 分钟 | **~19 个 episode 等价**（8 场景并行 → 共 ~155 个 episode） | 除法 |
+
+> **这张表改过一次，原因是测量被自己污染。** 第一版写的是 22.9 s/轮、5.6 个 episode 等价，
+> 那个数字是在**同时跑着三个探针**（`probe_episode_cost` 的两段 1200 步课程、
+> `probe_online_critic` 的成对 rollout）的时候测的。8 个物理线程和探针的物理线程抢同样的
+> 16 个核，于是训练的每一轮都被拖慢一倍。把机器让给训练之后，同样跑到第 100 轮只需要
+> 1,113 秒而不是 2,300 秒。
+>
+> 这个错误的性质和 §9.96 结尾列的那些一样：**数出来了，但是数的是错的东西**。以后测吞吐必须
+> 说明"测量时机器上还有什么在跑"，否则数字没有意义。
+
+对照参考实现：robomimic can 一集 **75 个 RL 步**（`max_episode_steps=300` / `act_steps=4`），
+它的 `init_rollout_steps=1501` 就是**约 20 个 episode** 的暖启动。这里 5.6 个 episode 等价等于
+**530 个 RL 步**，连参考的暖启动都不到。
+
+原因不是实现慢，而是两个任务的**每一步根本不是一个量级的东西**：
+
+| | robomimic can | 这里 |
+|---|---|---|
+| 一步的物理 | 4 ms（一个 `mj_step`） | **1,700 ms**（50 substep × 34 ms 平均） |
+| 一集 | 75 RL 步 | 94 RL 步 |
+| 一集的实际耗时 | ~0.3 s | **36 分钟** |
+
+**740 万倍的单步差距**，其中 83 % 是饼干（§9.100）。这是把 DSRL 搬到这个任务上必须承认的
+事实：论文的算法可以直接用，论文的**预算**不能直接搬。
+
+### 因此这次实验能回答什么、不能回答什么
+
+- **能回答**：在线 critic 能否学出同状态的动作排序（§9.96 里离线做不到的那件事）。
+  ~19 个 episode 等价、1,800 个 RL 步、`--utd 20` 下约 36,000 次梯度更新，足够看出
+  `q` 是否跟随 `target_q`、`alpha` 是否退火、critic 在噪声方向上是否有曲率。
+- **不能回答**：DSRL 能否把基线 13.18 提高。§9.102 量到 critic 的全部权限只有分数的
+  2.2 %，而这个预算连跑完一个完整对照（8–16 个评估种子）都不够。
+
+这两个结论必须分开陈述，否则一次 200 分钟的实验会被读成"方法无效"，而它根本没有检验
+方法的有效性——它检验的是**管线是否连得上**。
+
+---
+
+## 9.102 critic 在噪声方向上有结构，但结构只有分数的 2.2 %（11-09）
+
+### 为什么换了一个测法
+
+`probe_online_critic.py` 的设计是成对 rollout：两种噪声各跑一段，比谁放进箱子的饼干多。
+实测这条路走不通，而且失败得很干净：
+
+| 窗口 | 10 个状态 × 2 种噪声 | 结果 |
+|---|---|---|
+| 120 步 | 20 次比较 | **20 次全部 0/0** |
+| 300 步 | 20 次比较 | **20 次全部 0/0** |
+
+原因是量级：训练中一集 1500 步才放进 5–7 个饼干，300 步里平均不到一个。于是每次比较都是
+平局，而平局记 0.5 就让准确率**恰好**显示成 0.500——一个看起来像"抛硬币"但其实是
+"没有发生任何事件"的数字。这是这个项目第四次踩同一个坑：**探针没有机会和探针测到零效应
+长得一模一样**。
+
+一次有效比较需要一整集（约 10 分钟），10 个状态就是 200 分钟——超过全部训练预算。
+
+### 换成不需要 rollout 的问法
+
+原本要回答的问题可以拆成两半：
+
+- **(a)** `Q_ns(s, u)` 在固定 `s` 下，**跨 u 有没有变化**？
+- **(b)** 有变化时，被偏好的 u 是否真的更好？
+
+(a) 是网络和权重的性质，每个噪声一次前向，**几乎免费**；而如果 (a) 的答案是"几乎不变"，
+(b) 无论怎样都不可能是真的。所以 (a) 是门。
+
+`probe_critic_noise_sensitivity.py` 的结果（10 个状态 × 256 个噪声向量）：
+
+| 量 | 值 |
+|---|---|
+| `std_u Q(s,·)` | **0.0541** |
+| `max − min over u` | **0.2954** |
+| 占 5.00 饼干一集的 | 5.9 % |
+| 占 13.18 基线一集的 | **2.2 %** |
+
+单位是饼干：一个饼干在 Q 里值 1.0。所以 `max−min` 就是 **critic 通过选噪声能拿到的全部
+收益上限**——不是平均收益，是最好情况减最坏情况。
+
+### 这个数字和 §9.95 是同一个
+
+§9.95 用完全不同的方法量到：**重抽一次噪声只让动作移动 2.9 % 的标准差**。
+
+| 测量 | 方法 | 上限 |
+|---|---|---|
+| §9.95 动作权限 | 重抽噪声，量动作位移 | **2.9 %** |
+| §9.102 critic 权限 | 量 `Q` 在噪声方向的全幅，除以分数 | **2.2 %** |
+
+两个互不相干的方法给出同一个量级。这不是巧合，是同一件事的两种看法：**噪声在这个采样器里
+的杠杆只有几个百分点，所以价值函数在这个方向上的曲率也只有几个百分点，所以 `argmax_ε Q`
+能拿到的也只有几个百分点。**
+
+§9.99 写下的"1–2 分天花板"因此不是保守估计，是被两次独立测量支持的定量结论。
+
+### 这次在线实验能回答的那半个问题
+
+回到 §9.101 列的两件事：
+
+- **能回答的**：在线 critic 是否学到了噪声方向上的排序。答案是**学到了结构**
+  （`std_u Q = 0.054`，不为零），而且这个结构的大小与动作权限一致。离线版的 0.508 不是
+  "学得不够"，是**离线数据里没有可学的曲率**——现在有了，只是曲率本身就小。
+- **不能回答的**：能否把 13.18 提上去。2.2 % 的上限摆在这里，任何超过 +2 分的提升都必须先
+  解释这 2.2 % 是怎么被打破的，否则是管线 bug。
+
+### 训练到第 200 轮的实际数字
+
+停在第 200 轮（1600 个 transition，16 个 episode，49 分钟）时的状态，全部健康：
+
+| 量 | 第 25 轮 | 第 200 轮 |
+|---|---|---|
+| `q` | 0.997 | **1.545** |
+| `target_q` | 0.918 | 1.726 |
+| `critic_loss` | 0.325 | 0.330 |
+| `noise_critic_loss` | 0.169 | 0.208 |
+| `alpha` | 0.898 | **0.364**（在退火） |
+| `log_prob` | −21.76 | −21.82（与离线版 −20.9 一致） |
+| `u_abs` | 0.527 | 0.518（**未饱和**） |
+| episode 回报 | — | 5.00 → **6.94** |
+
+`q` 跟随 `target_q`、`alpha` 单调退火、`u_abs` 稳定在 0.52，说明 TD、熵控制和 tanh 参数化
+三者都在正常工作。checkpoint 302 MB，`SteeringActor` 可直接加载（`actor_dim=32`,
+`chunk=50`, `obs=2320`, `hidden=2048`）。
+
+---
+
+## 9.103 每集第一个 chunk 的历史窗口：训练是零，评估是重复首帧（11-09）
+
+这是在这份实现里找到的第三个"同一份输入、两种含义"的错误，而且它只在 94 个 chunk 里的
+**第 1 个**出现，所以任何看平均指标的方式都发现不了。
+
+### 不一致在哪里
+
+评估路径（`BridgeChunkPolicy.act`）的调用顺序是：
+
+```python
+def act(self, observation, task=""):
+    self._advance_history(observation)        # ← 先追加当前帧
+    if not self._queue:
+        arrays["history"] = self._history_vector()   # 再取窗口
+```
+
+所以 episode 的第一步，窗口里已经有当前帧，`_history_vector` 把它**重复 10 次**填满。
+
+而"每步之后追加"的循环结构（`Scene.play` 里 `env.step()` 之后才 append）在算第一个 chunk
+时窗口是**空的**，`history_vector` 于是返回**全零**。
+
+同一个 shape（480 维），两种含义：一个是"机器人静止在初始位姿"，一个是"10 帧都被重复的
+当前位姿"。这正是这份代码库反复警告的那类输入。
+
+### 修法
+
+`Scene.seed_history(observation)`：窗口为空时追加当前帧，之后 `history_vector` 自动重复填满。
+只在 episode 起点生效（`observe_all` 每轮都调，非空时是 no-op）。
+
+验证：
+
+```
+empty -> all zeros: True
+seeded: True
+after seed, shape (480,) first frame [0 1 2 3] all same: True
+second call is a no-op: True len 1
+```
+
+### 为什么为此重启了训练
+
+它只影响 1/94 的 chunk，看起来可以"先让它跑完"。但这是**每集第一个决策**的系统性偏差，
+而本项目的天花板只有 2.2 %（§9.102）——在这种量级下，"已知的 1 % 偏差"和"结果"分不开。
+
+代价是重启丢掉约 30 分钟（占 450 分钟预算的 7 %）。换来的是一个可以在文档里写成"这次运行
+用的是修好的版本"的结果，而不是"这次运行有个已知偏差，但大概不要紧"。
+
+`dsrl_online_run2_prefix.pt` 保留了修复前的 checkpoint，运行记录分别在
+`logs/online_run1.log`、`online_run2.log`、`online_run3.log`。
+
+---
+
+## 9.104 评估之前的预测：这个 actor 应当**低于**基线，而不是高于（11-09）
+
+这一节必须写在看评估结果之前，否则事后怎么解释都通。
+
+### 预测的两个数
+
+在线训练器用的是 `NoiseActor`：`u = tanh(m(s) + sigma·z)`，`sigma` 学习得到，实测收敛到
+**0.88**（§9.102 的日志）。所以它的输出分布大致等价于 `tanh(N(0,1))` 那一族。
+
+§9.95 已经量过这一族：
+
+| 臂 | 噪声分布 | 2x10 得分 |
+|---|---|---|
+| `default` | `N(0,1)` | **12.44** |
+| `tanh_random` | `tanh(N(0,1))` | **7.38** |
+| `tanh_wide` | `1.340·tanh(N(0,1))` | 0.70 |
+| `actor`（v5, tanh 确定性） | `tanh(m(s))` | 0.25 |
+
+**所以预测是：在线 actor 的得分在 0–7.4 之间，低于 12.44 的基线。**
+
+### 为什么这条预测重要
+
+如果评估结果是 **5±3**，那它和"在线训练有效/无效"**无关**——它测的是 tanh 参数化，而 tanh
+参数化在 §9.95 就已经被单独判定为有害（因为流匹配头从没见过 `|eps|>1` 的区域）。
+
+把这两件事混在一起是这类实验最容易犯的错：用一个已知有问题的参数化去测一个算法，然后把
+参数化的问题记在算法账上。
+
+### 因此这次在线实验真正检验的只有一件事
+
+**在线数据能否让 critic 学到同状态的动作排序。** 这一点的答案是：能，但幅度只有分数的
+2.2 %（§9.102）。两者合起来意味着——
+
+- 即便 critic 完全学会排序，用一个 tanh actor 去用它，结果仍会落在 `tanh_random` 附近；
+- 要用上那 2.2 %，actor 必须是 `mean_shift` 那一族（`u = eps + a·m(s)`，保持高斯尾部），
+  而那不是 SAC——`mean_shift` 的输出不是一个分布，没有 `log_prob`，熵正则和目标熵都失去
+  意义。它需要一个不同的目标函数。
+
+这是一个方法层面的结论，不是调参能解决的：**DSRL 的论文形式（tanh + SAC 熵）在这个采样器
+上有一个二选一——要么参数化对但算法不适用，要么算法适用但参数化有害。**
+
+### 如果要真正验证 DSRL 在这套设置上有没有用
+
+需要的不是更长的训练，而是：
+
+1. 把 actor 换成 `mean_shift` 参数化；
+2. 给它一个有意义的训练信号（例如对 `m(s)` 做确定性策略梯度，用一个学出来的
+   `Q(s, m)`，而不是对 `tanh` 输出做 SAC）；
+3. 在这个前提下跑够 8–16 个评估种子的对照。
+
+这三步都不在本次运行的预算内，也不在本次运行的问题范围内。
+
+---
+
+## 9.105 撤回 §9.102 的 2.2 %，并撤回"actor 比随机好 4.7"（11-10）
+
+这一节撤回我自己在 §9.102 写的结论，以及三小时前刚得到的一个"好消息"。两个都被同一件事
+推翻：**critic 只在行为分布附近有定义。**
+
+### 先说结果
+
+`probe_actor_vs_random.py`（16 个状态，TD critic 打分）：
+
+| 比较 | 差值 | t | 胜负 |
+|---|---|---|---|
+| actor − random | **+4.73 饼干** | +4.71 | 14 胜 / 2 负 |
+| actor − tanh(mean) | −0.22 | −0.89 | 10 / 6 |
+
+看起来是个大发现：+4.73 是 13.18 基线的 36 %。但同一张表里有八个**负数**：
+`−5.64, −2.22, −1.94, −1.67, −1.49, −1.35, −0.51, −0.16`。
+
+而这个任务的奖励是**饼干计数增量**，恒 ≥ 0，所以
+
+$$
+\text{reward}_t \ge 0 \;\Rightarrow\; G_t \ge 0 \;\Rightarrow\; Q(s,a) \ge 0
+\quad\text{对任意 } s, a
+$$
+
+**负的 Q 是不可能的。** 六个负数不是评估，是外推。
+
+### 定量确认
+
+`probe_score_sanity.py`（12 个状态）：
+
+| 噪声来源 | TD critic 打出负 Q 的状态数 | 动作范围 min/max | sd | 与 actor chunk 的距离 |
+|---|---|---|---|---|
+| actor | **0 / 12** | −1.041 / +1.018 | 0.559 | — |
+| random | **6 / 12** | −1.114 / +1.198 | 0.572 | 0.122 |
+| tanh(mean) | **0 / 12** | −1.040 / +1.014 | 0.561 | 0.032 |
+
+关键在最后一列：随机噪声产生的 chunk 与 actor 的 chunk 只差 **0.12**（动作单位），动作范围
+几乎一样。**它并不"离谱"**——但 critic 仍然打出负值。
+
+参照同一个项目的既有测量：相邻控制步的动作差 **0.0021**，相隔 16 步差 **0.0250**。所以
+0.12 是"同一段 chunk 内部变化"的 5 倍——对 16 维动作空间里的一个 MLP 来说，这就是外推。
+
+**结论：`actor − random = +4.73` 无效。random 那一臂不在 critic 的定义域里。**
+
+但它留下了一条有用的信息：**actor 的 chunk 全部落在 critic 能打分（非负）的区域**（0/12 负），
+说明 actor 没有把自己的动作推到离谱的地方。这一点是好的。
+
+### 撤回 §9.102
+
+§9.102 说"critic 在噪声方向上的全部权限只有 0.30 饼干（2.2 %）"。现在在**同一个 checkpoint
+系列**上重测：
+
+| checkpoint | 训练轮次 | `std_u Q` | `max − min` | 占 13.18 基线 |
+|---|---|---|---|---|
+| `run1` | **98** | 0.0549 | 0.316 | **2.4 %** |
+| `run3` | **808** | **3.112** | **14.517** | **110 %** |
+
+`run1` 训练了 98 轮，那时 `critic` 还接近零初始化，所以 `critic_noise` 蒸馏的是一个**没有
+幅度的目标**，它自身也就没有幅度。§9.102 测出的 0.055 是那个状态的产物，不是这个方法的
+性质。
+
+**所以 §9.102 必须撤回，不能引用。** 正确的说法是反向的：在训练过的 checkpoint 上，critic
+在噪声方向上的极差是 **14.5 饼干，比整集得分（13.18）还大**。
+
+$$ \max_w Q_{ns}(s,w) - \min_w Q_{ns}(s,w) = 14.5 \;>\; 13.18 = \text{整集得分} $$
+
+**一个真实的价值函数不可能有这种幅度。** 改变一个 32 维噪声向量不可能值 14 个饼干，因为整集
+也只有 13 个。所以 `critic_noise` 在噪声空间里是一个**剧烈外推的面**，actor 就是在爬它。
+
+这解释了训练日志里一直在扩大的 `min_q − q`（§9.101 记到 1.0）：
+
+- `q` = TD critic 对**真实执行过的** chunk 打分 → 0.68，有界、可信
+- `min_q` = 蒸馏 critic 对 actor 的噪声打分 → 1.61，爬到 14.5 幅度面上的一个高点
+
+### 与官方实现的两处差异，正是原因
+
+逐行对照 `refs/sb3-dsrl/stable_baselines3/dsrl/dsrl.py:230-365` 和
+`refs/dsrl/cfg/robomimic/dsrl_can.yaml`，两处**实质性**差异：
+
+| # | 官方实现 | 我的实现 | 后果 |
+|---|---|---|---|
+| **1** | `update_noise_critic` 抽**全新 `randn`** → 去噪 → `Q(s, D(s,w))` → 拟合 `Q_ns(s, scale(w))` | 用 **buffer 里的行为噪声** → `Q_ns(s, w_buf)` 拟合 `Q(s, chunk_buf/1.5)` | **覆盖范围**：官方覆盖整个先验，我只覆盖行为策略去过的地方。σ 收缩时覆盖范围跟着收缩，actor 的 argmax 因此可以跑出 `Q_ns` 的训练域 |
+| **2** | TD bootstrap 用**当前 actor** 在 `s'` 的噪声，每次梯度步重新去噪 | 用 buffer 里的 `chunk_next`（采集时的**行为** actor 采样） | 官方的目标是当前策略的价值，我的是行为策略的 |
+
+两处的共同原因：**一次去噪在这里要 40 ms/样本**，而官方在**每个**梯度步都调用一次（`utd=20`
++ `noise_critic_grad_steps=10`）。robomimic 的 `act_steps=4, action_dim=7` 让这件事很便宜
+（28 维、DDIM 8 步）；我这里是 50×32 的流匹配、10 步去噪、batch 256。
+
+### 其余八项对照都是对齐的
+
+`target_update_interval=1`、`actor_gradient_steps=-1`、`target_entropy=0`、`ent_coef='auto'`
+初值 1.0、`batch 256`、`utd 20`、`noise_critic_grad_steps 10`、`tau 0.005`、`gamma 0.99`、
+`layer_size 2048`、`num_layers 3`、`action_magnitude 1.5`、`n_critics 2`、min-combine——
+全部一致。两处差异已写进 `train_dsrl_online.py` 的 docstring 表格。
+
+另外两处是**有意的适配**，不是偏差：
+
+- **actor 宽度**：官方用 `act_steps * action_dim = 28`（每个 chunk 位置独立噪声）；我用
+  `action_dim = 32` 并沿 chunk 轴重复。这正是论文 §C.5 针对 `C=50, d=32`（1600 维）给出的
+  做法。官方不用是因为 `act_steps=4` 让完整空间只有 28 维。
+- **奖励**：官方是 robomimic 的每步 −1；这里用饼干计数增量。因为本环境自己的奖励是**水平量**
+  （`min(count/required,1)`），对一集积分会到 ~1500。
+
+### 现在的判断
+
+- **actor 把策略改坏了吗？** 直接测不出来（TD critic 对随机 chunk 外推）。但 actor 的 chunk
+  本身是**有界的、和真实回报一致**的（4.8–9.0，均值 6.6，对应实测 episode 回报 8.45）。
+- **actor 的目标函数坏了吗？** **是。** 它优化的 `Q_ns` 在噪声方向上的幅度是 14.5 饼干，
+  超过整集得分。这是**差异 #1** 的直接后果。
+- **§9.104 的预测仍然成立**：tanh 参数化 + 坏的蒸馏面 → 评估应当低于 13.18 基线。
+
+### 要修的东西
+
+优先级排序，都需要"每梯度步一次去噪"这个成本：
+
+1. **差异 #1**：`update_noise_critic` 改成抽 `randn` 再去噪。可以降频（例如每 10 个
+   noise-critic 步里只对 1 个抽新噪声，其余用缓存），或者用 `--distill-per-frame` 那种
+   预生成缓存的思路——离线训练器已经实现过这个。
+2. **差异 #2**：TD bootstrap 改成当前 actor。同样可以降频。
+3. 在此之前，**`min_q − q` 的扩大是差异 #1 的度量，不是学习的度量**。日志里不该把它当作
+   进展来读。
+
+---
+
+## 9.106 完整审计：4 个 bug，1 个被撤回的修复，1 个未解（11-10）
+
+在 run5 之后再跑之前做了一次逐段通读，而不是继续用运行时间换静态可得的结论。以下每条都有代码位置和证据。
+
+### 已修：BootstrapSet 的 cursor 越界（这是 run5 里 #2 修复失效的原因）
+
+```python
+index = torch.arange(cursor, cursor + count) % replay.capacity
+cursor = (cursor + count) % replay.capacity
+index = index[index < replay.size]          # ← 把整批滤空
+```
+
+`cursor` 每轮前进 `count`（32），而 `size` 每轮只增长 `scenes`（8）。**第 11 轮起整个切片
+都落在 `size` 之外，过滤器把它们全部删掉，`refresh` 从此返回 0 行。**
+
+| 轮 | size | cursor | 通过过滤的行数 |
+|---|---|---|---|
+| 8 | 64 | 0 | 32 |
+| 9 | 72 | 32 | 32 |
+| 10 | 80 | 64 | 16 |
+| **11** | 88 | 96 | **0** |
+| 50 | 400 | 1344 | **0** |
+| 225 | 1800 | 6944 | **0** |
+
+所以 run5 里 bootstrap 只在第 8–10 轮生效过，之后**静默关闭**——而这个类存在的唯一理由
+就是修 #2。修法是在 `[0, size)` 内轮转（对增长中的缓冲区单调），现在 `boot_rows 16`
+连续 9 次都不为 0。
+
+### 已撤回：我把 truncation 当成 terminated 的"修复"是错的，方向反了
+
+上一轮我按教科书改成"截断保留自举"，docstring 写"丢掉的是
+`gamma^93 * V(s')` ≈ `0.39 × 4 = 1.6` cookies"。**这个算式用了起点状态的价值去乘折扣，
+是错误的状态。**
+
+$$V(s_0) = r\frac{1-\gamma^{94}}{1-\gamma} = 3.90, \qquad V(s_{93}) = r = 0.064$$
+
+截断处真正丢掉的是最后一个状态的价值 **0.064**，我高估了 25 倍。
+
+更严重的是这样做**引入了更大的错**：循环在读完下一个观测前就已经重建了场景，所以
+"保留自举"时用到的 `s'` 是**下一集的起始帧**，其价值是 3.90。误差 `0.99 × 3.84 = 3.80`，
+是它试图修的东西的 **60 倍**。
+
+参考实现本身就把超时当终止：`ActionChunkWrapper.step` 在 `count >= max_episode_steps`
+时置 `done = True` 并永远返回 `truncated=False`，SB3 的
+`reward + (1-done) * gamma * next_q` 也就切断了自举。已回退到与参考一致。
+
+### 已修：噪声 critic 的更新频率是参考的 3 倍
+
+参考 `dsrl.py:326-335` 在**所有** `utd` 梯度步之后跑一个独立的
+`for gradient_step in range(noise_critic_grad_steps)` 循环，每步重新采样一个 batch。
+我原来的实现**在 `utd` 循环里也更新一次**，于是每轮 `20 + 10 = 30` 次，是参考的 3 倍，
+而且更新的是 actor 直接优化的那个网络。离线训练器是同样的结构，所以这是被继承下来的，
+不是新引入的。已改为只在独立循环里更新。
+
+### 已修：两个日志指标算错了
+
+**`q_bias` 的基准状态错了。** 日志里的 `q` 是 batch 平均，而 batch 是从 replay 里**均匀
+采样**的，覆盖整集的状态；我拿来比的是**起点状态**的理论值。对常数每步奖励 `r`、`T` 步：
+
+| 量 | 公式 | T=94, r=0.064 | T=20, r=0.15 |
+|---|---|---|---|
+| 起点状态 $V_0$ | $r\frac{1-\gamma^T}{1-\gamma}$ | 3.90 | 2.73 |
+| 均匀状态平均 $\bar V$ | $\frac{r}{T}\sum_t\frac{1-\gamma^{T-t}}{1-\gamma}$ | 2.27 | 1.48 |
+
+两者差 1.72 倍。旧代码用 $V_0$ 比，凭空造出约 −1.63 的固定偏差。已改为 $\bar V$。
+
+**`ctrl/s` 被变量覆盖弄错 300 倍。** bootstrap 块里写了 `started = time.monotonic()`，
+而 `started` 是整轮的起点，于是 `wall = time.monotonic() - started` 只剩 bootstrap 的时长，
+`ctrl/s` 报出 2486 而真实值约 8。已改为 `boot_started`。这是本会话第三次同类错误
+（前两次是 `stride` 和 `started`），已用 AST 脚本确认 `main` 自身现在只在循环外赋值
+`started` 一次。
+
+### 未解：`q` 在奖励为正的情况下变成负的
+
+审计用的短跑里 episode 回报 **+2.75**、逐轮奖励均值全为正（26 轮中 0 次负值），
+但 `q = −3.5`、`target_q = −3.2`，且两者互相跟随。
+
+**已排除**：不是初始化噪声——实测 `Q` 初始化 `mean −0.183, std 0.312, min −1.061`，
+−3.5 需要 10 个标准差。也不是熵项（关掉它只会让 Q 更大）。
+
+**未查清**：负值如何从自举里自我维持。`target = r + γ(1−done)·min Q_target`，当
+`min Q_target ≈ −3.3` 时 `target ≈ 0.11 − 2.86 = −2.75`，与观测吻合，说明它是一个已经
+稳定下来的负不动点，而不是逐轮漂移。这个必须在下一次长跑前查清，否则所有 `q_bias` 读数
+都没有意义。
+
+### 对齐表的最终状态
+
+| 项 | 状态 |
+|---|---|
+| `tau 0.005` / `gamma 0.99` / `utd 20` / `noise_critic 10` / `batch 256` / `n_critics 2` / min-combine | ✅ |
+| `layer_size 2048` / `num_layers 3` / `Tanh` / `LayerNorm`（除输出层） | ✅ |
+| `target_entropy 0` / `ent_coef auto` 初值 1.0 / `target_update_interval 1` / `actor_gradient_steps -1` | ✅ |
+| polyak 在每梯度步（不是每轮） | ✅ |
+| 噪声 critic 用**新鲜 `N(0,1)`** 去噪后拟合 | ✅ 每轮 8×场景数，残差：不是每梯度步 |
+| bootstrap 用**当前 actor** | ✅ 每轮 32 行，残差：不是每梯度步 |
+| 超时按终止处理 | ✅ 与参考一致 |
+| 噪声 critic 更新 10 次/轮 | ✅ |
+| actor 宽度 `action_dim` 沿 chunk 重复 | 有意（论文 §C.5；参考因 `act_steps=4` 用 28 维） |
+| 奖励 = 饼干增量 | 有意（参考是 robomimic 每步 −1） |
+| critic 输入除以 `action_magnitude` | 保留，可 `--action-magnitude 0` 关闭；参考 `dsrl_na` 路径不除 |
+
+---
+
+## 9.107 负不动点的根因：`min` 的双头下偏 × 稀疏奖励（11-11）
+
+§9.106 留了一个未解问题：`q` 在奖励为正的情况下稳定在 **−3.5**，而且**第 10 轮就到了
+−4.31，那一轮所有奖励都是零**。这一节把它查完了。
+
+### 排除法
+
+零奖励处的 TD 映射是 `target = 0.99 · min Q_target`，**只可能把 Q 吸向 0，不可能穿过 0**。
+所以 −4.31 必定来自某个已经为负的输入。三个候选逐个排掉：
+
+| 候选 | 检验 | 结论 |
+|---|---|---|
+| 初始化 | 实测 `Q` 初始化 `mean −0.183, std 0.312, min −1.061`（4 个种子 −0.45…+0.24） | 到不了 −4.3 |
+| 观测分布 | `probe_q_init_drift` 把 obs 换成标准正态 | 仍为负（−2.94） |
+| chunk 分布 | 同上，把 chunk 换成 `N(0,1)` | 仍为负（−3.87） |
+| **奖励** | 换成常数 +1 | **转正（+7.62）** |
+
+奖励是唯一有效的开关，但换 +1 只是把量级抬上去，没有解释**方向**。
+
+### 真因：双头 `min` 的下偏
+
+`probe_min_bias.py` 用同样的 2048 宽 critic、同样的稀疏奖励（32 个状态里 3 个为 1），只改聚合
+方式：
+
+| 聚合 | 第 1 步 | 第 400 步 |
+|---|---|---|
+| **`min`（官方配置）** | −1.441 | **−0.631** |
+| `mean` | +0.646 | **+0.668** |
+| 单头 | +0.524 | **+0.564** |
+
+**只有 `min` 会变负。**
+
+$$\mathbb{E}\big[\min(a,b)\big] = \mu - \frac{\sigma}{\sqrt{\pi}} \approx \mu - 0.56\,\sigma$$
+
+两个**独立初始化**的 head 取小值，期望比单个低 $0.56\sigma$。这个偏置在**每次自举时被应用
+一次**：
+
+$$\text{target} = r + \gamma\big(\mu - 0.56\sigma\big)$$
+
+在不动点处被放大 $\frac{1}{1-\gamma} = 100$ 倍。当 $r$ 小（稀疏）而 $\sigma$ 不小（2048 宽 +
+Tanh + LayerNorm），偏置就统治了 target。
+
+`head0 − head1` 的演化是旁证：`min` 那行从 **+0.094 收缩到 −0.035**——两个 head 被拟合到
+同一个被压低的 target 上，逐渐同向偏移；`mean` 那行从 +0.67 收敛到约 0，是正常收敛。
+
+### 为什么官方没遇到
+
+`dsrl_can.yaml` 里同样是 `critic_backup_combine_type: min`。区别在奖励：
+
+| | robomimic can | 这里 |
+|---|---|---|
+| 奖励 | 每步 **−1**（稠密，量级 1） | 96 % 为 0，非零值 1 |
+| 每步 $\mathbb{E}[r]$ | −1.0 | +0.09 |
+| `min` 偏置（约 0.6）相对奖励 | 微小 | **同量级，主导** |
+
+**所以这不是 bug，是参数与奖励密度不匹配**——和 §9.106 里那三处“真差异”的性质不同。
+
+### 修法 A：放大奖励（采用）
+
+`--reward-scale` 三点扫描（26 轮，8 场景，其他条件固定）：
+
+| `--reward-scale` | 第 20 轮 `q` | 该轮 `reward_b` |
+|---|---|---|
+| 1 | −3.39 | 0.113 |
+| 10 | −2.68 | 1.31 |
+| **30** | **+3.27** | 3.38 |
+
+$\mathbb{E}[r]$ 提到约 3.4 后，`min` 的 0.6 偏置被淹没。**已设为默认值 30。**
+
+代价：Q 的量级变成约 340（$3.4/(1-0.99)$），所以 `q_bias` 的绝对值不再可跨设置比较。已新增
+**`q_rel = q_bias / |theory|`** 作为跨设置的验收指标。
+
+### 修法 B：`--critic-combine mean`（未采用）
+
+直接去掉偏置（`probe_min_bias` 显示 `mean` 稳定为正），但偏离官方配置，且会引入反方向的
+过估计。在稀疏奖励下过估计通常更安全，但不如 A 干净：A 只改奖励单位，算法结构完全不动。
+
+### 记一笔方法论
+
+这次排查的顺序值得固化：**先排除法定位到“奖励”这个开关，再用最小对照分离出“聚合方式”这个
+机制**。中间我曾写下“零奖励处不可能穿过零”的推理——那条推理是对的，而且正是它把搜索范围
+锁定到“必有一个负输入”，才没有继续在数据分布上打转。
+
+run6 已按 `--reward-scale 30` 启动（480 分钟，8 场景，`--fresh-noise 8`，`--bootstrap-refresh 32`）。
+验收标准：`q` 全程为正，且 `q_rel` 不单调恶化。

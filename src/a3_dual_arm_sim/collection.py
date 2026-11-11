@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from .batch_expert import A3CookieBatchExpert
+from .batch_expert_2x10 import A3Cookie2x10RecoveryExpert
 from .config import CameraConfig, load_config
 from .contracts import ActionMode, EpisodeContext
 from .cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
@@ -546,6 +547,7 @@ def _batch_scene(
     details: dict[str, Any] | None = None,
     visual_style: str = "plain",
     require_upright: bool = True,
+    required_cookies: int = 10,
 ) -> CollectionScene:
     """Shared body of the two five-at-a-time scenes.
 
@@ -570,6 +572,7 @@ def _batch_scene(
         task_config = CookieTransferTaskConfig(
             position_noise_m=position_noise_m,
             yaw_noise_rad=yaw_noise_rad,
+            required_cookies=required_cookies,
             require_exact_slots=False,
             require_released=True,
             require_upright=require_upright,
@@ -599,6 +602,7 @@ def _batch_scene(
             "require_exact_slots": False,
             "require_released": True,
             "require_upright": require_upright,
+            "required_cookies": required_cookies,
             **(details or {}),
         },
     )
@@ -613,6 +617,37 @@ def cookie_batch_scene(*, hold_steps: int = 40, visual_style: str = "plain") -> 
         A3CookieBatchExpert,
         hold_steps=hold_steps,
         details={"source_columns": "one exposed end of each of two columns"},
+        visual_style=visual_style,
+    )
+
+
+def cookie_2x10_recovery_scene(
+    *, hold_steps: int = 40, visual_style: str = "plain"
+) -> CollectionScene:
+    """The twenty-slot box, collected from a policy's own partial fill.
+
+    Every physical parameter is `cookie_batch.yaml`'s; only the target box and its slot grid
+    are main's `cookie_2x10.yaml`, which is what makes the episodes comparable with main's
+    2x10 benchmark rather than merely similar to it.
+
+    The expert is `A3Cookie2x10RecoveryExpert`, and it only runs in ``adopt`` mode -- a
+    collector is expected to set ``env.second_batch_mode = "adopt"`` after the reset and
+    drive the *policy* until it stalls.  A scene that drove this expert from an empty box
+    would collect ordinary 2x10 demonstrations, which is a different job and already has
+    its own data.
+    """
+
+    return _batch_scene(
+        "a3_cookie_2x10_recovery",
+        "configs/cookie_2x10_recovery.yaml",
+        A3Cookie2x10RecoveryExpert,
+        hold_steps=hold_steps,
+        required_cookies=20,
+        details={
+            "source_columns": "four columns of twenty, the two nearest the arm reachable",
+            "target_layout": "2x10 (two columns of ten)",
+            "entry": "adopt only: plan five-Cookie groups from the occupancy",
+        },
         visual_style=visual_style,
     )
 
@@ -1539,6 +1574,11 @@ def registered_scenes() -> dict[str, Callable[[], CollectionScene]]:
         "a3_grasp": grasp_scene,
         "a3_cookie_transfer": cookie_transfer_scene,
         "a3_cookie_batch": cookie_batch_scene,
+        # The twenty-slot box, for recovery rather than volume.  Its own name for the same
+        # reason every other layout has one: a dataset's provenance records the scene, and
+        # "which target box was this collected in" decides whether an episode can be mixed
+        # with the 2x5 data at all.
+        "a3_cookie_2x10_recovery": cookie_2x10_recovery_scene,
         "a3_cookie_batch_second_batch": cookie_batch_second_batch_scene,
         # The same scene, moved onto main's benchmark arrangement.  A separate name for the same
         # reason the LIBERO-matched scene has one: the numbers must not be compared, and a name is
