@@ -89,8 +89,9 @@ Read against `stable_baselines3/dsrl/dsrl.py:230-365` and `refs/dsrl/cfg/robomim
 | 9 | `learning_starts = 1` after `init_rollout_steps = 1501` | `--learning-starts 256` after `--warmup-rounds 8` | scale-adapted; an episode here is 1,382 control steps, not 300. |
 | 10 | env reward: robomimic's `-1` per step | `--reward paper`: `level_sum - offset * execute` | necessary, and now the same construction rather than an approximation of it.  This environment's own reward is a *level*; subtracting 1 per control step reproduces robomimic's timer exactly. |
 | 11 | **no gradient clipping** (`clip_grad_norm_` is in SB3's `a2c`/`dqn`/`ppo`, absent from `sac.py` and `dsrl.py`) | `--grad-clip 0`, i.e. none | aligned.  This row exists because the help text previously claimed the reference used SB3's 10.0, which is A2C's and PPO's default, not SAC's. |
-| 12 | `ent_coef * next_log_prob` subtracted from the TD target (`dsrl.py:286`) | `--entropy-in-target`, now on | aligned.  It was off for a documented reason that `--reward paper` removed; see that flag. |
-| 13 | evaluates deterministically (`deterministic_eval`) | `--eval-scenes 1`: one training scene acts on `tanh(mean)` | different mechanism, same purpose.  The reference runs separate eval envs every 3000 steps; here one of the eight collection scenes is greedy so the measurement is continuous and costs no wall time. |
+| 12 | `ent_coef * next_log_prob` subtracted from the TD target (`dsrl.py:286`) | `--entropy-in-target`, **off** | deliberate deviation, on evidence.  The term compounds to `alpha*|log pi|/(1-gamma)`, which at initialisation is 2143 against a true return of about -978.  run9 turned it on and measured the cost: at matched rounds it returned 3.70 where run8 (off) returned 6.30, with the same `q`.  The reference absorbs the same transient over ~250k RL steps; this loop has 2,166. |
+| 13 | evaluates deterministically (`deterministic_eval`) | `--eval-scenes 1`: one training scene acts on `tanh(mean)` | different mechanism, same purpose.  The reference runs separate eval envs every 3000 steps; here one of the eight collection scenes is greedy so the measurement is continuous and costs no wall time.  Caveat found at run time: at initialisation `tanh(mean) = 0`, i.e. **zero** noise, which the flow sampler was not trained on, so the first few `greedy` readings are below the noise-injected ones (`greedy` 3.67 against `ret` 5.15) and only become a policy measurement once the actor's mean leaves zero. |
+| 14 | critic output starts at 0 (SB3 default init) | `--q-init` auto: output bias at the analytic batch-mean value, about -566 | deliberate, and the largest structural difference in this table.  The value is not a knob being tuned: it is where TD would put the head anyway, and run9 showed the cost of starting 566 units away (650 rounds to travel 391).  A constant on the output is invisible to the actor's gradient, which sees `dQ/da` rather than `Q`, so the objective is unchanged. |
 
 Rows 1 and 2 were both recorded as **open** substantive gaps for several runs after they had in fact
 been closed, which is its own kind of bug: a stale alignment table sends the next diagnosis to the
@@ -705,6 +706,61 @@ def clip_gradients(module: torch.nn.Module, limit: float) -> float:
         module.parameters(), limit if limit > 0 else float("inf")))
 
 
+def analytic_value(args) -> float:
+    """The value a uniformly sampled replay state should have, from `args` alone.
+
+    Used to initialise the critics' output bias.  The reasoning is that the critic starts at **0**
+    and has to travel to a value that is fixed by the reward: with `--reward paper` that is
+    `-offset * execute` per RL step, and an episode is `--max-control-steps / execute` RL steps.
+    run9 spent 650 rounds moving `q` from 0 to -391 without reaching the target, and the actor was
+    taking gradients against a critic that was wrong by hundreds of units the whole time.  Starting
+    the bias at the answer removes that transient without changing the objective: a constant added
+    to a network's output is invisible to the actor's gradient, which sees `dQ/da`, not `Q`.
+
+    **Which average, and why this one.**  Replay samples are uniform over stored transitions, so
+    `q` in the log is the mean over states spread through the episode.  For a constant per-step
+    reward `r` over `T` steps:
+
+        V(start)       = r * (1 - gamma^T) / (1 - gamma)
+        mean_t V(s_t)  = r / T * sum_t (1 - gamma^(T-t)) / (1 - gamma)
+
+    and at gamma 0.99, T 94 those differ by 1.72x (`-978` against `-569`).  This file has already
+    been wrong in exactly this way once -- the calibration block's docstring records a 25x error
+    from using the start-state value -- so the initialiser must use the batch mean, which is the
+    quantity `q` measures.
+
+    The horizon is `--max-control-steps / execute`, matching the `horizon` the calibration block
+    computes from `scene.control_steps`.  A truncated episode therefore matches; an episode that
+    terminates early had a shorter horizon and its true value is closer to zero, so this initial
+    bias is on the low side for those.  That is a second-order error in a starting guess, and TD
+    corrects it.
+    """
+    if args.reward != "paper":
+        return 0.0
+    per_step = -args.reward_offset * args.execute
+    horizon = max(1, int(args.max_control_steps / max(1, args.execute)))
+    if args.gamma >= 1.0:
+        return per_step * (horizon + 1) / 2.0
+    total = sum(1.0 - args.gamma ** (horizon - t) for t in range(horizon))
+    return per_step * total / horizon / (1.0 - args.gamma)
+
+
+def set_output_bias(module: torch.nn.Module, value: float) -> int:
+    """Set every sub-head's final `Linear` bias to `value`.  Returns how many were touched.
+
+    Located structurally rather than by index so a change to `MLP` cannot silently make this a
+    no-op -- a probe that cannot fire is the failure mode this project keeps hitting, and an
+    initialiser that quietly does nothing would be indistinguishable from one that does not help.
+    """
+    touched = 0
+    for head in module:                       # the twin critics are `ModuleList`s of `QHead`
+        last_linear = [m for m in head.net.net if isinstance(m, torch.nn.Linear)][-1]
+        with torch.no_grad():
+            last_linear.bias.fill_(value)
+        touched += 1
+    return touched
+
+
 def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, optimizers,
                    replay: Replay, noise_bank: "NoiseBank | None" = None) -> dict[str, float]:
     """One `--utd` batch of updates plus the reference's separate noise-critic loop.
@@ -798,7 +854,13 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         soft_update(critic_target, critic, args.tau)
         # `.detach()` on every statistic: these tensors still carry the graph, and `float()` on
         # one that requires grad raises a warning that reads like an autograd bug.
-        stats = {
+        #
+        # `update`, not `=`.  This was an assignment from the first commit, so it wiped the five
+        # diagnostics above on every uTD step and none of them ever reached the log -- run4 through
+        # run9 all printed without `reward_b`, `boot_b`, `done_frac`, `q_gap` or `grad_norm`.  The
+        # numbers were computed, then discarded, then missed: several diagnoses in this session
+        # were made without the four quantities that had been added specifically to make them.
+        stats.update({
             "critic_loss": float(critic_loss.detach()),
             "actor_loss": float(actor_loss.detach()),
             "alpha": float(alpha),
@@ -808,7 +870,7 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
             "u_abs": float(sampled.detach().abs().mean()),
             "sigma": float(actor.log_std.detach().clamp(-20.0, 2.0).exp().mean()),
             "target_q": float(target_q.detach().mean()),
-        }
+        })
 
     # --- the reference's separate noise-critic loop, `noise_critic_steps` fresh batches ------
     noise_critic_loss = torch.zeros((), device=log_alpha.device)
@@ -996,6 +1058,21 @@ def main(argv: list[str] | None = None) -> int:
                              " delivering them.")
 
     # --- algorithm -----------------------------------------------------------------------
+    parser.add_argument("--q-init", type=float, default=float("nan"),
+                        help="initial bias of every Q head's output layer.  NaN (the default) means"
+                             " compute it: `-reward_offset * execute` per RL step, discounted over"
+                             " `max_control_steps / execute` RL steps, **averaged over states** the"
+                             " way `q` in the log is.  That is about -569, not the -978 a start-state"
+                             " computation gives; see `analytic_value` for why the distinction"
+                             " matters and why this file has got it wrong before.\n\n"
+                             "Why initialise at all: the critic starts at 0 and has to travel to a"
+                             " value fixed by the reward.  run9 spent 650 rounds going 0 -> -391"
+                             " without arriving, and the actor was taking gradients against a"
+                             " critic that was wrong by hundreds of units throughout.  A constant"
+                             " on the output is invisible to the actor's gradient (`dQ/da`, not"
+                             " `Q`), so this removes the transient without changing the objective."
+                             "\n\n"
+                             "0 reproduces the old behaviour and is the A/B arm.")
     parser.add_argument("--hidden", type=int, default=2048)
     parser.add_argument("--utd", type=int, default=20,
                         help="gradient steps per RL step (paper §B)")
@@ -1004,25 +1081,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--target-entropy", type=float, default=0.0)
+    parser.add_argument("--target-entropy", type=float, default=0.0,
+                        help="the `log_prob` the learned `alpha` steers towards:"
+                             " `d(alpha_loss)/d(log_alpha) = -(log_prob + target_entropy)`, so the"
+                             " equilibrium is `log_prob = -target_entropy`.\n\n"
+                             "0 (the reference's value) puts that equilibrium at `log_prob = 0`, i.e."
+                             " a policy with no entropy.  A 32-dim unit Gaussian has"
+                             " `log_prob = -29.4`, and the tanh Jacobian can carry the measured"
+                             " `log_prob` **positive** once actions saturate -- run8 reached +2.41 and"
+                             " run9 +8.09.  Positive `log_prob` means saturation *raises* the"
+                             " objective, so the actor is rewarded for pinning its noise at +-1.\n\n"
+                             "**`-dim` would make this worse, not better.**  SB3's default is `-dim`;"
+                             " here that is -32, which puts the equilibrium at `log_prob = +32`, i.e."
+                             " more saturation still.  A proposal earlier in this session to set -32"
+                             " had the sign backwards.  The direction that suppresses saturation is"
+                             " **positive** `target_entropy` (+29.4 pins `log_prob` at the unit-"
+                             "Gaussian value, holding `sigma` near 1), but it also pins `alpha` near"
+                             " 1, which with `--entropy-in-target` on would turn a transient entropy"
+                             " bonus into a permanent one.  The two knobs interact.  Left at the"
+                             " reference's 0 for run10.")
     parser.add_argument("--entropy-in-target", action=argparse.BooleanOptionalAction,
-                        default=True,
+                        default=False,
                         help="subtract `ent_coef * next_log_prob` from the TD target, as the"
-                             " reference does (`dsrl.py:286`).\n\n"
-                             "This was **off** while the reward was sparse, and that was correct"
-                             " then: the term is a per-bootstrap bonus, so at discount gamma it"
-                             " compounds to `alpha * |log pi| / (1 - gamma)`.  With `alpha` starting at"
-                             " 1.0 and `log pi` about -21 that summed to ~2100 against a true return"
-                             " of 9.56 -- 219 times the signal -- and Q climbed 20.4 -> 35.5 -> 41.3"
-                             " while the mean reward was 0.006.\n\n"
-                             "`--reward paper` removes the reason for that patch, and the offline"
-                             " trainer said so at the time: \"fixing this properly needs the reward"
-                             " rescaled, not the term removed.\"  The arithmetic now:"
-                             " a true return of about -978 against a bonus of"
-                             " `0.147 * 2.41 / 0.01 = 35`, i.e. 3.6 %%.  The premise has inverted, so"
-                             " the patch should go.  Note that the bonus's *sign* depends on"
-                             " `log_prob`, which run8 pushed positive (see `--target-entropy`), so"
-                             " this term is now a small subtraction rather than a bonus.")
+                             " reference does (`dsrl.py:286`).  **Off, on evidence.**\n\n"
+                             "The term compounds to `alpha * |log pi| / (1 - gamma)`.  At"
+                             " initialisation that is `1.0 * 21.65 / 0.01 = 2143` against a true"
+                             " return of about -978, which is why it was off while the reward was"
+                             " sparse.  I turned it on for run9 on the argument that `--reward paper`"
+                             " had made it small (3.6 %%).  **That argument used run8's late"
+                             " `log_prob` of +2.41, not the initialisation value.**  At"
+                             " initialisation `log_prob` is -21.65, the term is +19.25 per RL step"
+                             " against a reward of -16, and the effective reward is **+3.25: positive,"
+                             " i.e. the critic learns that stalling pays.**  It decays (to +-0.1 by"
+                             " r450), so it is a transient rather than a permanent offset -- but at"
+                             " matched rounds run9 (on) returned **3.70 at r475** where run8 (off)"
+                             " returned **6.30**, with the same `q` of about -220.\n\n"
+                             "This is a deliberate deviation from the reference, recorded as one.  The"
+                             " reference survives the same transient because it runs on the order of"
+                             " 250k RL steps, not 2,166.")
     parser.add_argument("--action-magnitude", type=float, default=1.5,
                         help="scale_action divisor.\n\n"
                              "Read `dsrl.py` carefully, because this number's role is narrower than"
@@ -1146,8 +1242,24 @@ def main(argv: list[str] | None = None) -> int:
     actor = NoiseActor(args.observation_dim, args.actor_dim, hidden=args.hidden).to(device)
     critic = twin_critic(args.observation_dim, chunk_flat_dim, hidden=args.hidden).to(device)
     critic_target = twin_critic(args.observation_dim, chunk_flat_dim, hidden=args.hidden).to(device)
-    critic_target.load_state_dict(critic.state_dict())
     critic_noise = twin_critic(args.observation_dim, args.actor_dim, hidden=args.hidden).to(device)
+    # Start every Q head at the value TD would drive it to (`--q-init`).  `critic_target` is copied
+    # *after* this so the target network agrees from step 1; `critic_noise` gets the same bias
+    # because it is distilled from `critic` and an untrained student at 0 would need to re-climb the
+    # whole distance on the network the actor actually maximises.
+    q_init = analytic_value(args) if math.isnan(args.q_init) else args.q_init
+    if q_init:
+        set_output_bias(critic, q_init)
+        set_output_bias(critic_noise, q_init)
+    critic_target.load_state_dict(critic.state_dict())
+    if q_init:
+        horizon = max(1, int(args.max_control_steps / max(1, args.execute)))
+        start_value = (-args.reward_offset * args.execute
+                       * (1.0 - args.gamma ** horizon) / (1.0 - args.gamma))
+        print(f"[online] Q init {q_init:+.1f}: reward/step {-args.reward_offset * args.execute:+.0f}"
+              f" x {horizon} RL steps, batch mean; the start-state value would be"
+              f" {start_value:+.1f} and using it is the 1.72x error this file records having made"
+              " once already", flush=True)
     print(f"[online] actor {sum(p.numel() for p in actor.parameters()) / 1e6:.2f}M,"
           f" critic {sum(p.numel() for p in critic.parameters()) / 1e6:.2f}M,"
           f" noise critic {sum(p.numel() for p in critic_noise.parameters()) / 1e6:.2f}M,"
