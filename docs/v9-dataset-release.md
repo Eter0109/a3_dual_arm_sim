@@ -117,7 +117,9 @@ Verification actually performed before sealing, in this order:
    after `upload_modelscope.sh` was edited, because it had been written before that edit and
    a stale manifest is worse than no manifest.)
 
-## 4. Releasing it
+## 4. Releasing it — done
+
+**Published: <https://www.modelscope.cn/datasets/yunsx114/a3-dual-arm-cookie-clean-v9>**
 
 ```bash
 export MODELSCOPE_API_TOKEN=...          # modelscope.cn -> 个人中心 -> 访问令牌
@@ -125,12 +127,44 @@ cd /root/autodl-tmp/release/a3-dual-arm-cookie-clean-v9
 bash upload_modelscope.sh <owner>/a3-dual-arm-cookie-clean-v9
 ```
 
-All the caveats in `b2-dataset-release.md` §5 apply unchanged — the write-permission token
-requirement (`403 10020000608`), the `whoami` warning that is not a diagnosis, `--skip-create`
-for a fine-grained token, and checking that the card landed at the repository root.  The one
-difference is the commit message: it is now taken from the first line of `README.md`, so the
-script no longer describes a v9 upload as "second-batch conditions: 1000 episodes, four
-conditions".  Pass `--message=` to override.
+The run took 4.5 min for 2.9 GB at 8 workers, exit 0 on the first attempt.  No token needed to
+be set: the credentials `modelscope login` had persisted under `~/.modelscope/credentials` were
+a full-account token, so `whoami` succeeded and the script could create the repository itself
+(no `--skip-create`).  That is the opposite of the fine-grained-token case in
+`b2-dataset-release.md` §5, and `whoami` succeeding is what distinguishes them.
+
+Verified after the upload, not before it:
+
+| check | result |
+|---|---|
+| remote file count and sizes | 21 files, 2.83 GB, every byte count equal to local |
+| `README.md` location | repurposed root (`/tmp/ms-verify/README.md`), hash `3d13b434…` = local |
+| hash spot-check on 4 files | `meta/episodes/*.parquet`, `meta/tasks.parquet`, `examples/load_example.py`, `upload_modelscope.sh` — 4/4 match `MANIFEST.sha256` |
+
+Two defects were found in this step, both in the inherited script rather than the data:
+
+**`upload_modelscope.sh` executed `modelscope` by accident.**  The line
+
+```bash
+echo "  `modelscope login` persisted under ~/.modelscope/credentials"
+```
+
+is inside double quotes, so the backticks are a *command substitution*: on a machine where the
+client lives only in `/root/autodl-tmp/ms-venv`, every run printed
+`upload_modelscope.sh: line 57: modelscope: command not found` into a log that otherwise said
+the upload succeeded.  Harmless to the transfer (it was stderr noise) and fixed by switching to
+single quotes.  The script was edited *after* the first upload, so `upload_modelscope.sh` and
+`MANIFEST.sha256` were re-sealed and re-uploaded — the incremental path took 9 s (2 pending,
+20 skipped), which is the resume behaviour the script was written for, now demonstrated rather
+than assumed.
+
+**`right_wrist` has one mp4 where the other cameras have three.**  This looked like missing
+data and is not: LeRobot splits video files by *size*, not by episode count, and
+`right_wrist` totals 402 MB against the 500 MB threshold, while `front` (1011 MB) and
+`left_wrist` (1396 MB) cross it.  Its single file carries timestamps out to 15,623 s, i.e. all
+312,470 frames, and frame 312,469 decodes from it.  A consumer counting files per camera will
+think the set is broken; the card could say so.
+
 
 ## 5. What is not released, and why
 
