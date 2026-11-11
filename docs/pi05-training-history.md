@@ -7754,3 +7754,100 @@ chunk）**早已被 `NoiseBank` 和 `BootstrapSet` 关掉**，表却还标着 op
 * `greedy` 与 `ret` 同步下降 → 策略真的退化，届时把 `--target-entropy` 改成 `-32`
   （SB3 默认，让平衡点永远落在 `log_prob < 0` 一侧），并记录为**故意的背离**；
 * 到 r600 时若 `alpha > 0.25` 且 `log_prob > 5`，视为跑飞，直接停。
+
+## 9.109 run10：把 critic 直接初始化在不动点上（11-11）
+
+### run9 的失败诊断
+
+run9 用 `entropy_in_target=True` 跑了 650 轮，`q` 从 0 爬到 −391，仍未到位。两件事同时错。
+
+**错误一：我把 `entropy_in_target` 打开的论证用错了数。**
+
+我当时的算术是"熵补偿 35 对真实 return −978，占 3.6%，可以开"。那个 35 用的是 run8
+**晚期**的 `log_prob = +2.41`。而**初始化**时 `log_prob = −21.65`：
+
+| round | `α` | \|logπ\| | 熵项/步 | **有效 r/步** |
+|---|---|---|---|---|
+| 50 | 0.898 | 21.65 | **+19.25** | **+3.25（正！）** |
+| 200 | 0.370 | 19.58 | +7.16 | −8.84 |
+| 450 | 0.108 | 6.06 | +0.65 | −15.35 |
+
+前约 90 轮，有效奖励是**正的**——critic 学到的是"拖延时间有收益"，正好是 timer 奖励要表达的
+信号的反面。它会衰减（r450 后 ±0.1），是 transient 而非永久偏移，但代价可以测到：
+**r475 时 run9（开）= 3.70，run8（关）= 6.30，`q` 都在 −220 附近。** 所以退回 False，
+并记录为**故意的背离**。参考能扛过同样的 transient，是因为它跑 ~250k RL 步，不是 2166。
+
+**错误二：我提议的 `target_entropy = -32` 方向是反的。**
+
+`d(alpha_loss)/d(log_alpha) = -(log_prob + target_entropy)`，平衡点 `log_prob = −target_entropy`。
+- `target_entropy = 0` → 平衡在 `log_prob = 0`（run9 实测穿过 0 后在 −0.6~+8.1 震荡，吻合）
+- `target_entropy = −32` → 平衡在 `log_prob = **+32**`，即**更饱和**
+- 要压住饱和需要**正**的 `target_entropy`（+29.4 → 平衡在 −29.4，即 σ≈1）
+
+SB3 的默认 `−dim` 在这里恰好是错的方向。没改，因为正的 `target_entropy` 会把 `alpha` 钉在
+1 附近，配合 `entropy_in_target=True` 会把 transient 熵补偿变成永久的。两个旋钮耦合，
+`--target-entropy` 的帮助文本现在写明了这一点。
+
+### 真正的修复：`--q-init`
+
+`--reward paper` 下每 RL 步奖励 `−offset × execute`，episode 是 `max_control_steps / execute`
+个 RL 步，所以一个**均匀采样状态**的价值完全由参数决定：
+
+$$\bar V=\frac{r}{T}\sum_{t=0}^{T-1}\frac{1-\gamma^{T-t}}{1-\gamma}$$
+
+`r = −16, T = 93, γ = 0.99` → **−565.6**。
+
+**必须用 batch mean，不是 start-state 值**：后者是 −971.7，差 1.72 倍。这个文件**之前已经犯过
+同一类错**（calibration 的 docstring 记录了 25 倍版本），所以现在两个数都算、都打印：
+
+```
+[online] Q init -565.6: reward/step -16 x 93 RL steps, batch mean;
+         the start-state value would be -971.7 and using it is the 1.72x error
+         this file records having made once already
+```
+
+这不改目标函数：输出层的一个常数对 actor 的梯度不可见（它看的是 `dQ/da`，不是 `Q`）。
+`critic_target` 在初始化**之后**复制，`critic_noise` 也设同样的 bias——后者是从 `critic`
+蒸馏来的，不设就得在 actor 真正最大化的那个网络上重新爬完全程。
+
+实现上按结构定位（`[m for m in head.net.net if isinstance(m, Linear)][-1]`）而不是按下标，
+并做了单元验证：输出确实平移了 −565.65（浮点相对误差 4e−5），两个头都被触及。
+"初始化器静默失效"和"初始化器没帮助"是无法区分的，所以这一步必须证明它会开火。
+
+### 效果（r50 对比）
+
+| | run9 r50 | run10 r50 |
+|---|---|---|
+| `q` | **+22.45** | **−601.97** |
+| `target_q` | +22.77 | −602.24 |
+| `q_gap` | 不可见（bug） | −0.27 |
+| `critic_loss` | 2.09 → 77 → **1215**（r675） | **1.38** |
+| `grad_norm` | 不可见（bug） | 20.1 |
+
+run9 花 650 轮走到 −391；run10 在 **50 轮内**已在 −602，且 `q_gap` 为 −0.27，
+即已在不动点上。run9 的 `critic_loss` 从 2 涨到 1215 是它一路追赶的代价；run10 是 1.38。
+
+注意 `reward_b` 实测 −13.85 而非 −16（已有饼干进箱），按 −13.85 算的真固定点是 −493，
+所以初始化偏低 15%。这是起始猜测的合理误差，TD 会修正；重点是它把 566 单位的爬升变成了 73 单位。
+
+### 顺带修掉一个从第一个提交就存在的 bug
+
+`gradient_steps` 的 uTD 循环结尾写的是 `stats = {...}`，不是 `stats.update({...})`，
+把同一函数刚算出的 `reward_b` / `boot_b` / `done_frac` / `q_gap` / `grad_norm` 全部覆盖。
+核对日志：这五个名字在 **run4 到 run9 出现 0 次**。它们当初正是为了诊断 TD 不动点而加的，
+而本轮对话里多次诊断是在缺这五个数的情况下做的。已修复并验证（r50 起全部出现）。
+
+`grad_norm` 立刻给了信息：`--grad-clip 0` 下六轮内从 24.9 涨到 94.7。参考同样不裁剪，
+但这是一个值得盯的量。
+
+### run10 配置
+
+与 run9 只差两处：`--q-init`（auto，−565.6）、`entropy_in_target=False`。
+预算 720 分钟（`--minutes 720`，约 3240 轮），比 run9 多 50%——因为 run9 证明了 2166 轮里
+有 650 轮是纯粹的爬升浪费，现在这段时间可以用来学习。
+`--seed-offset 51000`，`--eval-scenes 1`，`--log-every 25`，`--save-every-minutes 20`。
+
+**预注册判据：**
+- r300 时 `greedy` 若仍 ≤ 4（基线 30%）→ 策略没学到东西，问题不在 critic 收敛
+- `q` 应稳定在 −490 ~ −602 之间；若单调漂向 −1600 说明 `reward_b` 与初始化不符且 TD 在追
+- `alpha` 若再次反转上升（< 0.09 后回升），配合 `greedy` 下降 → 换正的 `target_entropy`
