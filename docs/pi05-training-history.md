@@ -7658,3 +7658,99 @@ $\mathbb{E}[r]$ 提到约 3.4 后，`min` 的 0.6 偏置被淹没。**已设为�
 
 run6 已按 `--reward-scale 30` 启动（480 分钟，8 场景，`--fresh-noise 8`，`--bootstrap-refresh 32`）。
 验收标准：`q` 全程为正，且 `q_rel` 不单调恶化。
+
+## 9.108 稠密奖励之后仍然恶化：alpha 的梯度变号（11-11）
+
+run8 用论文的 timer 奖励跑完 641 轮后仍未成功，但它暴露了一个**可以算术证明**的机制。
+
+### 观察到的事实
+
+| round | `log_prob` | `alpha` | `sigma` | `u_abs` | `ret` |
+|---|---|---|---|---|---|
+| 250 | −14.29 | 0.2969 | 0.8149 | 0.5484 | 6.81 |
+| 450 | −1.65 | 0.1368 | 0.7496 | 0.6213 | 8.05 |
+| 475 | −1.04 | **0.1285**（最低） | 0.7435 | 0.6263 | 6.30 |
+| 500 | +1.80 | 0.1313 ↑ | 0.7289 | 0.6448 | 6.30 |
+| 525 | +2.41 | 0.1473 | 0.7210 | 0.6424 | 6.30 |
+| 625 | — | 0.1615 | — | — | 5.75 |
+
+`alpha` 在前 475 轮单调下降（0.898 → 0.1285），在 `log_prob` 穿过 0 之后**掉头上升** 26%。
+
+### 机制
+
+`alpha` 的损失是 `-(log_alpha * (log_prob + target_entropy))`，`target_entropy = 0`：
+
+* `log_prob < 0` → 梯度推低 alpha；
+* `log_prob > 0` → 梯度推**高** alpha；
+* alpha 升高 → 熵项权重变大 → 更推高 `log_prob` → 正反馈。
+
+### `log_prob > 0` 从哪来
+
+从一个 641 轮的 checkpoint 直接读 `log_std`：32 维**全部**在 σ ∈ [0.557, 0.847]，**没有一维塌缩**。
+
+于是手算：
+
+* `Σ log N(u; μ, σ)` 上界 `-0.919 d = -29.4`，实测 **−35.2**；
+* 要得到 +2.41，雅可比项 `Σ -log(1 - a²)` 必须贡献 **+37.6**；
+* 但 `u_abs = 0.642`，若所有 |a| 都等于 0.642，雅可比最多 **+16.9** → `log_prob` 只能是 −18.3。
+
+差 20.8 nats，唯一能补的只有雅可比项，所以**必有相当一部分样本的 |a| 被推过 0.83**
+（`-log(1-0.83²) = 1.176`/维）。数值验证：|a| ~ U[0.3, 0.98] 时均值正好 0.640、
+`E[jac] = 0.765`/维 → 合计 +24.5，量级吻合。
+
+**结论：tanh 的饱和被 change-of-variables 项记成了"密度大"。** 这是目标函数层面的病态，
+不是日志 bug。
+
+### 为什么这里比参考更容易发生
+
+参考的 actor 宽度是 `act_steps * action_dim = 4 × 7 = 28`，**每个 chunk 位置独立采样**；
+我们是 32 维、用 `repeat_noise` 铺到 50 个 chunk 位置。于是：
+
+* `log_prob`、`alpha`、`target_entropy` 全部按 **32 维**记账；
+* 实际扰动覆盖 **50 × 32 = 1600** 个数。
+
+`target_entropy = 0.0` 是照抄参考、**不是背离**，但它的前提（28 维、独立、`log_prob < 0`）
+在这里不成立。SB3 的默认是 `-dim`，参考特意改成 0.0。
+
+### 与稀疏奖励时代的关系
+
+`--entropy-in-target` 当初被关掉是**对的**，离线训练器的 docstring 自己写着当时的算术：
+`alpha` 起始 1.0、`log pi` ≈ −21，补偿项 `alpha·|log pi|/(1−gamma) ≈ 2090`，对比真实
+return 9.56 —— **219 倍**，必须关。
+
+论文奖励下这个前提反转了：真实 return ≈ **−978**，补偿项 `0.147 × 2.41 / 0.01 ≈ +35`，
+**3.6 %**。所以它应该按参考打开 —— 这已在 `train_dsrl_online.py` 里完成。
+
+### 同一轮复核出的三个真实缺陷
+
+1. **`q_bias` / `q_rel` 是量纲错配，不是偏差。** `calibration` 里的 `q` 是奖励单位
+   （约 −300），而 `theory` 取自 `episode_return`，在 `--reward paper` 下是**饼干数**
+   （约 1.5）。所以这一整轮对话里我读到的 "−258 的偏差" 其实是 400 倍的错配。修法：
+   `Scene` 增加 `reward_return`（奖励单位）专供 calibration，`episode_return` 继续用饼干。
+2. **`--grad-clip` 的理由是假的。** 帮助文本说"参考继承 SB3 默认 10.0"；实测
+   `clip_grad_norm_` 只出现在 `a2c`/`dqn`/`ppo`，`sac.py` 和 `dsrl.py` **一次都没有**。
+   run8 的 `--grad-clip 1000` 行为上接近参考，却被当成背离来记录。默认已改为 0（不裁剪）。
+3. **`--help` 本身是坏的。** 帮助文本里有未转义的 `%`（`100 % of` → argparse 解析成 `%o`），
+   `--help` 直接抛 `TypeError`。这不是新引入的：`--reward` 那段一直是坏的，只是没人跑过。
+
+另外两条对齐表里的 "SUBSTANTIVE GAP"（噪声 critic 用 buffer 的 w、bootstrap 用采集时的
+chunk）**早已被 `NoiseBank` 和 `BootstrapSet` 关掉**，表却还标着 open。剩下的只是数量：
+新鲜样本 64/轮 vs 参考 2560/RL 步（40 倍），bootstrap 32 行/轮 vs 每步全量。已按数字改写。
+
+### run9 的配置与预注册判据
+
+与 run8 相同的一切：`--scenes 8 --minutes 480 --reward paper --reward-offset 1.0
+--utd 20 --batch 256 --warmup-rounds 8 --learning-starts 256 --bootstrap-refresh 32
+--fresh-noise 8 --log-every 25 --save-every-minutes 20`，`--seed-offset 45000`。
+
+变化：`entropy_in_target=True`（对齐参考）、`grad_clip=0`（对齐参考）、
+`--eval-scenes 1`（新增确定性评测）、checkpoint 原子写。
+
+**预注册判据。** 这次的核心问题是"alpha 上升是否伴随策略退化"，而 run8 无法回答，因为
+`ret` 带探索噪声。run9 同时记录 `greedy`（1 个场景走 `tanh(mean)`）和 `ret`（7 个场景注入噪声），
+两者相减即可分离：
+
+* `greedy` 保持而 `ret` 下降 → 是噪声变宽，不是策略变差，alpha 反转**无害**；
+* `greedy` 与 `ret` 同步下降 → 策略真的退化，届时把 `--target-entropy` 改成 `-32`
+  （SB3 默认，让平衡点永远落在 `log_prob < 0` 一侧），并记录为**故意的背离**；
+* 到 r600 时若 `alpha > 0.25` 且 `log_prob > 5`，视为跑飞，直接停。

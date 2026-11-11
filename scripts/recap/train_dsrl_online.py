@@ -78,31 +78,44 @@ Read against `stable_baselines3/dsrl/dsrl.py:230-365` and `refs/dsrl/cfg/robomim
 
 | # | reference | here | verdict |
 |---|---|---|---|
-| 1 | `update_noise_critic` draws **fresh `randn`** and denoises it: `w ~ N(0,1)`, `a = D(s, w)`, fits `Q_ns(s, scale(w))` to `Q(s, a)` | fits `Q_ns(s, w_buffer)` to `Q(s, chunk_buffer/1.5)`, both from the buffer | **SUBSTANTIVE GAP.**  Coverage: the reference covers the whole prior, this covers only where the behaviour policy has been.  As `sigma` shrinks the coverage shrinks with it, so the actor's `argmax` can leave the region `Q_ns` was fit on.  The reference pays one denoise per noise-critic gradient step (10 per RL step) for that coverage; at 50x32x256 that is unaffordable here, which is why this was done, but it is a real difference and not a rounding error. |
-| 2 | TD bootstrap: `next_a = D(s', actor(s'))` with the **current** actor, denoised every gradient step | `chunk_next` from the buffer, i.e. the sample the **behaviour** actor took at collection time | **SUBSTANTIVE GAP.**  The reference's target is the current policy's value; this one is the behaviour policy's.  Off-policy correctness prefers the reference.  Cost: one denoise per gradient step, again unaffordable. |
+| 1 | `update_noise_critic` draws **fresh `randn`** and denoises it: `w ~ N(0,1)`, `a = D(s, w)`, fits `Q_ns(s, scale(w))` to `Q(s, a)` | **closed in form** by `NoiseBank`: it stores `(s, w ~ N(0,1), D(s, w) / 1.5)` for `--fresh-noise` fresh priors per scene per round, and the noise critic is fitted on those rows | **residual is sample count, not structure.**  Reference: 10 noise-critic steps x 256 batch = **2,560 fresh samples per RL step**. Here: 8 x 8 = **64 per round**, i.e. 40x fewer. Cost decision, stated rather than hidden. |
+| 2 | TD bootstrap: `next_a = D(s', actor(s'))` with the **current** actor, denoised every gradient step | **closed in form** by `BootstrapSet`: `--bootstrap-refresh` rows per round have `chunk_next` recomputed with the current actor | **residual is granularity**: 32 rows per round against every row of every gradient step. A 2,048-row replay is fully refreshed every 64 rounds. |
 | 3 | `ent_coef` updated **before** the actor, from this step's `log_prob` | updated **after** the actor step | negligible; both use the same `log_prob`. |
 | 4 | actor width = `act_steps * action_dim` (28 for robomimic can), **independent noise per chunk position** | actor width = `action_dim` (32), **repeated across the 50 chunk positions** | intentional.  `act_steps=4` makes the full space small enough for the reference to use it directly; at `C=50, d=32` the full space is 1,600 dims, which is exactly the case paper §C.5 addresses by repeating `w_single`.  Follows the paper, not the repo. |
 | 5 | `target_update_interval = 1`, polyak every gradient step | `soft_update` inside the uTD loop | identical |
 | 6 | `actor_gradient_steps = -1` -> actor updated on every gradient step | actor updated every uTD step | identical |
-| 7 | `target_entropy = 0.0`, `ent_coef = 'auto'` init 1.0 | same | identical |
+| 7 | `target_entropy = 0.0`, `ent_coef = 'auto'` init 1.0 | same | identical as written.  But see `--eval-scenes`: the reference's 28 independent dims can keep `log_prob` negative, while 32 dims repeated over 50 chunk positions makes tanh saturation count as density, and run8 drove `log_prob` to **+2.41**.  At `target_entropy = 0` that flips `alpha`'s gradient sign. |
 | 8 | `batch_size 256`, `utd 20`, `noise_critic_grad_steps 10`, `tau 0.005`, `gamma 0.99`, `layer_size 2048`, `num_layers 3`, `action_magnitude 1.5`, `n_critics 2`, min-combine | same | identical |
 | 9 | `learning_starts = 1` after `init_rollout_steps = 1501` | `--learning-starts 256` after `--warmup-rounds 8` | scale-adapted; an episode here is 1,382 control steps, not 300. |
-| 10 | env reward: robomimic's `-1` per step | `count[t+1] - count[t]` cookies | necessary: see `--reward`.  This environment's own reward is a *level*, which integrates to ~1500 over an episode. |
+| 10 | env reward: robomimic's `-1` per step | `--reward paper`: `level_sum - offset * execute` | necessary, and now the same construction rather than an approximation of it.  This environment's own reward is a *level*; subtracting 1 per control step reproduces robomimic's timer exactly. |
+| 11 | **no gradient clipping** (`clip_grad_norm_` is in SB3's `a2c`/`dqn`/`ppo`, absent from `sac.py` and `dsrl.py`) | `--grad-clip 0`, i.e. none | aligned.  This row exists because the help text previously claimed the reference used SB3's 10.0, which is A2C's and PPO's default, not SAC's. |
+| 12 | `ent_coef * next_log_prob` subtracted from the TD target (`dsrl.py:286`) | `--entropy-in-target`, now on | aligned.  It was off for a documented reason that `--reward paper` removed; see that flag. |
+| 13 | evaluates deterministically (`deterministic_eval`) | `--eval-scenes 1`: one training scene acts on `tanh(mean)` | different mechanism, same purpose.  The reference runs separate eval envs every 3000 steps; here one of the eight collection scenes is greedy so the measurement is continuous and costs no wall time. |
 
-Gaps 1 and 2 both come from the same cause: **a denoise costs 40 ms per sample here**, and the
-reference calls one on every gradient step.  Fixing them properly means paying that cost, or
-pre-generating noise/action pairs as `train_dsrl.py` did -- which is what the offline trainer's
-`--distill-per-frame` cache was for.  Until then, `min_q - q` in the log is expected to grow as the
-actor moves away from the behaviour distribution, and its growth is a measure of this gap rather
-than of learning.
+Rows 1 and 2 were both recorded as **open** substantive gaps for several runs after they had in fact
+been closed, which is its own kind of bug: a stale alignment table sends the next diagnosis to the
+wrong place.  What remains in both cases is a cost limit, and it is written down as a number
+(40x fewer fresh samples, 32 rows per round) rather than as a verdict.
 
 Reward
 ------
-The environment's reward is `min(cookies_in_target / required, 1.0)` per control step.  `--reward`
-sums it over the executed chunk (default, matching the reference's `ActionChunkWrapper`, which
-accumulates `act_steps` rewards into one RL step), averages it, or takes the last value.  The scale
-matters and is always printed next to `Q`: a sum over 16 control steps reaches 16, so a return runs
-to ~1400 against the offline pool's 9.56.
+The environment's own reward is `min(cookies_in_target / required, 1.0)` per control step -- a
+*level*, not an increment.  `--reward` decides what one RL step pays:
+
+* `paper` (default) -- `level_sum - offset * execute`, i.e. the reference's construction.  robomimic
+  subtracts `reward_offset = 1` from a 0/1 success reward, so every control step pays -1 and
+  `ActionChunkWrapper` sums four of them into a constant -4 per RL step.  The same operation on this
+  level gives -16 early in an episode and about -12 once five cookies are in: dense, large, bounded,
+  and deliberately *not* a progress signal.
+* `chunk_sum` -- the raw level summed over the chunk, up to +16 per RL step, so a return runs to
+  ~1400.  Dense, but it pays for holding cookies rather than for delivering them.
+* `chunk_mean`, `level_last`, `increment` -- kept for comparison.  `increment` is the one that was
+  used first and it is 96 % zeros, which is what let the twin-critic `min` bias dominate the target
+  and collapse `q`.
+
+Two returns are tracked per episode and they are in different units, on purpose: `episode_return` in
+**cookies** (comparable to the 13.18-cookie baseline) and `reward_return` in **reward units** (what
+the calibration block needs to compare against `q`).
 
 Usage
 -----
@@ -190,6 +203,10 @@ class Scene:
     applied: np.ndarray | None = None
     control_steps: int = 0
     episode_return: float = 0.0
+    #: The same episode accumulated in **reward units** rather than cookies.  Two accumulators
+    #: because the calibration block needs reward units and every human-facing number is in cookies;
+    #: deriving one from the other is exactly how a 400x unit mismatch got printed as a "bias".
+    reward_return: float = 0.0
     cookies: int = 0
     required_cookies: int = 20
     max_control_steps: int = 1500
@@ -242,10 +259,11 @@ class Scene:
         self.applied = None
         self.control_steps = 0
         self.episode_return = 0.0
+        self.reward_return = 0.0
         self.cookies = 0
 
     def play(self, chunk: np.ndarray, execute: int, reward_mode: str,
-             profile: bool = False, scale: float = 1.0,
+             profile: bool = False,
              reward_offset: float = 1.0) -> tuple[float, bool, bool]:
         """Execute `execute` actions of `chunk`.  Runs in a worker thread -- no rendering here.
 
@@ -346,11 +364,19 @@ class Scene:
         # `episode_return` is reported in the units the *evaluation* scores in, which for `paper`
         # means the cookie count, not the shaped level.  Mixing the two would make the logged return
         # incomparable with the 13.18 baseline.
+        #
+        # `reward_return` is the same episode accumulated in **reward units**, and it exists because
+        # the calibration block needs it.  It used to compute its reference value from
+        # `episode_return`, which under `--reward paper` is cookies: it compared a Q of about -300
+        # (reward units, -16 per RL step) against a theoretical value of about 1.5 (cookies) and
+        # reported the difference, -300, as a "bias".  Every `q_bias` and `q_rel` number printed
+        # before this fix was that unit mismatch, not a bias in the critic.
         if reward_mode == "paper":
             self.episode_return += float(self.cookies - cookies_before)
         else:
             self.episode_return += reward
-        return reward * scale, terminated, truncated
+        self.reward_return += reward
+        return reward, terminated, truncated
 
 
 def render_frames(renderer, scene: Scene) -> dict[str, np.ndarray]:
@@ -663,6 +689,22 @@ def actor_observation(policy, prepared: dict, prefix, projection: torch.Tensor,
 # =================================================================================================
 # training
 # =================================================================================================
+def clip_gradients(module: torch.nn.Module, limit: float) -> float:
+    """Gradient-norm clip, returning the norm.  `limit <= 0` means **do not clip**.
+
+    The reference does not clip at all.  `clip_grad_norm_` appears in this vendored SB3 in `a2c`,
+    `dqn` and `ppo` -- and **nowhere in `sac.py`, `off_policy_algorithm.py` or `dsrl.py`**.  The
+    help text for `--grad-clip` used to say "the reference inherits SB3's default of 10.0", which is
+    true of A2C and PPO and false of the algorithm this file reproduces.  So `--grad-clip 1000` in
+    run8 was already behaving like the reference while being *documented* as a deviation, and a clip
+    of 10 would have been an undocumented deviation presented as alignment.
+
+    Clipping to `inf` is a no-op that still returns the norm, which is why one code path serves both.
+    """
+    return float(torch.nn.utils.clip_grad_norm_(
+        module.parameters(), limit if limit > 0 else float("inf")))
+
+
 def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, optimizers,
                    replay: Replay, noise_bank: "NoiseBank | None" = None) -> dict[str, float]:
     """One `--utd` batch of updates plus the reference's separate noise-critic loop.
@@ -699,7 +741,7 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         # threshold, which is idempotent and therefore harmless -- but the second call was written as
         # `grader = ...` for logging while the first was already doing the clipping, i.e. the same
         # "two names for one effect" shape as the bugs in §9.106.  Kept as one call plus a read.
-        grader = torch.nn.utils.clip_grad_norm_(critic.parameters(), args.grad_clip)
+        grader = clip_gradients(critic, args.grad_clip)
         critic_optimizer.step()
         # Diagnostics for the TD fixed point.  `q` was observed to settle at about -3.5 on runs whose
         # episodes return +2.75 cookies, and `probe_td_fixed_point.py` showed the update rules alone
@@ -734,18 +776,16 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         alpha = log_alpha.exp().detach()
         min_q = torch.min(torch.stack([head(state, sampled) for head in critic_noise]),
                           dim=0).values
-        # The actor's objective is divided by `--reward-scale`.
+        # The actor's objective is **not** rescaled here.
         #
-        # Scaling the reward is what stops the value collapsing (see `--reward-scale`), but it also
-        # multiplies Q by the same factor, and the actor maximises Q directly.  Left alone, the
-        # actor's gradient grows with the scale: run6 (`--reward-scale 30`) had `min_q` climb
-        # 3.77 -> 32.73 while `alpha` annealed on its original schedule, `actor_loss` went
-        # -23 -> -39, the placement rate fell from 5.5 % to 0.5 % of RL steps, and the episode
-        # return dropped 9 % against run4.  Dividing by the scale restores the gradient magnitude
-        # the actor saw at scale 1, while the critic keeps the smoother TD target.
-        #
-        # This is not a change of objective, only of units: the argmax over `sampled` is unaffected.
-        actor_loss = (alpha * log_prob - min_q).mean() / max(1e-9, args.reward_scale)
+        # It used to be divided by `--reward-scale`, a knob that existed to make the sparse reward
+        # large enough for TD to see.  `--reward paper` supplies that scale from the reward itself
+        # (-16 per RL step is the reference's construction, not a tuning choice), so the knob had
+        # become an identity: run8 passed `--reward-scale 1.0`, i.e. multiply by 1 and divide by 1.
+        # Removing it removes the possibility of the two halves drifting apart again -- which is what
+        # happened in run6, where `--reward-scale 30` multiplied Q by 30 while the actor divided by
+        # 30 and `actor_loss` doubled to -39.
+        actor_loss = (alpha * log_prob - min_q).mean()
         actor_optimizer.zero_grad()
         actor_loss.backward()
         actor_optimizer.step()
@@ -782,7 +822,7 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         noise_critic_loss = 0.5 * sum(F.mse_loss(v, t) for v, t in zip(value, target))
         noise_critic_optimizer.zero_grad()
         noise_critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(critic_noise.parameters(), args.grad_clip)
+        clip_gradients(critic_noise, args.grad_clip)
         noise_critic_optimizer.step()
     stats["noise_critic_loss"] = float(noise_critic_loss.detach())
     return stats
@@ -798,6 +838,14 @@ def save_checkpoint(path: Path, actor, critic, critic_noise, projection, args,
     from the first layer, because a checkpoint should be readable by hand.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a temporary name and `os.replace` it into place.  `torch.save` straight onto `path`
+    # truncates the previous checkpoint before it writes the new one, so a termination inside the
+    # ~2 s a 289 MB save takes leaves **no** usable checkpoint -- the old one is gone and the new
+    # one is half a file.  That is not hypothetical: a 480-minute run is routinely stopped from
+    # outside (run8 was, at round 641), and the only reason it survived is that the kill happened
+    # not to land in that window.  `os.replace` is atomic on POSIX, so the file is either the old
+    # checkpoint or the new one.
+    temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save({
         "actor": actor.state_dict(),
         "critic": critic.state_dict(),
@@ -811,7 +859,8 @@ def save_checkpoint(path: Path, actor, critic, critic_noise, projection, args,
         "hidden": args.hidden,
         "observation_parts": {"proprio": True, "vlm": True, "visual": True},
         "online": extra,
-    }, path)
+    }, temporary)
+    os.replace(temporary, path)
     print(f"[online] wrote {path}", flush=True)
 
 
@@ -901,29 +950,29 @@ def main(argv: list[str] | None = None) -> int:
                              " environments with that seed both gave A.  Evaluation builds fresh"
                              " environments, so training on B would train one scene distribution"
                              " and evaluate another.  The cost is 1.36 s per episode, about 8%%.")
-    parser.add_argument("--reward-scale", type=float, default=1.0,
-                        help="multiplier on the reward.\n\n"
-                             "Not a tuning knob for its own sake: the TD target is"
-                             " `r + gamma * min Q_target(s', a')`, so when the expected reward is small"
-                             " next to the bootstrap term, the bootstrap wins and the value collapses."
-                             "  Measured on this task with `--max-control-steps 320`: mean reward"
-                             " 0.078 per RL step (a cookie every ~28 steps, value 1), and Q fell to"
-                             " -3.58 and stayed there -- a stable negative fixed point, reproduced"
-                             " from scratch in `probe_q_init_drift.py` with only the reward changed"
-                             " (replacing it with a constant +1 sent Q to +7.62 instead).\n\n"
-                             "  The reference never meets this because robomimic pays -1 per step:"
-                             " dense, and large enough to anchor the bootstrap.  Scaling the cookie"
-                             " count by ~25-30 puts the expected reward near 1, which is the same"
-                             " regime.  It changes the *unit* of Q, not the ordering, so the actor's"
-                             " argmax is unaffected.\n\n"
-                             "  Default 30, from a three-point sweep with everything else fixed"
-                             " (26 rounds, 8 scenes): `q` at round 20 was -3.39 at scale 1, -2.68 at 10,"
-                             " and **+3.27 at 30**.  This is not only a matter of the reward being"
-                             " small: `probe_min_bias.py` shows that with a sparse reward the twin"
-                             " critics' `min` aggregation is itself biased low by E[min] = mu -"
-                             " 0.56 sigma, and with scale 1 that bias dominates the target.  Under the"
-                             " same sparse reward, `mean` aggregation stayed at +0.67 where `min` went"
-                             " to -0.63.")
+    # `--reward-scale` used to live here and is gone, not deprecated.  It multiplied the reward to
+    # lift a *sparse* per-step reward (mean 0.078, `q` collapsing to -3.58) into TD's field of view,
+    # and the actor's objective was divided by the same factor to keep its gradient honest.  Two
+    # knobs that had to agree, and run6 showed what happens when they do not.  `--reward paper`
+    # replaces both with the reference's own construction: `level_sum - offset * execute`, which is
+    # dense and large by definition.  With that reward the multiplier was an identity in run8
+    # (scale 1.0), so keeping it could only mislead the next reader into thinking it still matters.
+    parser.add_argument("--eval-scenes", type=int, default=1,
+                        help="how many of the `--scenes` scenes act on the **mean** of the noise"
+                             " distribution (`tanh(mean)`) instead of a sample.\n\n"
+                             "This is the deterministic evaluation, and the reason it is worth 1/8"
+                             " of the throughput: `ret` as logged everywhere else is measured"
+                             " *with exploration noise*, so a policy that got better while the noise"
+                             " got wider looks identical to a policy that got worse.  run8 went from"
+                             " 9.05 to 6.30 cookies with `alpha` rising and `log_prob` going"
+                             " positive, and there was no way to say which of the two it was.\n\n"
+                             "Making one training scene greedy costs no wall time -- it is the same"
+                             " eight scenes stepping the same sixteen control steps -- and it yields"
+                             " a *continuous* greedy return curve on full 1500-control-step"
+                             " episodes, directly comparable to the 13.18-cookie baseline.  The"
+                             " cost is that 1/8 of the transitions are on-policy-for-the-mean"
+                             " rather than exploratory.\n\n"
+                             "0 disables it and restores all-stochastic collection.")
     parser.add_argument("--reward", default="paper",
                         choices=("paper", "increment", "chunk_sum", "chunk_mean", "level_last"),
                         help="what one RL step's reward is.\n\n"
@@ -934,9 +983,9 @@ def main(argv: list[str] | None = None) -> int:
                              " same construction gives `level_sum - offset * execute`, i.e. -16 early"
                              " in an episode and about -12 once five cookies are in.\n\n"
                              "  That is a *timer*, not a progress signal -- and it is what makes the"
-                             " reference work: 100 % of transitions carry signal, |r| = 4 dwarfs the"
+                             " reference work: 100 %% of transitions carry signal, |r| = 4 dwarfs the"
                              " twin-critic `min` bias of ~0.56 sigma, and returns are bounded.  The"
-                             " `increment` mode used before this was 96 % zeros, which is what let the"
+                             " `increment` mode used before this was 96 %% zeros, which is what let the"
                              " `min` bias dominate and collapse Q to -3.5 (see §9.107).")
     parser.add_argument("--reward-offset", type=float, default=1.0,
                         help="subtracted from the level reward in `--reward paper`.  The reference"
@@ -957,20 +1006,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--target-entropy", type=float, default=0.0)
     parser.add_argument("--entropy-in-target", action=argparse.BooleanOptionalAction,
-                        default=False,
-                        help="the reference subtracts `ent_coef * next_log_prob` from the TD target"
-                             " (`dsrl.py:286`), and `train_dsrl.py` has it off by default.  Off"
-                             " here for the same reason, and the arithmetic is the same: the term"
-                             " is a per-bootstrap bonus, so at discount gamma it compounds to"
-                             " `alpha * |log pi| / (1 - gamma)`.  Measured on this stack alpha"
-                             " starts at 1.0 and `log pi` is about -21, so the bonus sums to about"
-                             " 2100 against a true return of a few dozen cookies.  Observed"
-                             " directly: with it on, Q climbed 20.4 -> 35.5 -> 41.3 while the"
-                             " mean reward was 0.006, i.e. two orders of magnitude of pure"
-                             " offset.  It does not break the *actor* -- a state-dependent"
-                             " constant does not change the argmax over actions at a fixed"
-                             " state -- but it makes every Q in the log unreadable, which is"
-                             " what the rest of this file is trying to keep honest.")
+                        default=True,
+                        help="subtract `ent_coef * next_log_prob` from the TD target, as the"
+                             " reference does (`dsrl.py:286`).\n\n"
+                             "This was **off** while the reward was sparse, and that was correct"
+                             " then: the term is a per-bootstrap bonus, so at discount gamma it"
+                             " compounds to `alpha * |log pi| / (1 - gamma)`.  With `alpha` starting at"
+                             " 1.0 and `log pi` about -21 that summed to ~2100 against a true return"
+                             " of 9.56 -- 219 times the signal -- and Q climbed 20.4 -> 35.5 -> 41.3"
+                             " while the mean reward was 0.006.\n\n"
+                             "`--reward paper` removes the reason for that patch, and the offline"
+                             " trainer said so at the time: \"fixing this properly needs the reward"
+                             " rescaled, not the term removed.\"  The arithmetic now:"
+                             " a true return of about -978 against a bonus of"
+                             " `0.147 * 2.41 / 0.01 = 35`, i.e. 3.6 %%.  The premise has inverted, so"
+                             " the patch should go.  Note that the bonus's *sign* depends on"
+                             " `log_prob`, which run8 pushed positive (see `--target-entropy`), so"
+                             " this term is now a small subtraction rather than a bonus.")
     parser.add_argument("--action-magnitude", type=float, default=1.5,
                         help="scale_action divisor.\n\n"
                              "Read `dsrl.py` carefully, because this number's role is narrower than"
@@ -987,6 +1039,19 @@ def main(argv: list[str] | None = None) -> int:
                              " space is `Box(-1.5, 1.5)` and it becomes `w / 1.5`, std 0.667, which"
                              " does line the two up.\n\n"
                              " 0 disables the divisor entirely and matches `dsrl_na` exactly.")
+    parser.add_argument("--grad-clip", type=float, default=0.0,
+                        help="gradient-norm clip for both critics.  **0 means do not clip, which"
+                             " is what the reference does.**\n\n"
+                             "This help text used to claim \"the reference inherits SB3's default of"
+                             " 10.0\".  It does not: `clip_grad_norm_` appears in this vendored SB3"
+                             " in `a2c`, `dqn` and `ppo`, and nowhere in `sac.py`,"
+                             " `off_policy_algorithm.py` or `dsrl.py`.  The claim was true of A2C and"
+                             " PPO and false of the algorithm being reproduced.\n\n"
+                             "A positive value is therefore a deliberate deviation.  It is tempting"
+                             " under a sparse reward, where the TD target is order 1 and SB3's 10.0"
+                             " looks harmless; under `--reward paper` the target is about -978, so any"
+                             " finite clip squashes essentially every gradient to the same norm and"
+                             " silently rescales the learning rate.")
     parser.add_argument("--bootstrap-refresh", type=int, default=32,
                         help="replay rows per round whose `chunk_next` is recomputed with the"
                              " **current** actor, ~40 ms/row (measured; `encode_prefix` is linear,"
@@ -997,28 +1062,22 @@ def main(argv: list[str] | None = None) -> int:
                              " biased `q` from +0.26 to -4.3 cookies over 1,000 rounds in run4,"
                              " ending negative on a task whose reward cannot be negative.\n\n"
                              "0 disables it and restores that bias; kept for A/B comparison."
-                             " 32 costs ~1.6 s on an 11 s round (+15 %) and refreshes a 2,048-row"
+                             " 32 costs ~1.6 s on an 11 s round (+15 %%) and refreshes a 2,048-row"
                              " replay every 64 rounds.")
-    parser.add_argument("--grad-clip", type=float, default=10.0,
-                        help="gradient-norm clip for both critics.\n\n"
-                             "The reference inherits SB3's default of 10.0, which is fine when the TD"
-                             " target is order 1.  With `--reward paper` the target is `-offset *"
-                             " execute / (1 - gamma)` in magnitude -- about -978 for a 94-step episode"
-                             " at -16 per RL step -- so a clip of 10 would squash essentially every"
-                             " gradient to the same direction and destroy the learning rate.  Raise"
-                             " this in proportion to the target scale, or leave the reward small.")
     parser.add_argument("--replay-capacity", type=int, default=20000)
-    parser.add_argument("--fresh-noise", type=int, default=4,
+    parser.add_argument("--fresh-noise", type=int, default=8,
                         help="fresh `N(0,1)` noise vectors denoised per scene per round, to train the"
                              " distilled critic on the prior rather than only on behaviour noise.\n\n"
                              "The reference denoises a whole batch of fresh noise on **every**"
-                             " noise-critic gradient step (10 per RL step); that is unaffordable"
-                             " here at 50x32x10 denoise steps.  Doing it once per round for a few"
-                             " vectors per scene buys the same coverage more slowly.  Measured"
-                             " cost: one 32-row denoise is ~0.7 s against an 11 s round.\n\n"
-                             "0 restores the old behaviour (distil against the buffer's own"
-                             " noise).  That is what produced a `Q_ns` surface with a 14.5-cookie"
-                             " range, so it is kept only for A/B comparison.")
+                             " noise-critic gradient step (10 per RL step).  At batch 256 that is"
+                             " 2,560 fresh samples per RL step; `--fresh-noise 8` over 8 scenes is 64"
+                             " per round, i.e. **40x below the reference**.  This closes the gap in"
+                             " *form* -- `Q_noise` is fitted on the prior, not on the buffer's own"
+                             " noise -- but not in sample count, and the residual is a cost decision,"
+                             " not a rounding error: one denoise is ~40 ms per row and the reference"
+                             " pays 2,560 of them per step.\n\n"
+                             "Measured cost of the default: 8 indices x 437 ms is ~1.7 s against an"
+                             " 11 s round.")
     parser.add_argument("--noise-bank-capacity", type=int, default=8192)
     parser.add_argument("--learning-starts", type=int, default=256,
                         help="transitions before any gradient step")
@@ -1144,6 +1203,14 @@ def main(argv: list[str] | None = None) -> int:
     scenes = [make_scene(index, 0) for index in range(args.scenes)]
     pool = ThreadPoolExecutor(max_workers=args.scenes)
     print(f"[online] {args.scenes} scenes up; instruction {task!r}", flush=True)
+    if args.eval_scenes > 0:
+        print(f"[online] scenes 0-{args.eval_scenes - 1} act greedily (tanh of the mean) and are"
+              f" reported as `greedy`; the other {args.scenes - args.eval_scenes} inject exploration"
+              " noise and are reported as `ret`", flush=True)
+    print(f"[online] entropy_in_target={args.entropy_in_target}  grad_clip={args.grad_clip:g}"
+          f"  fresh_noise={args.fresh_noise}/scene/round  bootstrap_refresh={args.bootstrap_refresh}"
+          "  (all four printed because three of them changed meaning while the DSRL loop was being"
+          " aligned against the reference)", flush=True)
 
     # The reward is the one quantity every other number is measured against, so it is checked
     # before any gradient step rather than inferred from Q later.  A zero reward here produces a
@@ -1152,9 +1219,6 @@ def main(argv: list[str] | None = None) -> int:
     # at startup.
     print(f"[online] reward '{args.reward}': scene cookies at reset"
           f" {[scene.cookies for scene in scenes]}", flush=True)
-    print(f"[online] reward scale x{args.reward_scale:g}"
-          + ("  (the actor's objective is divided by the same factor -- see `--reward-scale`)"
-             if args.reward_scale != 1.0 else ""), flush=True)
 
     def observe_all(clock: dict[str, float] | None = None
                     ) -> tuple[list[dict], list[dict[str, np.ndarray]]]:
@@ -1186,6 +1250,16 @@ def main(argv: list[str] | None = None) -> int:
         with torch.no_grad():
             actor_obs = actor_observation(policy, prepared, prefix, projection, parts)
             noise, log_prob = actor.sample(actor_obs)
+            # Greedy rows for the deterministic evaluation (`--eval-scenes`).  `sample` returns
+            # `tanh(mean + std * eps)`, so `tanh(mean)` is the mode of the same distribution: SB3's
+            # `deterministic=True`, and what `SteeringActor(deterministic=True)` does at inference.
+            #
+            # `log_prob` stays the one from the stochastic draw, because `alpha` has to keep
+            # regulating the *sampling* distribution -- feeding it the mode's (undefined) density
+            # would make the temperature measure something the agent never samples from.
+            if args.eval_scenes > 0:
+                greedy = torch.tanh(actor.forward(actor_obs[:args.eval_scenes]))
+                noise = torch.cat([greedy, noise[args.eval_scenes:]], dim=0)
             flat = repeat_noise(noise, args.chunk_size, args.action_dim, "single")
             chunk = sample_with_prefix(policy, prefix, flat, args.num_steps, device)
         clock["sample"] = time.monotonic() - started
@@ -1240,6 +1314,11 @@ def main(argv: list[str] | None = None) -> int:
     transitions = 0
     episodes = 0
     episode_returns: list[float] = []
+    #: Returns of the `--eval-scenes` greedy scenes, kept apart from `episode_returns` because the
+    #: whole point is to compare a policy acting deterministically against one acting with
+    #: exploration noise.  Both are cookie counts over full episodes, so both are comparable to the
+    #: 13.18-cookie baseline; only the greedy one measures the policy rather than the noise.
+    greedy_returns: list[float] = []
     recent_rewards: list[float] = []
     #: `(q, theoretical discounted value, horizon)` for finished episodes.  This is the acceptance
     #: criterion for the bootstrap fix: `q` must track the theory instead of diverging from it.
@@ -1264,7 +1343,7 @@ def main(argv: list[str] | None = None) -> int:
         submitted = time.monotonic()
         futures = [
             pool.submit(scene.play, np.asarray(chunks[i], dtype=np.float64),
-                        args.execute, args.reward, args.profile_physics, args.reward_scale,
+                        args.execute, args.reward, args.profile_physics,
                         args.reward_offset)
             for i, scene in enumerate(scenes)
         ]
@@ -1306,7 +1385,12 @@ def main(argv: list[str] | None = None) -> int:
         for i, scene in enumerate(scenes):
             if not dones[i]:
                 continue
-            episode_returns.append(scene.episode_return)
+            if i < args.eval_scenes:
+                greedy_returns.append(scene.episode_return)
+                del greedy_returns[:-200]
+            else:
+                episode_returns.append(scene.episode_return)
+                del episode_returns[:-200]
             episodes += 1
             # Record the calibration pair now, using the `q` from this round's updates.
             #
@@ -1321,9 +1405,14 @@ def main(argv: list[str] | None = None) -> int:
             # and with gamma = 0.99, T = 94 those differ by a factor of 1.72 (3.90 vs 2.27).  The
             # first version of this block used the start-state value and therefore reported a
             # bias of about -1.63 that was pure bookkeeping.
+            # The reference block assumes a **constant reward per RL step**, which is what
+            # `--reward paper` produces; it must therefore use `reward_return`, the episode summed in
+            # reward units.  It used to use `episode_return`, which under `--reward paper` is cookies:
+            # that compared a Q near -300 against a reference near 1.5 and printed the difference as
+            # a "bias".
             if step_stats.get("q") is not None and scene.control_steps > 0:
                 horizon = max(1, int(scene.control_steps / max(1, args.execute)))
-                per_step = scene.episode_return / horizon
+                per_step = scene.reward_return / horizon
                 if args.gamma < 1.0:
                     mean_value = per_step * sum(
                         1.0 - args.gamma ** (horizon - t) for t in range(horizon)
@@ -1373,8 +1462,11 @@ def main(argv: list[str] | None = None) -> int:
             wall = time.monotonic() - started
             control = rounds_done * args.execute * args.scenes
             recent = episode_returns[-20:]
+            greedy = greedy_returns[-20:]
             line = (f"[online] r{rounds_done:5d}  steps {transitions:6d}  ep {episodes:4d}"
                     f"  ret {np.mean(recent) if recent else float('nan'):8.2f}"
+                    f"  greedy {np.mean(greedy) if greedy else float('nan'):7.2f}"
+                    f" (+{len(greedy)})"
                     f"  rew {np.mean(recent_rewards):7.3f}"
                     f"  nz {(np.asarray(recent_rewards) != 0).mean() * 100:5.1f}%"
                     f"  ctrl/s {control / wall:6.1f}")
@@ -1390,13 +1482,13 @@ def main(argv: list[str] | None = None) -> int:
             if calibration:
                 recent_cal = calibration[-8:]
                 bias = float(np.mean([q - theory for q, theory, _ in recent_cal]))
-                scale = float(np.mean([abs(theory) for _, theory, _ in recent_cal]))
-                line += f"  q_bias {bias:+.3f}"
-                # Relative form as well: `--reward-scale` changes Q's units, so an absolute bias
-                # is not comparable across settings.  `q_rel` is the bias divided by the mean
-                # magnitude of the reference value, and is the number to compare across runs.
-                if scale > 1e-9:
-                    line += f"  q_rel {bias / scale:+.3f}"
+                # Relative form **per sample**, not `bias / mean(|theory|)`.  The denominator used
+                # to be a rolling mean of the reference magnitude; because that magnitude scales
+                # with episode length, the ratio moved 3.2x between r375 and r400 while the bias
+                # moved 1.12x.  It was measuring the composition of the window, not the critic.
+                relative = float(np.mean([(q - theory) / max(1e-9, abs(theory))
+                                          for q, theory, _ in recent_cal]))
+                line += f"  q_bias {bias:+.3f}  q_rel {relative:+.3f}"
             print(line, flush=True)
             print("[online]   round cost: " + "  ".join(
                 f"{name} {value * 1000:.0f}ms" for name, value in clock.items())
@@ -1444,48 +1536,56 @@ def main(argv: list[str] | None = None) -> int:
                 slope = np.polyfit(nefcs, times * 1000, 1)
                 print(f"[online]   ms ~ {slope[0]:.5f} * nefc + {slope[1]:.2f}", flush=True)
             del order
-    if episode_returns:
-        print(f"[online] episode return: mean {np.mean(episode_returns):.2f}"
-              f" median {np.median(episode_returns):.2f}"
-              f" max {np.max(episode_returns):.2f} (n={len(episode_returns)})", flush=True)
+    if episode_returns or greedy_returns:
+        if episode_returns:
+            print(f"[online] episode return (stochastic, {args.scenes - args.eval_scenes} scenes):"
+                  f" mean {np.mean(episode_returns):.2f}  median {np.median(episode_returns):.2f}"
+                  f"  max {np.max(episode_returns):.2f} (n={len(episode_returns)})", flush=True)
+        if greedy_returns:
+            print(f"[online] episode return (greedy, {args.eval_scenes} scenes):"
+                  f" mean {np.mean(greedy_returns):.2f}"
+                  f"  median {np.median(greedy_returns):.2f}"
+                  f"  max {np.max(greedy_returns):.2f} (n={len(greedy_returns)})", flush=True)
+            # The two together are the diagnosis: a greedy return that holds while the stochastic one
+            # falls means the exploration noise widened, not that the policy got worse.  run8 could
+            # not tell those apart, which is why this exists.
+            print(f"[online]   greedy vs 13.18 baseline: {np.mean(greedy_returns) / 13.18 * 100:.0f}%"
+                  "  -- this is the number that measures the policy rather than the noise.",
+                  flush=True)
     if recent_rewards:
         values = np.asarray(recent_rewards)
-        # Reported in **cookies**, the unit the evaluation scores in and the unit the 13.18 baseline
-        # is quoted in.  `recent_rewards` holds the scaled values that went to the critic, so it has
-        # to be divided back; comparing scaled rewards against a cookie baseline would read 30x off
-        # and fire a warning that means nothing.
-        divisor = args.reward_scale if args.reward_scale else 1.0
-        cookies = values / divisor
-        per_step = cookies.mean()
-        print(f"[online] RL-step reward over the last {len(values)}: mean {per_step:+.4f} cookies"
+        # `recent_rewards` holds the **shaped** reward that went to the critic, which under
+        # `--reward paper` is `level_sum - offset * execute`, not a cookie count.  It is printed as
+        # it is, and the cookie comparison is made against `episode_return`, which is accumulated in
+        # cookies.  Mixing the two was the bug fixed in `Scene.play`'s `reward_return`.
+        per_step = values.mean()
+        print(f"[online] RL-step reward over the last {len(values)}: mean {per_step:+.4f}"
               f"  non-zero {(values != 0).mean() * 100:.1f}%"
-              f"  max {cookies.max():+.4f}"
-              + (f"  (scaled x{divisor:g} -> {values.mean():+.3f} for the critic)"
-                 if divisor != 1.0 else ""), flush=True)
-        # The check that means something is a comparison against the *baseline policy on the same
-        # task*, not a threshold invented on the spot.  `a3_clean_v9_30000` scores 13.18 cookies per
-        # 1500-control-step episode, i.e. 13.18 / 1500 = 0.00879 cookies per control step, or
-        # 0.1406 per RL step at `execute=16`.  An untrained noise policy IS that baseline (its
-        # noise is the sampler's own), so anything near 0.14 means the reward plumbing is right and
-        # anything near 0 means it is not -- which a fixed percentage cannot tell you.
-        baseline = 13.18 / 1500 * args.execute
-        ratio = per_step / baseline if baseline else float("nan")
-        print(f"[online]   against the v9 baseline ({baseline:+.4f} cookies per RL step, from 13.18"
-              f" cookies per 1500 control steps): {ratio * 100:.0f}%", flush=True)
-        if ratio < 0.3:
-            print("[online] WARNING: the reward rate is far below the baseline's.  With `--reward"
-                  " increment` a step that delivers nothing pays nothing, so a collapsed rate makes"
-                  " almost every reward zero and Q fits noise.  Check that the policy moves at all"
-                  " before reading the critic curve.", flush=True)
+              f"  max {values.max():+.4f}"
+              f"  min {values.min():+.4f}", flush=True)
+        # The check that means something is the *episode* return against the baseline policy on
+        # the same task, not a threshold invented on the spot.  `a3_clean_v9_30000` scores 13.18
+        # cookies per 1500-control-step episode.  An untrained noise policy IS that baseline (its
+        # noise is the sampler's own), so a return near 13 means the plumbing is right.  This used
+        # to be computed from the shaped reward divided by `--reward-scale`, which only happened to
+        # land near the right number because the sparse reward and the scale were both ~0.03.
+        if episode_returns:
+            baseline = 13.18
+            mean_return = float(np.mean(episode_returns))
+            print(f"[online]   episode return against the v9 baseline ({baseline:.2f} cookies per"
+                  f" 1500 control steps): {mean_return / baseline * 100:.0f}%", flush=True)
+            if mean_return / baseline < 0.3:
+                print("[online] WARNING: the episode return is far below the baseline's.  Check"
+                      " that the policy moves at all before reading the critic curve.", flush=True)
     if step_stats:
         q = step_stats.get("q")
-        divisor = args.reward_scale if args.reward_scale else 1.0
-        expected = float(np.mean(recent_rewards)) / divisor
-        print(f"[online] Q {q:.3f} against a reward mean of {expected:+.4f} cookies and gamma"
-              f" {args.gamma}: at gamma 0.99 over 87 RL steps the discounted sum of a constant"
-              f" {expected:+.4f} is {expected / (1 - args.gamma):+.2f} (x{divisor:g} scale"
-              f" = {expected / (1 - args.gamma) * divisor:+.1f}), which is the scale Q should be on"
-              " if the reward is right.", flush=True)
+        # The fixed point Q should sit at: a constant reward `r` per RL step, discounted over the
+        # episode, which is `r / (1 - gamma)` for the start state and less for an average state.
+        expected = float(np.mean(recent_rewards))
+        print(f"[online] Q {q:.3f} against a reward mean of {expected:+.4f} per RL step and gamma"
+              f" {args.gamma}: for a constant {expected:+.4f} the discounted sum over 87 RL steps is"
+              f" {expected / (1 - args.gamma):+.2f} at the start state, which is the scale Q should"
+              " be on if the reward is right.", flush=True)
     pool.shutdown(wait=False)
     return 0
 
