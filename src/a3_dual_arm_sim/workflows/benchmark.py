@@ -12,10 +12,18 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from a3_dual_arm_sim.tasks.cookie_scenarios import (
+    SCENARIO_PROMPTS,
+    SCENARIO_TASKS,
+    A3CookieScenarioEnv,
+)
+from a3_dual_arm_sim.tasks.cookie_transfer import CookieTransferTaskConfig
 
 from .benchmark_results import BenchmarkResult as BenchmarkResult
 from .benchmark_results import EpisodeScore as EpisodeScore
@@ -123,6 +131,8 @@ class CookieBatchBenchmark(EpisodeExecution):
                     "task": self.task,
                     "prompt_style": self.prompt_style,
                     "first_grasp": getattr(self, "first_grasp", None),
+                    "tilt_level": getattr(self, "tilt_level", None),
+                    "box_quota": getattr(self, "box_quota", None),
                     "success_hold_steps": self.success_hold_steps,
                     "slot_tolerance_m": self.config.cookie_transfer.target_slot_tolerance_m,
                     "wall_contact_tolerance_m": self.wall_contact_tolerance_m,
@@ -250,17 +260,94 @@ class Cookie2x10Benchmark(Cookie2x10EpisodeExecution, CookieBatchBenchmark):
         return super()._episode_task(column, seed)
 
 
-def make_cookie_benchmark(task="2x5", *, prompt_style=None, first_grasp=None, **kwargs):
+class CookieScenarioBenchmark(CookieBatchBenchmark):
+    """Six additional initial-state and multi-target benchmark tasks."""
+
+    prompt_style = "task"
+
+    def __init__(self, scenario: str, *, tilt_level: str | None = None,
+                 box_quota: int | None = None, **kwargs):
+        self.task = scenario
+        self.tilt_level = (tilt_level or "mild") if scenario == "tilted" else None
+        self.box_quota = (5 if box_quota is None else box_quota) if scenario == "two-boxes" else None
+        self.required_cookies = (2 * self.box_quota if self.box_quota is not None
+                                 else 5 if scenario == "prefilled" else 10)
+        super().__init__(**kwargs)
+        if scenario == "two-boxes":
+            scene = self.config.cookie_transfer
+            x, y, z = scene.target_bin_world_position_m
+            self.config = replace(
+                self.config,
+                cookie_transfer=replace(
+                    scene,
+                    target_bin_world_position_m=(x, y + 0.025, z),
+                    spare_target_bin_world_position_m=(x - 0.07, y - 0.08, z),
+                ),
+            )
+
+    def create_env(self, *, render_cameras=False):
+        return A3CookieScenarioEnv(
+            self.config,
+            scenario=self.task,
+            tilt_level=self.tilt_level,
+            box_quota=self.box_quota,
+            task_config=CookieTransferTaskConfig(
+                cookie_count=len(self.config.cookie_transfer.cookie_source_positions_m),
+                position_noise_m=self.cookie_noise_m,
+                yaw_noise_rad=self.cookie_yaw_noise_rad,
+                terminate_on_success=False,
+                require_released=True,
+                success_hold_steps=self.success_hold_steps,
+                wall_contact_tolerance_m=self.wall_contact_tolerance_m,
+            ),
+            render_mode="human" if self.render else None,
+            render_cameras=render_cameras,
+        )
+
+    def _episode_task(self, column, seed):
+        if self.task == "tilted" and self.tilt_level == "fallen":
+            return ("Some cookies are lying flat. Transfer 10 available cookies from the "
+                    "source box into the target box, upright.")
+        if self.task == "two-boxes" and self.box_quota == 10:
+            return ("Transfer 20 cookies from the source box and fill both target boxes, "
+                    "placing 10 upright in each 2 by 5 box.")
+        return SCENARIO_PROMPTS[self.task]
+
+    def _expected_source_count(self, env):
+        return env.initial_source_count - self.required_cookies
+
+    def _describe_incomplete_fill(self, info):
+        metrics = info.get("scenario_metrics", {})
+        return (f"scenario incomplete: targets={metrics.get('target_counts')}, "
+                f"source={metrics.get('cookies_in_source')}/"
+                f"{metrics.get('expected_source_count')}, "
+                f"outside={metrics.get('cookies_outside_containers')}")
+
+
+def make_cookie_benchmark(task="2x5", *, prompt_style=None, first_grasp=None, tilt_level=None,
+                          box_quota=None, **kwargs):
     """Shared construction for the benchmark CLI and grid evaluations."""
-    if task not in ("2x5", "2x10"):
-        raise ValueError("task must be 2x5 or 2x10")
+    if task not in ("2x5", "2x10", *SCENARIO_TASKS):
+        raise ValueError(f"unknown benchmark task: {task}")
+    if tilt_level is not None and (task != "tilted" or tilt_level not in ("mild", "fallen")):
+        raise ValueError("tilt_level must be mild or fallen and only applies to tilted")
+    if box_quota is not None and (task != "two-boxes" or box_quota not in (5, 10)):
+        raise ValueError("box_quota must be 5 or 10 and only applies to two-boxes")
     if prompt_style is None:
         # Match the per-task CLI defaults: 2x5 evaluation and collection use the
         # short training instruction, 2x10 keeps its native plan prompt.
-        prompt_style = "task" if task == "2x10" else "training"
+        prompt_style = "task" if task == "2x10" or task in SCENARIO_TASKS else "training"
     if prompt_style not in ("task", "training", "short", "pi05_aligned"):
         raise ValueError("prompt_style must be task, training, short or pi05_aligned")
-    if task == "2x10":
+    if task in SCENARIO_TASKS:
+        if first_grasp is not None:
+            raise ValueError("first_grasp only applies to 2x10")
+        if prompt_style != "task":
+            raise ValueError("scenario benchmarks require prompt_style='task'")
+        benchmark = CookieScenarioBenchmark(
+            scenario=task, tilt_level=tilt_level, box_quota=box_quota, **kwargs
+        )
+    elif task == "2x10":
         benchmark = Cookie2x10Benchmark(first_grasp=first_grasp, **kwargs)
     else:
         if first_grasp is not None:
@@ -275,6 +362,8 @@ def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
         task=args.get("task", "2x5"),
         prompt_style=args.get("prompt_style"),
         first_grasp=args.get("first_grasp"),
+        tilt_level=args.get("tilt_level"),
+        box_quota=args.get("box_quota"),
         success_hold_steps=args.get("success_hold_steps", 5),
         slot_tolerance_m=args.get("slot_tolerance_m", (0.015, 0.005)),
         wall_contact_tolerance_m=args.get("wall_contact_tolerance_m", 0.030),

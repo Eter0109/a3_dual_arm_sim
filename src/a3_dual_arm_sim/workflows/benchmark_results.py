@@ -34,9 +34,13 @@ class EpisodeScore:
     failure_reason: str | None = None
     randomization: dict[str, Any] = field(default_factory=dict)
     source_column: int | None = None
+    scenario_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if self.scenario_metrics is None:
+            result.pop("scenario_metrics")
+        return result
 
 
 @dataclass

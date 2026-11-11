@@ -162,6 +162,9 @@ class EpisodeExecution:
         return {"grasp_reports": getattr(expert, "batch_reports", []),
                 "final_expert_phase": getattr(getattr(expert, "phase", None), "name", None)}
 
+    def _expected_source_count(self, env: A3CookieTransferEnv) -> int:
+        return len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
+
     def _describe_incomplete_fill(self, info: dict) -> str:
         """Explain why a non-expert, non-truncated episode missed the success contract.
 
@@ -348,9 +351,7 @@ class EpisodeExecution:
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
         env_success = bool(info.get("success", False))
-        expected_source = (
-            len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
-        )
+        expected_source = self._expected_source_count(env)
         success = (
             env_success
             and cookies_in_target == self.required_cookies
@@ -429,4 +430,5 @@ class EpisodeExecution:
             failure_reason=failure_reason,
             randomization=self.last_attempt_metadata.copy(),
             source_column=column,
+            scenario_metrics=info.get("scenario_metrics"),
         )

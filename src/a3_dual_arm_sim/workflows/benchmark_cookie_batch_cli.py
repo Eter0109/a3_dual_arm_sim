@@ -17,6 +17,7 @@ from a3_dual_arm_sim.paths import project_root
 from a3_dual_arm_sim.sim.randomization import load_randomization_config
 from a3_dual_arm_sim.tasks.cookie_2x10_plan import parse_first_grasp
 from a3_dual_arm_sim.tasks.cookie_2x10_settings import load_cookie_2x10_settings
+from a3_dual_arm_sim.tasks.cookie_scenarios import SCENARIO_TASKS
 from a3_dual_arm_sim.workflows.benchmark import (
     ACTPolicyAdapter,
     CookieBatchBenchmark,
@@ -44,8 +45,44 @@ def run_metadata(args, benchmark):
         "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
         "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
     }
+    if benchmark.task in SCENARIO_TASKS:
+        metadata["success_conditions"] = {
+            "required_new_cookies": benchmark.required_cookies,
+            "required_cookies_in_source": "initial_source_count - required_new_cookies",
+            "target_counts": ([benchmark.box_quota, benchmark.box_quota]
+                              if benchmark.task == "two-boxes" else [10]),
+            "prefilled_cookies_must_remain": benchmark.task == "prefilled",
+            "require_exact_slots": benchmark.task != "two-boxes" or benchmark.box_quota == 10,
+            "require_released_upright_and_settled": True,
+            "success_hold_steps": benchmark.success_hold_steps,
+            "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
+            "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
+        }
+        package_root = Path(__file__).resolve().parents[1]
+        protocol_files = (
+            package_root / "tasks/cookie_scenarios.py",
+            package_root / "tasks/cookie_transfer.py",
+            package_root / "config.py",
+            package_root / "sim/env.py",
+            package_root / "sim/object_builder.py",
+            package_root / "workflows/benchmark.py",
+            package_root / "workflows/benchmark_results.py",
+            package_root / "workflows/episode_execution.py",
+            package_root / "workflows/benchmark_cookie_batch_cli.py",
+        )
+        metadata["scenario_protocol"] = {
+            "version": 1,
+            "source_sha256": {
+                str(path.relative_to(package_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in protocol_files
+            },
+        }
     metadata["task"] = benchmark.task
     metadata["first_grasp"] = getattr(benchmark, "first_grasp", None)
+    if benchmark.task == "tilted":
+        metadata["tilt_level"] = benchmark.tilt_level
+    if benchmark.task == "two-boxes":
+        metadata["box_quota"] = benchmark.box_quota
     metadata["randomization_settings"] = benchmark.randomization_settings
     metadata["source_column"] = benchmark.source_column
     metadata["randomization"] = {
@@ -194,19 +231,29 @@ def main() -> int:
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument("--pi05-scene", type=Path, help="Explicit provider scene fingerprint; changes evaluation protocol")
     parser.add_argument("--pi05-scene-mode", choices=("cameras", "full"), default="cameras")
-    parser.add_argument("--task", choices=("2x5", "2x10"), default="2x5")
+    parser.add_argument("--task", choices=("2x5", "2x10", *SCENARIO_TASKS), default="2x5")
     parser.add_argument("--profile", choices=("basic", "medium", "advanced"))
     parser.add_argument("--source-column", choices=("1", "2", "3", "4", "random"))
     parser.add_argument("--randomization-config", type=Path)
     parser.add_argument("--first-grasp", type=parse_first_grasp)
+    parser.add_argument("--tilt-level", choices=("mild", "fallen"),
+                        help="Tilted task only: mild (default) or fallen cookies")
+    parser.add_argument("--box-quota", type=int, choices=(5, 10),
+                        help="Two-boxes task only: cookies per target box (default: 5)")
     parser.add_argument(
         "--prompt-style",
         choices=("training", "task", "short", "pi05_aligned"),
-        default="training",
-        help="training: original 2x5 prompt (2x10 stays native); task: native task prompt; short: transfer 10/20 cookies into target box",
+        default=None,
+        help="Default: training for 2x5/2x10; task for the six scenario benchmarks",
     )
     parser.add_argument("--num-steps", type=int, default=None, help="SmolVLA or pi05 flow inference steps")
     args = parser.parse_args()
+    if args.prompt_style is None:
+        args.prompt_style = "task" if args.task in SCENARIO_TASKS else "training"
+    if args.tilt_level is not None and args.task != "tilted":
+        parser.error("--tilt-level requires --task tilted")
+    if args.box_quota is not None and args.task != "two-boxes":
+        parser.error("--box-quota requires --task two-boxes")
     if min(args.episodes, args.max_steps, args.workers) < 1:
         parser.error("episodes, max-steps and workers must be positive")
     if args.task == "2x10" and (args.compare or args.policy in ("same_column", "cross_column")):
@@ -215,6 +262,13 @@ def main() -> int:
         )
     if args.task == "2x5" and (args.first_grasp is not None or args.policy == "variable_grasp"):
         parser.error("first-grasp and variable_grasp require --task 2x10")
+    if args.task in SCENARIO_TASKS:
+        if args.first_grasp is not None or args.policy == "variable_grasp":
+            parser.error("first-grasp and variable_grasp require --task 2x10")
+        if args.prompt_style != "task":
+            parser.error("the six scenario tasks require --prompt-style task")
+        if args.compare:
+            parser.error("run scenario expert policies separately; --compare supports 2x5")
     if args.num_steps is not None and (
         args.num_steps < 1 or not args.policy.startswith(("smolvla:", "pi05:"))
     ):
@@ -261,6 +315,8 @@ def main() -> int:
         task=args.task,
         prompt_style=args.prompt_style,
         first_grasp=first_grasp,
+        tilt_level=args.tilt_level,
+        box_quota=args.box_quota,
         **randomization,
         max_steps=args.max_steps,
         randomize_boxes=not args.no_randomize_boxes,
@@ -301,15 +357,23 @@ def main() -> int:
             extra["temporal_ensemble_coeff"] = args.temporal_ensemble_coeff
         checkpoint = args.policy.split(":", 1)[1]
         if args.policy.startswith("pi05:"):
-            if args.task != "2x5" or args.prompt_style != "pi05_aligned":
-                parser.error("pi05: requires --task 2x5 --prompt-style pi05_aligned")
+            if (args.task == "2x5" and args.prompt_style != "pi05_aligned") or (
+                args.task not in ("2x5", *SCENARIO_TASKS)
+            ):
+                parser.error("pi05: requires 2x5 with pi05_aligned or a scenario task")
             # Not a parser error: the checkpoint can be *loaded* on any scene, and
             # `--pi05-scene-mode cameras` is a legitimate comparison. But this
             # adapter's numbers are only comparable with the published ones when the
             # training arrangement is rebuilt, and the failure is silent -- the policy
             # parks and scores 0 instead of raising. Measured on this code: 5/10 with
             # `full`, 0/10 without it and 0/10 with `cameras` only.
-            if args.pi05_scene is None or args.pi05_scene_mode != "full":
+            if args.task in SCENARIO_TASKS:
+                print(
+                    "[benchmark] pi05: this scenario tests scene and task generalization; "
+                    "its result is not a reproduction of the checkpoint's training scene.",
+                    flush=True,
+                )
+            elif args.pi05_scene is None or args.pi05_scene_mode != "full":
                 print(
                     "[benchmark] pi05: WARNING -- a π₀.₅ checkpoint is scene-specific and\n"
                     "            this run does NOT rebuild its training arrangement.\n"

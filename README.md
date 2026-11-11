@@ -68,6 +68,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 - [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
 - [2×5 分级随机化与专家采集](docs/randomization.md)：两批各五个，配置强度、来源列和外观，采集与续采。
 - [2×10 专家演示与数据采集](docs/cookie_2x10.md)：配置首夹数量，运行四次抓取、图形演示与采集。
+- [六种饼干场景 benchmark](docs/cookie_benchmark_scenarios.md)：缺列、缺口、跨列、倾倒、预填充和双盒评测。
 - [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
@@ -89,7 +90,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ## 统一评测与网格测试
 
-两个任务统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task 2x5|2x10` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。按回合结束时的目标盒饼干数量计分，2×5 满分 10、2×10 满分 20。
+2×5、2×10 和六种扩展场景统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。2×5 和 2×10 按回合结束时的目标盒饼干数量计分，满分分别为 10 和 20；扩展场景的初始化、评分规则和命令见 [六种饼干场景 benchmark](docs/cookie_benchmark_scenarios.md)。
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
