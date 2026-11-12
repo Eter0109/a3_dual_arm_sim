@@ -223,3 +223,77 @@ n_updates = 700 × 20     = 14000
 | T+17h | 300k | **若仍为 0 → 判定"参考在这台机器/这个种子下无法复现"**，我们所有 run 学不动就不再是我们的实现问题 |
 
 第三条是这次复现的核心价值：它把"我们的实现有 bug"和"这个方法本身在这个预算下学不动"分开。
+
+## can 复现：预算来自论文，不是来自 `train_dsrl.py` 的 20M
+
+### 论文给出的真实规模
+
+| 来源 | 内容 |
+|---|---|
+| Figure 4 横轴 | `Timesteps ×10^6`，0.0 → **1.0**，即最多 **100 万原始控制步** |
+| Table 4（Can 列） | chunk 4, hidden 2048, **grad updates 20**, **Q_W updates 10**, γ 0.99, action magnitude 1.5, **Initial steps 24000** |
+| Table 3（所有在线实验） | lr 3e-4, batch 256, Tanh, **target entropy 0**, τ 0.005, 3 层, 2 critics, **4 envs** |
+| p.7 | 每个实验 **5 seeds** 平均 |
+
+`train_dsrl.py:178` 里的 `total_timesteps=20000000` 只是一个"一直跑"的 ceiling，**不是论文的预算**。
+这纠正了本文档早先按 20M 估算的 42 天——那个数是错的。
+
+### 配置核对：仓库与论文逐项一致
+
+| 项 | 仓库 | 论文 Table 4 |
+|---|---|---|
+| act chunk | 4 | 4 ✓ |
+| hidden | 2048 | 2048 ✓ |
+| grad steps/update | 20 | 20 ✓ |
+| Q_W steps | 10 | 10 ✓ |
+| discount | 0.99 | 0.99 ✓ |
+| action magnitude | 1.5 | 1.5 ✓ |
+| target entropy | 0.0 | 0 ✓ |
+| initial steps | `init_rollout_steps 1501` | 24000 |
+
+`1501 × 4 envs × 4 act_steps = 24016` 控制步，与论文的 24000 吻合。**所以仓库就是论文的设置，无需改任何超参。**
+
+### 时间预算（实测 22 控制步/s 稳态）
+
+| 目标控制步 | 累计时间 | 相当于论文曲线 |
+|---|---|---|
+| 50k | 0.4 h | 5% |
+| 100k | 1.0 h | 10% |
+| 300k | 3.5 h | 30% |
+| 1M | **12.3 h** | 100% |
+
+论文的图是 5 seeds 平均，完整复现一张 can 图 = **约 62 小时**。
+
+### 我又引入并修掉了一个 bug
+
+为了把评测从 17 分钟降到 8.5 分钟，我用 `num_evals=20` 启动。但
+`train_dsrl.py:151` 是 `eval_episodes = int(cfg.num_evals / num_env_eval)`，而 `n_eval_envs=25`：
+
+```
+num_evals=20  -> eval_episodes = int(20/25) = 0   *** 完全不评测 ***
+num_evals=100 -> 4 次评测、每次 25 env
+```
+
+也就是说那一版跑起来**根本不会输出 success rate**，而我还以为在观察。现在用 `num_evals=100`
+（评测成本减半，仍然有效）。教训是同一个：改一个数之前要确认它在代码里怎么被消费，而不是
+确认它"看起来合理"。
+
+当前命令：
+
+```bash
+cd /root/refs/dsrl
+export MUJOCO_GL=egl HF_HOME=/root/autodl-tmp/hf TMPDIR=/root/autodl-tmp/tmp HYDRA_FULL_ERROR=1
+python train_dsrl.py --config-path=cfg/robomimic --config-name=dsrl_can.yaml \
+    use_wandb=False env.n_envs=4 num_evals=100
+```
+
+日志 `/root/autodl-tmp/logs/dsrl_can_repro.log`。
+
+### 预注册判据
+
+| 控制步 | 时间 | 判据 |
+|---|---|---|
+| 24k | 2 min | 初始采集结束，开始训练（`n_updates` 开始增长） |
+| 100k | 1 h | 论文 10% 处；若 `success_rate > 0` 则链路成立 |
+| 300k | 3.5 h | 论文 30% 处；若仍为 0 → 判定"此机器/此预算下参考无法复现" |
+| 1M | 12.3 h | 论文 100% 处；应接近论文报告的 Near-optimal |
