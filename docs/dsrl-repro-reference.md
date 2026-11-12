@@ -396,3 +396,68 @@ noise=normal 0/10    noise=zero 0/10    noise=half 0/10    noise=clip15 0/10
 从同一个 Google Drive 文件夹里取**同目录下更靠后的 state**（例如 `state_100000.pt` 或
 `state_200000.pt`），放到同一路径替换即可，无需改任何配置。如果文件夹里只有 `state_5000`，
 那 DSRL 仓库里 `base_policy_path` 这一个字段就是与论文不符的，需要找作者确认。
+
+## 上游 issue 查证：问题已知，且答案是"必须用作者提供的 NPZ"
+
+查 `ajwagen/dsrl` 的 7 个 issue（`api.github.com/repos/ajwagen/dsrl/issues`），其中
+**Issue #7 就是同一个问题，且已给出答案。**
+
+### Issue #7（closed）：基座策略 0%，与我们完全一致
+
+提问者用 robomimic 官方数据集 + 自己生成的 npz 预训练 π_dp，始终得到：
+
+```
+eval: num episode 120 | success rate 0.000 | avg episode reward 0.000
+```
+
+**作者之外的第一作者 ChandradithyaJ 的结论：**
+
+> "The dataset and normalization files provided by the official robomimic project page don't
+> work with the pretrained checkpoints. **The author-provided NPZ files must be used.**"
+
+**这就是我们卡住的原因。** 我用 `process_robomimic_dataset.py --normalize` 自己生成的
+`normalization.npz` 来自 robomimic 官方 hdf5，**而 issue 明确说不能这样做**。
+
+注意我此前的验证为何没能发现这一点：观测一致性检查（`max|diff|=0.000`）用的是
+**我自己的** normalization 的两边，它只证明了 env 与我的 npz 一致，**没有**证明我的 npz 与
+作者的一致。
+
+### Issue #2：有人复现成功，但需要 100 小时；`n_envs=50` 明显更好
+
+> "I have successfully reproduced the results reported in the paper after training for **100
+> hours** on our server."
+> "**Setting `n_envs=50` for the can task works much better** (similar to the DPPO settings)."
+
+我们用的是 `n_envs=4`（仓库默认），而成功者用 50。这解释了为什么我们的速度只有 5 fps 且
+样本效率低——`n_envs` 直接决定每次 `train()` 调用覆盖多少 transition。
+
+### Issue #5：另一人在 RTX 5090 上跑了 4 天，结果仍与 Fig 4 不符
+
+> "The experiment has been running for **four days on a RTX 5090 GPU** ... Both plots are quite
+> different from the result presented in Fig.4 of the paper."
+
+所以"复现困难"不是我们独有的问题，是**仓库的已知状态**。
+
+### Issue #6：三个真实代码 bug（影响我们的 can 复现）
+
+| bug | 位置 | 影响 |
+|---|---|---|
+| **`action_magnitude` 在 `dsrl_na` 下被完全忽略** | `env_utils.py:145-146`（`ActionChunkWrapper` 用 `env.action_space.low/high` = ±1） | can 用的就是 `dsrl_na`，所以 Table 4 的 `action_magnitude 1.5` **实际是 1.0**。已核实：`action_magnitude` 在 `env_utils.py` 只出现在 `DiffusionPolicyEnvWrapper`（dsrl_sac）里 |
+| `dsrl_sac` 的动作被去噪两次 | `utils.py:171` + `env_utils.py:217` | 不影响 dsrl_na |
+| `truncated` 恒为 `False` | `env_utils.py:184` | bootstrap 在时间上限处不当裁剪 |
+
+**必须更正我此前的一个推断**：我把 `ep_len` 恒等于 75 当作"从未成功终止"的证据。**这是错的。**
+由于 `ignore_done: true` 且 `truncated` 恒 False，episode 本来就会跑满 75 步——
+`ep_len = 75` 是代码行为，不是失败证据。真正的证据只有 `success_rate = 0`。
+
+### 当前阻塞项
+
+需要用户从**同一个 Google Drive 文件夹**取作者提供的 NPZ：
+
+```
+dppo/log/robomimic/can/normalization.npz     <- 必需（约 1 KB）
+dppo/log/robomimic/can/train.npz             <- 若文件夹里有，一并取
+```
+
+README 说 "Download the contents of this folder and place in `./dppo/log`"，所以这些 npz 应该就在
+那个文件夹里。拿到后替换即可，无需改配置。
