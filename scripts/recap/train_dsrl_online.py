@@ -90,7 +90,10 @@ Read against `stable_baselines3/dsrl/dsrl.py:230-365` and `refs/dsrl/cfg/robomim
 | 10 | env reward: robomimic's `-1` per step | `--reward paper`: `level_sum - offset * execute` | necessary, and now the same construction rather than an approximation of it.  This environment's own reward is a *level*; subtracting 1 per control step reproduces robomimic's timer exactly. |
 | 11 | **no gradient clipping** (`clip_grad_norm_` is in SB3's `a2c`/`dqn`/`ppo`, absent from `sac.py` and `dsrl.py`) | `--grad-clip 0`, i.e. none | aligned.  This row exists because the help text previously claimed the reference used SB3's 10.0, which is A2C's and PPO's default, not SAC's. |
 | 12 | `ent_coef * next_log_prob` subtracted from the TD target (`dsrl.py:286`) | `--entropy-in-target`, **off** | deliberate deviation, on evidence.  The term compounds to `alpha*|log pi|/(1-gamma)`, which at initialisation is 2143 against a true return of about -978.  run9 turned it on and measured the cost: at matched rounds it returned 3.70 where run8 (off) returned 6.30, with the same `q`.  The reference absorbs the same transient over ~250k RL steps; this loop has 2,166. |
-| 13 | evaluates deterministically (`deterministic_eval`) | `--eval-scenes 1`: one training scene acts on `tanh(mean)` | different mechanism, same purpose.  The reference runs separate eval envs every 3000 steps; here one of the eight collection scenes is greedy so the measurement is continuous and costs no wall time.  Caveat found at run time: at initialisation `tanh(mean) = 0`, i.e. **zero** noise, which the flow sampler was not trained on, so the first few `greedy` readings are below the noise-injected ones (`greedy` 3.67 against `ret` 5.15) and only become a policy measurement once the actor's mean leaves zero. |
+| 13 | evaluates with `deterministic_eval` | `--eval-scenes 1`: 1 of 8 collection scenes uses a **seeded N(0,1)**, not `tanh(mean)` | earlier versions used zero noise, which the reference implementation showed is out of distribution (7 %% against 47 %% at w ~ N(0,1)).  The fixed noise is a fresh draw per round and identical across runs. |
+| 15 | **`DSRL-SAC`** for the pi0 experiments (paper §C.5) | `--algorithm sac` (default): critic sees obs + **32-dim noise**, no distilled critic | the paper's pi0 setting.  `--algorithm na` keeps the previous `dsrl_na` path for comparison; it needs a critic over the 1600-dim chunk plus a 26 M noise critic and its distillation. |
+| 16 | `hidden size 128`, `actor lr 1e-4`, `critic lr 3e-4` (Table 11, pi0 columns) | `--hidden 128`, `--actor-lr 1e-4`, `--lr 3e-4` | aligned.  Was `hidden 2048` with one shared 3e-4, i.e. 35x the parameters and 3x the actor step. |
+| 17 | `target_entropy = -d/2 = -16` (Table 11) | `--target-entropy 21` | **deliberate deviation.**  The equilibrium is `log_prob = -target_entropy`; this checkpoint's measured initial `log_prob` is about -21, so 21 pins `alpha` at its initial value.  Measured on the reference: with `target_entropy 0` alpha decayed 10x and `log_prob` drifted -18.4 -> -0.6, and setting the positive value held `log_prob` at -18 for the whole run.  Also requires `--entropy-in-target` off, or the pinned alpha keeps the entropy bonus permanently on. |
 | 14 | critic output starts at 0 (SB3 default init) | `--q-init` auto: output bias at the analytic batch-mean value, about -566 | deliberate, and the largest structural difference in this table.  The value is not a knob being tuned: it is where TD would put the head anyway, and run9 showed the cost of starting 566 units away (650 rounds to travel 391).  A constant on the output is invisible to the actor's gradient, which sees `dQ/da` rather than `Q`, so the objective is unchanged. |
 
 Rows 1 and 2 were both recorded as **open** substantive gaps for several runs after they had in fact
@@ -436,6 +439,11 @@ class NoiseBank:
         self.obs = torch.zeros(capacity, 0, device=device)
         self.chunk = torch.zeros(capacity, chunk_dim, device=device)
         self.noise = torch.zeros(capacity, noise_dim, device=device)
+        #: The noise the *next* state's actor would draw.  Only `--algorithm sac` reads it: there
+        #: the noise IS the action, so `a'` must come from the current actor exactly as in SAC,
+        #: and `BootstrapSet` has nothing to refresh because the replay row is already in the
+        #: action space.
+        self.noise_next = torch.zeros(capacity, noise_dim, device=device)
         self.obs = None
         self.position = 0
         self.size = 0
@@ -489,6 +497,11 @@ class Replay:
         self.chunk = torch.zeros(capacity, chunk_dim, device=device)
         self.chunk_next = torch.zeros(capacity, chunk_dim, device=device)
         self.noise = torch.zeros(capacity, noise_dim, device=device)
+        # The next state's noise, needed only by `sac`, where the TD target's bootstrap action is
+        # the noise itself rather than a denoised chunk.  Allocated unconditionally: it costs
+        # `capacity x 32` floats (2.5 MB at 20000 rows) and keeping the layout uniform means `add`
+        # does not need to know which algorithm is running.
+        self.noise_next = torch.zeros(capacity, noise_dim, device=device)
         self.reward = torch.zeros(capacity, device=device)
         self.done = torch.zeros(capacity, device=device)
         # Inputs for the refresh, kept on the host: they are only read by `BootstrapSet`.
@@ -507,15 +520,16 @@ class Replay:
     def bytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (
             self.obs, self.obs_next, self.chunk, self.chunk_next, self.noise,
-            self.reward, self.done))
+            self.noise_next, self.reward, self.done))
 
     def add(self, obs, chunk, noise, reward, done, obs_next, chunk_next,
-            next_inputs: dict | None = None) -> None:
+            noise_next, next_inputs: dict | None = None) -> None:
         index = self.position
         for target, value in (
             (self.obs, obs), (self.chunk, chunk), (self.noise, noise),
             (self.reward, reward), (self.done, done),
             (self.obs_next, obs_next), (self.chunk_next, chunk_next),
+            (self.noise_next, noise_next),
         ):
             target[index] = value
         if next_inputs is not None and self.keep_inputs:
@@ -533,6 +547,7 @@ class Replay:
             "obs": self.obs[index],
             "chunk": self.chunk[index],
             "noise": self.noise[index],
+            "noise_next": self.noise_next[index],
             "reward": self.reward[index],
             "done": self.done[index],
             "obs_next": self.obs_next[index],
@@ -804,9 +819,11 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         # here is equivalent to the reference's `D(s', actor_noise(s'))`.  When
         # `--bootstrap-refresh 0` it is the collection-time chunk and the target is frozen on the
         # behaviour policy -- the configuration that biased Q down by 4.3 cookies in run4.
+        action_now = data["noise"] if args.algorithm == "sac" else data["chunk"]
+        action_next = data["noise_next"] if args.algorithm == "sac" else data["chunk_next"]
         with torch.no_grad():
             stacked_next = torch.stack(
-                [head(data["obs_next"], data["chunk_next"]) for head in critic_target])
+                [head(data["obs_next"], action_next) for head in critic_target])
             next_q = combine_heads(stacked_next, args.critic_combine)
             # Both aggregates are recorded every round, whatever `--critic-combine` says, because
             # their difference **is** the bias being studied: `E[min(a,b)] = mu - sigma/sqrt(pi)` for
@@ -820,7 +837,11 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
             target_q = (data["reward"].unsqueeze(-1)
                         + args.gamma * (1.0 - data["done"].unsqueeze(-1)) * next_q)
 
-        q_values = torch.stack([head(state, data["chunk"]) for head in critic])
+        # The critic's action input is the executed chunk under `na` and the noise under `sac`
+        # (see `action_now` / `action_next` above).  This is the whole point of the SAC variant:
+        # `a` and `a'` are the 32-dim latent the actor actually controls, not a 1,600-dim
+        # denoised artefact of it.
+        q_values = torch.stack([head(state, action_now) for head in critic])
         critic_loss = 0.5 * sum(F.mse_loss(q, target_q) for q in q_values)
         critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -862,7 +883,10 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
 
         sampled, log_prob = actor.sample(state)
         alpha = log_alpha.exp().detach()
-        stacked_pi = torch.stack([head(state, sampled) for head in critic_noise])
+        # `na` maximises the distilled noise critic; `sac` maximises the critic it just trained,
+        # which is why the SAC variant needs no distillation at all.
+        pi_critic = critic if args.algorithm == "sac" else critic_noise
+        stacked_pi = torch.stack([head(state, sampled) for head in pi_critic])
         min_q = combine_heads(stacked_pi, args.critic_combine)
         # The actor's objective is **not** rescaled here.
         #
@@ -909,7 +933,9 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
 
     # --- the reference's separate noise-critic loop, `noise_critic_steps` fresh batches ------
     noise_critic_loss = torch.zeros((), device=log_alpha.device)
-    for _ in range(max(0, args.noise_critic_steps)):
+    # `sac` has no distilled critic: the actor maximises the critic trained on the noise action
+    # space directly, so this whole loop is `na`-only.
+    for _ in range(0 if critic_noise is None else max(0, args.noise_critic_steps)):
         data = replay.sample(args.batch)
         distilled = noise_bank.sample(args.batch) if noise_bank is not None else None
         source = distilled if distilled is not None else data
@@ -946,7 +972,7 @@ def save_checkpoint(path: Path, actor, critic, critic_noise, projection, args,
     torch.save({
         "actor": actor.state_dict(),
         "critic": critic.state_dict(),
-        "critic_noise": critic_noise.state_dict(),
+        "critic_noise": None if critic_noise is None else critic_noise.state_dict(),
         "projection": projection.detach().cpu().numpy(),
         "noise_mode": "single",
         "actor_dim": args.actor_dim,
@@ -1024,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="parallel environments.  One thread per scene; physics measured 7.94x"
                              " faster at 4 threads with bit-identical results, and the batched"
                              " forward is sublinear to 8 (437 ms for eight against 183 ms for one).")
-    parser.add_argument("--execute", type=int, default=16,
+    parser.add_argument("--execute", type=int, default=20,
                         help="control steps per RL step, fixed by the checkpoint's manifest (chunk"
                              " 50, execute 16).  Not a tuning knob: one RL step IS one executed"
                              " chunk, which is what makes gamma 0.99 correct over 87-step"
@@ -1055,20 +1081,26 @@ def main(argv: list[str] | None = None) -> int:
     # dense and large by definition.  With that reward the multiplier was an identity in run8
     # (scale 1.0), so keeping it could only mislead the next reader into thinking it still matters.
     parser.add_argument("--eval-scenes", type=int, default=1,
-                        help="how many of the `--scenes` scenes act on the **mean** of the noise"
-                             " distribution (`tanh(mean)`) instead of a sample.\n\n"
-                             "This is the deterministic evaluation, and the reason it is worth 1/8"
-                             " of the throughput: `ret` as logged everywhere else is measured"
-                             " *with exploration noise*, so a policy that got better while the noise"
-                             " got wider looks identical to a policy that got worse.  run8 went from"
-                             " 9.05 to 6.30 cookies with `alpha` rising and `log_prob` going"
-                             " positive, and there was no way to say which of the two it was.\n\n"
-                             "Making one training scene greedy costs no wall time -- it is the same"
-                             " eight scenes stepping the same sixteen control steps -- and it yields"
-                             " a *continuous* greedy return curve on full 1500-control-step"
-                             " episodes, directly comparable to the 13.18-cookie baseline.  The"
-                             " cost is that 1/8 of the transitions are on-policy-for-the-mean"
-                             " rather than exploratory.\n\n"
+                        help="how many of the `--scenes` scenes draw a **fixed, seeded N(0,1)**"
+                             " instead of the actor's own sample.\n\n"
+                             "This exists because `ret` is measured *with the actor's exploration"
+                             " noise*, so a policy that improved while its noise widened looks"
+                             " identical to one that got worse.  run8 fell 9.05 -> 6.30 cookies"
+                             " with `alpha` rising and `log_prob` going positive, and there was no"
+                             " way to say which of the two it was.\n\n"
+                             "**It used to use `tanh(mean)`, i.e. zero noise, and that was wrong.**"
+                             "  Measured on the reference implementation (docs/dsrl-repro-reference"
+                             ".md): a converged diffusion policy scores **7 %%** at w = 0 against"
+                             " **47 %%** at w ~ N(0,1) and 70 %% at std 0.5.  The sampler expects a"
+                             " unit Gaussian, so zero noise is an input the policy never saw -- the"
+                             " `greedy` column was measuring out-of-distribution behaviour, and the"
+                             " run8-run11 reading of \"greedy fell while ret held\" was that"
+                             " artefact rather than policy damage.\n\n"
+                             "The noise is seeded per (round, scene) rather than frozen, so it is"
+                             " a fresh draw every round but the same draw across runs.\n\n"
+                             "Costs no wall time: same envs, same control steps.  1/8 of the"
+                             " transitions are then off-policy for the actor's noise, which is the"
+                             " price of the measurement.\n\n"
                              "0 disables it and restores all-stochastic collection.")
     parser.add_argument("--reward", default="paper",
                         choices=("paper", "increment", "chunk_sum", "chunk_mean", "level_last"),
@@ -1108,6 +1140,21 @@ def main(argv: list[str] | None = None) -> int:
                              " `Q`), so this removes the transient without changing the objective."
                              "\n\n"
                              "0 reproduces the old behaviour and is the A/B arm.")
+    parser.add_argument("--algorithm", choices=("na", "sac"), default="sac",
+                        help="which DSRL variant to run.  **`sac` is the paper's pi0 setting.**\n\n"
+                             "`na` (noise-aliased) learns a critic on the **executed chunk**"
+                             " (1,600 dims) and distils a second critic on the noise (32 dims);"
+                             " the actor maximises the distilled one.  `sac` puts the noise itself"
+                             " in the action space, so there is one critic, its input is"
+                             " `obs + 32` instead of `obs + 1600`, and there is nothing to"
+                             " distil.\n\n"
+                             "Paper C.5: \"We use the DSRL-SAC variant of our method for these"
+                             " experiments\" (the pi0 / Libero / Aloha ones).  Table 4's robomimic"
+                             " runs use NA.  Our setup is a pi0-class VLA with a 50x32 chunk, so"
+                             " SAC is the aligned choice.  It also removes `--fresh-noise`,"
+                             " `--bootstrap-refresh` and the noise critic entirely: with the noise"
+                             " as the action, the bootstrap action is `actor(s')` and the replay"
+                             " row is already in the right space.")
     parser.add_argument("--critic-combine", choices=("min", "mean"), default="min",
                         help="how the twin critics are aggregated for the TD target and the actor's"
                              " objective.  The reference uses `min`.\n\n"
@@ -1124,15 +1171,29 @@ def main(argv: list[str] | None = None) -> int:
                              "`boot_min`, `boot_mean` and `head_gap` are logged every round"
                              " regardless, so `head_gap * 35.4` estimates the distortion without"
                              " trusting either the theory or this flag.")
-    parser.add_argument("--hidden", type=int, default=2048)
+    parser.add_argument("--hidden", type=int, default=128,
+                        help="MLP width for the actor and both critics.\n\n"
+                             "Paper Table 11 (pi0 column) says 128; Table 3 (the robomimic"
+                             " experiments) says 2048, and 2048 is what the reference repo"
+                             " defaults to.  The pi0 column is the one that matches this setup --"
+                             " a 1600-dim chunk and a VLA observation -- so 128 is the aligned"
+                             " value.  Parameter counts: 72.5 M at 2048 against 2.07 M at 128.")
     parser.add_argument("--utd", type=int, default=20,
                         help="gradient steps per RL step (paper §B)")
     parser.add_argument("--noise-critic-steps", type=int, default=10)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--tau", type=float, default=0.005)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--target-entropy", type=float, default=0.0,
+    parser.add_argument("--lr", type=float, default=3e-4,
+                        help="critic learning rate.  Paper Table 11 (pi0 column) gives 3e-4 for"
+                             " the critic and 1e-4 for the actor, so these are separate flags"
+                             " here.  They used to share one value at 3e-4, which is 3x the"
+                             " paper's actor rate -- and the recurring symptom across run8-run11"
+                             " was the actor leaving a good w=0 start and degrading the policy"
+                             " while the critic stayed fitted.")
+    parser.add_argument("--actor-lr", type=float, default=1e-4,
+                        help="actor learning rate.  Paper Table 11: 0.0001.  See `--lr`.")
+    parser.add_argument("--target-entropy", type=float, default=21.0,
                         help="the `log_prob` the learned `alpha` steers towards:"
                              " `d(alpha_loss)/d(log_alpha) = -(log_prob + target_entropy)`, so the"
                              " equilibrium is `log_prob = -target_entropy`.\n\n"
@@ -1291,9 +1352,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- networks ------------------------------------------------------------------------
     actor = NoiseActor(args.observation_dim, args.actor_dim, hidden=args.hidden).to(device)
-    critic = twin_critic(args.observation_dim, chunk_flat_dim, hidden=args.hidden).to(device)
-    critic_target = twin_critic(args.observation_dim, chunk_flat_dim, hidden=args.hidden).to(device)
-    critic_noise = twin_critic(args.observation_dim, args.actor_dim, hidden=args.hidden).to(device)
+    # `sac`: the action is the noise, so the critic sees `obs + actor_dim`.
+    # `na`:  the action is the executed chunk, so it sees `obs + chunk_flat_dim`, and a second
+    #        critic is distilled onto the noise space.
+    critic_action_dim = args.actor_dim if args.algorithm == "sac" else chunk_flat_dim
+    critic = twin_critic(args.observation_dim, critic_action_dim, hidden=args.hidden).to(device)
+    critic_target = twin_critic(args.observation_dim, critic_action_dim,
+                                hidden=args.hidden).to(device)
+    critic_noise = (None if args.algorithm == "sac"
+                    else twin_critic(args.observation_dim, args.actor_dim,
+                                     hidden=args.hidden).to(device))
     # Start every Q head at the value TD would drive it to (`--q-init`).  `critic_target` is copied
     # *after* this so the target network agrees from step 1; `critic_noise` gets the same bias
     # because it is distilled from `critic` and an untrained student at 0 would need to re-climb the
@@ -1301,7 +1369,8 @@ def main(argv: list[str] | None = None) -> int:
     q_init = analytic_value(args) if math.isnan(args.q_init) else args.q_init
     if q_init:
         set_output_bias(critic, q_init)
-        set_output_bias(critic_noise, q_init)
+        if critic_noise is not None:
+            set_output_bias(critic_noise, q_init)
     critic_target.load_state_dict(critic.state_dict())
     if q_init:
         horizon = max(1, int(args.max_control_steps / max(1, args.execute)))
@@ -1311,27 +1380,42 @@ def main(argv: list[str] | None = None) -> int:
               f" x {horizon} RL steps, batch mean; the start-state value would be"
               f" {start_value:+.1f} and using it is the 1.72x error this file records having made"
               " once already", flush=True)
+    noise_params = (0.0 if critic_noise is None
+                    else sum(p.numel() for p in critic_noise.parameters()) / 1e6)
+    print(f"[online] algorithm {args.algorithm}"
+          f" (critic action dim {critic_action_dim},"
+          f" {'no noise critic' if critic_noise is None else 'distilled noise critic'})",
+          flush=True)
     print(f"[online] actor {sum(p.numel() for p in actor.parameters()) / 1e6:.2f}M,"
           f" critic {sum(p.numel() for p in critic.parameters()) / 1e6:.2f}M,"
-          f" noise critic {sum(p.numel() for p in critic_noise.parameters()) / 1e6:.2f}M,"
+          f" noise critic {noise_params:.2f}M,"
           f" observation {args.observation_dim}, chunk {chunk_flat_dim},"
           f" noise {args.actor_dim}", flush=True)
 
     alpha = torch.zeros(1, requires_grad=True, device=device)
     optimizers = (
-        torch.optim.Adam(actor.parameters(), lr=args.lr),
+        torch.optim.Adam(actor.parameters(), lr=args.actor_lr),
         torch.optim.Adam(critic.parameters(), lr=args.lr),
-        torch.optim.Adam(critic_noise.parameters(), lr=args.lr),
+        # `None` under `sac`, where there is no distilled critic.  The loop that would use this is
+        # already skipped (`range(0 if critic_noise is None ...)`), so nothing dereferences it; the
+        # guard exists because `None.parameters()` would raise during setup, before any of that.
+        None if critic_noise is None else torch.optim.Adam(critic_noise.parameters(), lr=args.lr),
         torch.optim.Adam([alpha], lr=args.lr),
     )
     log_alpha = alpha
 
     replay = Replay(args.replay_capacity, args.observation_dim, args.actor_dim, chunk_flat_dim,
                     torch.device(device), keep_inputs=args.bootstrap_refresh > 0)
-    noise_bank = (NoiseBank(args.noise_bank_capacity, chunk_flat_dim, args.actor_dim,
+    noise_bank = (None if args.algorithm == "sac" else
+                  NoiseBank(args.noise_bank_capacity, chunk_flat_dim, args.actor_dim,
                             torch.device(device))
                   if args.fresh_noise > 0 else None)
-    bootstrap = BootstrapSet(torch.device(device)) if args.bootstrap_refresh > 0 else None
+    # `BootstrapSet` exists to re-denoise `chunk_next` with the *current* actor, which is what the
+    # reference's TD target needs.  Under `sac` the bootstrap action is the **noise**, and a noise
+    # vector does not depend on the policy at all -- it is the same number it was at collection
+    # time.  So there is nothing to refresh and re-encoding would be pure cost.
+    bootstrap = (None if args.algorithm == "sac" or args.bootstrap_refresh <= 0
+                 else BootstrapSet(torch.device(device)))
     print(f"[online] replay {args.replay_capacity} rows, {replay.bytes() / 1024 ** 3:.2f} GB on"
           f" {device}", flush=True)
     print(f"[online] noise-critic target: "
@@ -1380,9 +1464,11 @@ def main(argv: list[str] | None = None) -> int:
               " training set and the policy may be answering a different task than the scene"
               " presents.  Set A3_TRAINING_DATASET or pass --task-prompt.", flush=True)
     if args.eval_scenes > 0:
-        print(f"[online] scenes 0-{args.eval_scenes - 1} act greedily (tanh of the mean) and are"
-              f" reported as `greedy`; the other {args.scenes - args.eval_scenes} inject exploration"
-              " noise and are reported as `ret`", flush=True)
+        print(f"[online] scenes 0-{args.eval_scenes - 1} draw a **frame-fixed, round-fixed N(0,1)**"
+              f" and are reported as `eval`; the other {args.scenes - args.eval_scenes} draw the"
+              " actor's own samples and are reported as `ret`.  Both columns use the same envs and"
+              " the same 1500 control steps, so `eval - ret` is the cost of the actor's noise and"
+              " `eval` alone is the policy", flush=True)
     print(f"[online] entropy_in_target={args.entropy_in_target}  grad_clip={args.grad_clip:g}"
           f"  fresh_noise={args.fresh_noise}/scene/round  bootstrap_refresh={args.bootstrap_refresh}"
           "  (all four printed because three of them changed meaning while the DSRL loop was being"
@@ -1412,6 +1498,11 @@ def main(argv: list[str] | None = None) -> int:
         clock["render"] = time.monotonic() - started
         return observations, frames
 
+    #: Round counter the evaluation noise generator is seeded from.  A one-element list because
+    #: `forward_all` is defined before the training loop and closes over this container; the loop
+    #: assigns `eval_round[0] = round_index` at the top of each round.
+    eval_round = [0]
+
     def forward_all(observations, frames, clock: dict[str, float] | None = None) -> dict[str, Any]:
         """One batched pass: prefix, actor observation, noise, and the chunk to execute."""
         clock = clock if clock is not None else {}
@@ -1434,8 +1525,25 @@ def main(argv: list[str] | None = None) -> int:
             # regulating the *sampling* distribution -- feeding it the mode's (undefined) density
             # would make the temperature measure something the agent never samples from.
             if args.eval_scenes > 0:
-                greedy = torch.tanh(actor.forward(actor_obs[:args.eval_scenes]))
-                noise = torch.cat([greedy, noise[args.eval_scenes:]], dim=0)
+                # The evaluation rows draw a **fresh N(0,1)**, they do not use `tanh(mean)`.
+                #
+                # This used to be the greedy action, on the reasoning that zero noise is the
+                # policy's mode.  Measured on the reference implementation (see
+                # docs/dsrl-repro-reference.md): a converged diffusion policy scores **7 %** at
+                # w = 0 against **47 %** at w ~ N(0,1) and 70 % at std 0.5.  Zero noise is an
+                # input the policy was never trained on -- the sampler expects a unit Gaussian --
+                # so `greedy` was measuring out-of-distribution behaviour, and the run8-run11
+                # readings of "greedy fell while ret held" were that artefact, not policy damage.
+                #
+                # Fixed seed so the column is comparable across rounds: each evaluation row uses
+                # its own generator seeded by (round, row), which keeps the comparison paired
+                # without freezing the noise across the whole run.
+                generators = [torch.Generator(device=noise.device).manual_seed(
+                    1_000_003 * int(eval_round[0]) + i) for i in range(args.eval_scenes)]
+                eval_noise = torch.stack([
+                    torch.randn(args.actor_dim, device=noise.device, generator=g)
+                    for g in generators])
+                noise = torch.cat([eval_noise, noise[args.eval_scenes:]], dim=0)
             flat = repeat_noise(noise, args.chunk_size, args.action_dim, "single")
             chunk = sample_with_prefix(policy, prefix, flat, args.num_steps, device)
         clock["sample"] = time.monotonic() - started
@@ -1490,11 +1598,11 @@ def main(argv: list[str] | None = None) -> int:
     transitions = 0
     episodes = 0
     episode_returns: list[float] = []
-    #: Returns of the `--eval-scenes` greedy scenes, kept apart from `episode_returns` because the
+    #: Returns of the `--eval-scenes` fixed-noise scenes, kept apart from `episode_returns` because
     #: whole point is to compare a policy acting deterministically against one acting with
     #: exploration noise.  Both are cookie counts over full episodes, so both are comparable to the
     #: 13.18-cookie baseline; only the greedy one measures the policy rather than the noise.
-    greedy_returns: list[float] = []
+    eval_returns: list[float] = []
     recent_rewards: list[float] = []
     #: `(q, theoretical discounted value, horizon)` for finished episodes.  This is the acceptance
     #: criterion for the bootstrap fix: `q` must track the theory instead of diverging from it.
@@ -1505,6 +1613,7 @@ def main(argv: list[str] | None = None) -> int:
     rounds_done = 0
 
     for round_index in range(round_limit):
+        eval_round[0] = round_index
         if not args.rounds and time.monotonic() > deadline:
             print(f"[online] time budget reached after {round_index} rounds", flush=True)
             break
@@ -1562,8 +1671,8 @@ def main(argv: list[str] | None = None) -> int:
             if not dones[i]:
                 continue
             if i < args.eval_scenes:
-                greedy_returns.append(scene.episode_return)
-                del greedy_returns[:-200]
+                eval_returns.append(scene.episode_return)
+                del eval_returns[:-200]
             else:
                 episode_returns.append(scene.episode_return)
                 del episode_returns[:-200]
@@ -1619,6 +1728,9 @@ def main(argv: list[str] | None = None) -> int:
                 done=torch.tensor(float(dones[i]), device=device),
                 obs_next=state_next["actor_obs"][i],
                 chunk_next=state_next["chunk_scaled"][i],
+                # `s'`'s noise is the actor's own draw at the next state, which is exactly what
+                # SAC wants for `a'`.  Under `na` nothing reads this column.
+                noise_next=state_next["noise"][i],
                 next_inputs=(
                     {"images": torch.as_tensor(
                         np.stack([frames_next[i][name] for name in CAMERAS])),
@@ -1638,11 +1750,11 @@ def main(argv: list[str] | None = None) -> int:
             wall = time.monotonic() - started
             control = rounds_done * args.execute * args.scenes
             recent = episode_returns[-20:]
-            greedy = greedy_returns[-20:]
+            fixed = eval_returns[-20:]
             line = (f"[online] r{rounds_done:5d}  steps {transitions:6d}  ep {episodes:4d}"
                     f"  ret {np.mean(recent) if recent else float('nan'):8.2f}"
-                    f"  greedy {np.mean(greedy) if greedy else float('nan'):7.2f}"
-                    f" (+{len(greedy)})"
+                    f"  eval {np.mean(fixed) if fixed else float('nan'):7.2f}"
+                    f" (+{len(fixed)})"
                     f"  rew {np.mean(recent_rewards):7.3f}"
                     f"  nz {(np.asarray(recent_rewards) != 0).mean() * 100:5.1f}%"
                     f"  ctrl/s {control / wall:6.1f}")
@@ -1717,20 +1829,20 @@ def main(argv: list[str] | None = None) -> int:
                 slope = np.polyfit(nefcs, times * 1000, 1)
                 print(f"[online]   ms ~ {slope[0]:.5f} * nefc + {slope[1]:.2f}", flush=True)
             del order
-    if episode_returns or greedy_returns:
+    if episode_returns or eval_returns:
         if episode_returns:
             print(f"[online] episode return (stochastic, {args.scenes - args.eval_scenes} scenes):"
                   f" mean {np.mean(episode_returns):.2f}  median {np.median(episode_returns):.2f}"
                   f"  max {np.max(episode_returns):.2f} (n={len(episode_returns)})", flush=True)
-        if greedy_returns:
+        if eval_returns:
             print(f"[online] episode return (greedy, {args.eval_scenes} scenes):"
-                  f" mean {np.mean(greedy_returns):.2f}"
-                  f"  median {np.median(greedy_returns):.2f}"
-                  f"  max {np.max(greedy_returns):.2f} (n={len(greedy_returns)})", flush=True)
+                  f" mean {np.mean(eval_returns):.2f}"
+                  f"  median {np.median(eval_returns):.2f}"
+                  f"  max {np.max(eval_returns):.2f} (n={len(eval_returns)})", flush=True)
             # The two together are the diagnosis: a greedy return that holds while the stochastic one
             # falls means the exploration noise widened, not that the policy got worse.  run8 could
             # not tell those apart, which is why this exists.
-            print(f"[online]   greedy vs 13.18 baseline: {np.mean(greedy_returns) / 13.18 * 100:.0f}%"
+            print(f"[online]   greedy vs 13.18 baseline: {np.mean(eval_returns) / 13.18 * 100:.0f}%"
                   "  -- this is the number that measures the policy rather than the noise.",
                   flush=True)
     if recent_rewards:
