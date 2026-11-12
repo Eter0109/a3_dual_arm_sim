@@ -357,10 +357,20 @@ def main() -> int:
             extra["temporal_ensemble_coeff"] = args.temporal_ensemble_coeff
         checkpoint = args.policy.split(":", 1)[1]
         if args.policy.startswith("pi05:"):
-            if (args.task == "2x5" and args.prompt_style != "pi05_aligned") or (
-                args.task not in ("2x5", *SCENARIO_TASKS)
-            ):
-                parser.error("pi05: requires 2x5 with pi05_aligned or a scenario task")
+            # 2x5 needs `pi05_aligned` because its benchmark can emit four different
+            # sentences and the checkpoint was fine-tuned on exactly one of them.
+            # 2x10 does not: its instruction comes from the plan
+            # (`Cookie2x10Plan.prompt`, sampled per seed), and `--prompt-style` only
+            # reaches `_episode_task` for "short" -- so there is no alignment flag to
+            # ask for.
+            needs_alignment = (
+                args.task == "2x5" and args.prompt_style != "pi05_aligned"
+            )
+            if needs_alignment or args.task not in ("2x5", "2x10", *SCENARIO_TASKS):
+                parser.error(
+                    "pi05: requires 2x5 with --prompt-style pi05_aligned, or --task 2x10, "
+                    "or a scenario task"
+                )
             # Not a parser error: the checkpoint can be *loaded* on any scene, and
             # `--pi05-scene-mode cameras` is a legitimate comparison. But this
             # adapter's numbers are only comparable with the published ones when the
@@ -371,6 +381,17 @@ def main() -> int:
                 print(
                     "[benchmark] pi05: this scenario tests scene and task generalization; "
                     "its result is not a reproduction of the checkpoint's training scene.",
+                    flush=True,
+                )
+            elif args.task == "2x10":
+                # `--pi05-scene` is a 2x5 arrangement and is rejected for 2x10 above,
+                # so the warning below must not advise passing it. 2x10 needs no
+                # fingerprint: `configs/cookie_2x10.yaml` states that robot, cookies,
+                # source box, cameras and physics match `cookie_batch.yaml`, and those
+                # cameras are already the training cameras.
+                print(
+                    "[benchmark] pi05: 2x10 uses its own config (cookie_2x10.yaml); "
+                    "no --pi05-scene fingerprint is needed or accepted.",
                     flush=True,
                 )
             elif args.pi05_scene is None or args.pi05_scene_mode != "full":
