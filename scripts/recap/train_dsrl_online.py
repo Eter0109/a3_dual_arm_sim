@@ -706,6 +706,32 @@ def clip_gradients(module: torch.nn.Module, limit: float) -> float:
         module.parameters(), limit if limit > 0 else float("inf")))
 
 
+def combine_heads(stacked: torch.Tensor, how: str) -> torch.Tensor:
+    """Aggregate the twin critics' outputs, `stacked` shaped `(heads, batch, 1)`.
+
+    `min` is what the reference uses (`critic_backup_combine_type: min`), and it is biased **low**:
+    for two roughly Gaussian heads, `E[min(a, b)] = mu - sigma/sqrt(pi)`, i.e. about `0.56 sigma`
+    below the mean.  At a TD fixed point that bias is not a one-off -- it is applied at every
+    bootstrap, so it compounds by `1/(1-gamma)`.  `probe_min_bias.py` measured it directly under a
+    sparse reward: `min` settled at -0.631 where `mean` settled at +0.668 and a single head at
+    +0.564.
+
+    Under `--reward paper` the compounding is what makes it visible rather than marginal.  With
+    `r = -16` per RL step, `gamma = 0.99` and a 93-step episode, the finite-horizon factor is 35.4,
+    so an offset of `delta` per step moves `q` by `35.4 * delta`.  run10's `q` reached -755 where
+    the reward bounds allow no value below -566, so the offset there was at least 5.3 per step --
+    larger than a third of the reward itself.
+
+    `mean` has no such bias but loses the conservatism that makes `min` a variance penalty in the
+    overestimation sense.  Which one is right here is an empirical question, so both are logged
+    every round (`boot_min`, `boot_mean`, `head_gap`) and this flag only chooses which one the
+    target uses.
+    """
+    if how == "mean":
+        return stacked.mean(dim=0)
+    return stacked.min(dim=0).values
+
+
 def analytic_value(args) -> float:
     """The value a uniformly sampled replay state should have, from `args` alone.
 
@@ -779,9 +805,15 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         # `--bootstrap-refresh 0` it is the collection-time chunk and the target is frozen on the
         # behaviour policy -- the configuration that biased Q down by 4.3 cookies in run4.
         with torch.no_grad():
-            next_q = torch.min(
-                torch.stack([head(data["obs_next"], data["chunk_next"]) for head in critic_target]),
-                dim=0).values
+            stacked_next = torch.stack(
+                [head(data["obs_next"], data["chunk_next"]) for head in critic_target])
+            next_q = combine_heads(stacked_next, args.critic_combine)
+            # Both aggregates are recorded every round, whatever `--critic-combine` says, because
+            # their difference **is** the bias being studied: `E[min(a,b)] = mu - sigma/sqrt(pi)` for
+            # two heads, so `mean - min` estimates `sigma/sqrt(pi)` directly and needs no theory.
+            # Without this column the choice between them is untestable except by two 12-hour runs.
+            boot_min = stacked_next.min(dim=0).values
+            boot_mean = stacked_next.mean(dim=0)
             if args.entropy_in_target:
                 _, next_log_prob = actor.sample(data["obs_next"])
                 next_q = next_q - log_alpha.exp().detach() * next_log_prob
@@ -830,8 +862,8 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
 
         sampled, log_prob = actor.sample(state)
         alpha = log_alpha.exp().detach()
-        min_q = torch.min(torch.stack([head(state, sampled) for head in critic_noise]),
-                          dim=0).values
+        stacked_pi = torch.stack([head(state, sampled) for head in critic_noise])
+        min_q = combine_heads(stacked_pi, args.critic_combine)
         # The actor's objective is **not** rescaled here.
         #
         # It used to be divided by `--reward-scale`, a knob that existed to make the sparse reward
@@ -870,6 +902,9 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
             "u_abs": float(sampled.detach().abs().mean()),
             "sigma": float(actor.log_std.detach().clamp(-20.0, 2.0).exp().mean()),
             "target_q": float(target_q.detach().mean()),
+            "boot_min": float(boot_min.mean()),
+            "boot_mean": float(boot_mean.mean()),
+            "head_gap": float((boot_mean - boot_min).mean()),
         })
 
     # --- the reference's separate noise-critic loop, `noise_critic_steps` fresh batches ------
@@ -1073,6 +1108,22 @@ def main(argv: list[str] | None = None) -> int:
                              " `Q`), so this removes the transient without changing the objective."
                              "\n\n"
                              "0 reproduces the old behaviour and is the A/B arm.")
+    parser.add_argument("--critic-combine", choices=("min", "mean"), default="min",
+                        help="how the twin critics are aggregated for the TD target and the actor's"
+                             " objective.  The reference uses `min`.\n\n"
+                             "`min` is biased low by `E[min(a,b)] = mu - sigma/sqrt(pi)` for two"
+                             " heads, and a TD fixed point applies that at **every** bootstrap, so it"
+                             " compounds by `1/(1-gamma)`.  Measured under sparse reward in"
+                             " `probe_min_bias.py`: `min` -0.631, `mean` +0.668, single head"
+                             " +0.564.\n\n"
+                             "run10 made the compounding visible: with `--reward paper` the"
+                             " finite-horizon factor is 35.4, and `q` reached -755 where the reward"
+                             " bounds imply no value below -566.  That is impossible for a correct"
+                             " estimate at any policy, so at least 5.3 per RL step was bias -- a"
+                             " third of the reward itself.\n\n"
+                             "`boot_min`, `boot_mean` and `head_gap` are logged every round"
+                             " regardless, so `head_gap * 35.4` estimates the distortion without"
+                             " trusting either the theory or this flag.")
     parser.add_argument("--hidden", type=int, default=2048)
     parser.add_argument("--utd", type=int, default=20,
                         help="gradient steps per RL step (paper §B)")
@@ -1315,6 +1366,19 @@ def main(argv: list[str] | None = None) -> int:
     scenes = [make_scene(index, 0) for index in range(args.scenes)]
     pool = ThreadPoolExecutor(max_workers=args.scenes)
     print(f"[online] {args.scenes} scenes up; instruction {task!r}", flush=True)
+    # Which sentence reached the VLA, said out loud and *why*, because run4-run10 all trained a
+    # 2x10 scene on a 2x5 sentence and nothing in the log showed it.  `training_prompt()` reads
+    # `A3_TRAINING_DATASET` when set and otherwise falls back to a hard-coded string from
+    # `a3_b2_merged`; the fallback does not appear anywhere in the v9 training set, so leaving the
+    # variable unset is a correctness bug rather than a default.
+    if os.environ.get("A3_TRAINING_DATASET"):
+        print(f"[online]   from A3_TRAINING_DATASET={os.environ['A3_TRAINING_DATASET']}",
+              flush=True)
+    else:
+        print("[online]   WARNING: A3_TRAINING_DATASET is unset, so this is the embedded"
+              " a3_b2_merged sentence, not this checkpoint's.  It will not appear in the v9"
+              " training set and the policy may be answering a different task than the scene"
+              " presents.  Set A3_TRAINING_DATASET or pass --task-prompt.", flush=True)
     if args.eval_scenes > 0:
         print(f"[online] scenes 0-{args.eval_scenes - 1} act greedily (tanh of the mean) and are"
               f" reported as `greedy`; the other {args.scenes - args.eval_scenes} inject exploration"
@@ -1589,6 +1653,11 @@ def main(argv: list[str] | None = None) -> int:
             for key in ("reward_b", "boot_b", "done_frac", "q_gap", "grad_norm"):
                 if key in step_stats:
                     line += f"  {key} {step_stats[key]:+.4f}"
+            # The twin-critic bias, measured rather than assumed: `head_gap` is the mean and min of
+            # two heads differing, which estimates `sigma/sqrt(pi)` directly.
+            for key in ("boot_min", "boot_mean", "head_gap"):
+                if key in step_stats:
+                    line += f"  {key} {step_stats[key]:+.2f}"
             if "bootstrap_rows" in step_stats:
                 line += f"  boot_rows {step_stats['bootstrap_rows']:.0f}"
             if calibration:
