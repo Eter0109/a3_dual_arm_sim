@@ -88,13 +88,14 @@ Read against `stable_baselines3/dsrl/dsrl.py:230-365` and `refs/dsrl/cfg/robomim
 | 8 | `batch_size 256`, `utd 20`, `noise_critic_grad_steps 10`, `tau 0.005`, `gamma 0.99`, `layer_size 2048`, `num_layers 3`, `action_magnitude 1.5`, `n_critics 2`, min-combine | same | identical |
 | 9 | `learning_starts = 1` after `init_rollout_steps = 1501` | `--learning-starts 256` after `--warmup-rounds 8` | scale-adapted; an episode here is 1,382 control steps, not 300. |
 | 10 | env reward: robomimic's `-1` per step | `--reward paper`: `level_sum - offset * execute` | necessary, and now the same construction rather than an approximation of it.  This environment's own reward is a *level*; subtracting 1 per control step reproduces robomimic's timer exactly. |
-| 11 | **no gradient clipping** (`clip_grad_norm_` is in SB3's `a2c`/`dqn`/`ppo`, absent from `sac.py` and `dsrl.py`) | `--grad-clip 0`, i.e. none | aligned.  This row exists because the help text previously claimed the reference used SB3's 10.0, which is A2C's and PPO's default, not SAC's. |
+| 11 | **no gradient clipping** (`clip_grad_norm_` is in SB3's `a2c`/`dqn`/`ppo`, absent from `sac.py` and `dsrl.py`) | `--grad-clip 1000` from run13 on | **deliberate deviation, and it covers the actor too** (the old code clipped only the two critics).  Not aligned any more, and the threshold is not SB3's 10.0: under `--reward paper` the value scale is `-execute/(1-gamma)`, so 10 would rescale every update.  run12 measured critic norms from 29 to 57,239 at `--execute 20` with 1.0 M parameters; 1000 bounds the tail and leaves the rest. |
 | 12 | `ent_coef * next_log_prob` subtracted from the TD target (`dsrl.py:286`) | `--entropy-in-target`, **off** | deliberate deviation, on evidence.  The term compounds to `alpha*|log pi|/(1-gamma)`, which at initialisation is 2143 against a true return of about -978.  run9 turned it on and measured the cost: at matched rounds it returned 3.70 where run8 (off) returned 6.30, with the same `q`.  The reference absorbs the same transient over ~250k RL steps; this loop has 2,166. |
 | 13 | evaluates with `deterministic_eval` | `--eval-scenes 1`: 1 of 8 collection scenes uses a **seeded N(0,1)**, not `tanh(mean)` | earlier versions used zero noise, which the reference implementation showed is out of distribution (7 %% against 47 %% at w ~ N(0,1)).  The fixed noise is a fresh draw per round and identical across runs. |
 | 15 | **`DSRL-SAC`** for the pi0 experiments (paper §C.5) | `--algorithm sac` (default): critic sees obs + **32-dim noise**, no distilled critic | the paper's pi0 setting.  `--algorithm na` keeps the previous `dsrl_na` path for comparison; it needs a critic over the 1600-dim chunk plus a 26 M noise critic and its distillation. |
 | 16 | `hidden size 128`, `actor lr 1e-4`, `critic lr 3e-4` (Table 11, pi0 columns) | `--hidden 128`, `--actor-lr 1e-4`, `--lr 3e-4` | aligned.  Was `hidden 2048` with one shared 3e-4, i.e. 35x the parameters and 3x the actor step. |
 | 17 | `target_entropy = -d/2 = -16` (Table 11) | `--target-entropy 21` | **deliberate deviation.**  The equilibrium is `log_prob = -target_entropy`; this checkpoint's measured initial `log_prob` is about -21, so 21 pins `alpha` at its initial value.  Measured on the reference: with `target_entropy 0` alpha decayed 10x and `log_prob` drifted -18.4 -> -0.6, and setting the positive value held `log_prob` at -18 for the whole run.  Also requires `--entropy-in-target` off, or the pinned alpha keeps the entropy bonus permanently on. |
 | 14 | critic output starts at 0 (SB3 default init) | `--q-init` auto: output bias at the analytic batch-mean value, about -566 | deliberate, and the largest structural difference in this table.  The value is not a knob being tuned: it is where TD would put the head anyway, and run9 showed the cost of starting 566 units away (650 rounds to travel 391).  A constant on the output is invisible to the actor's gradient, which sees `dQ/da` rather than `Q`, so the objective is unchanged. |
+| 18 | truncation is `done` (`ActionChunkWrapper` sets `done=True` at `max_episode_steps`, `truncated` always `False` -- their issue #6) | same: truncation cuts the bootstrap | **same defect, and it is a real one.**  `observation.state` is 16 joint/gripper values and carries **no episode time**, so aliased states receive one value.  With only `1/horizon` of the batch terminalised, the bootstrapped fixed point is `r/(1-gamma*(1-p))`, not the batch mean TD would otherwise reach.  At `--execute 20` those are -862 against -602 (1.43x); at `--execute 5` they are -376 against -343 (1.10x).  run12 was measured sliding -712 -> -760 toward the predicted -907.6.  Shorter `--execute` therefore *reduces* the bias as a side effect of the longer RL horizon. |
 
 Rows 1 and 2 were both recorded as **open** substantive gaps for several runs after they had in fact
 been closed, which is its own kind of bug: a stale alignment table sends the next diagnosis to the
@@ -708,12 +709,21 @@ def actor_observation(policy, prepared: dict, prefix, projection: torch.Tensor,
 def clip_gradients(module: torch.nn.Module, limit: float) -> float:
     """Gradient-norm clip, returning the norm.  `limit <= 0` means **do not clip**.
 
+    Called on the **actor** and on both critics; it used to be called on the critics only, which
+    left the actor unbounded and made the logged `grad_norm` ambiguous.
+
     The reference does not clip at all.  `clip_grad_norm_` appears in this vendored SB3 in `a2c`,
     `dqn` and `ppo` -- and **nowhere in `sac.py`, `off_policy_algorithm.py` or `dsrl.py`**.  The
     help text for `--grad-clip` used to say "the reference inherits SB3's default of 10.0", which is
     true of A2C and PPO and false of the algorithm this file reproduces.  So `--grad-clip 1000` in
     run8 was already behaving like the reference while being *documented* as a deviation, and a clip
     of 10 would have been an undocumented deviation presented as alignment.
+
+    **The threshold is a property of the value scale, not a constant.**  `--reward paper` fixes
+    `Q` near `-offset*execute/(1-gamma)` -- about -600 at `--execute 20`, -340 at `--execute 5` --
+    so the same clip means something completely different at the two settings.  run12 logged critic
+    norms from 29 to 57,239 at `--execute 20`; run13 starts at `--grad-clip 1000`, which leaves the
+    sub-1,000 majority alone and bounds only the runaway tail.
 
     Clipping to `inf` is a no-op that still returns the norm, which is why one code path serves both.
     """
@@ -900,6 +910,13 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         actor_loss = (alpha * log_prob - min_q).mean()
         actor_optimizer.zero_grad()
         actor_loss.backward()
+        # `--grad-clip` covers the actor too, which it did **not** before: `clip_gradients` was
+        # called on `critic` and `critic_noise` only, so the logged `grad_norm` was the critic's and
+        # the actor had no bound at all.  That gap mattered once the critic's value scale grew (run12
+        # reached `q` -760 against the reference's -50), because `actor_loss = alpha*log_prob - min_q`
+        # then carries a term of the same size and its gradient grows with it.  Reporting the two
+        # norms separately is the point: one number cannot say which network moved.
+        actor_grader = clip_gradients(actor, args.grad_clip)
         actor_optimizer.step()
 
         alpha_loss = -(log_alpha * (log_prob + args.target_entropy).detach()).mean()
@@ -919,6 +936,7 @@ def gradient_steps(args, actor, critic, critic_target, critic_noise, log_alpha, 
         stats.update({
             "critic_loss": float(critic_loss.detach()),
             "actor_loss": float(actor_loss.detach()),
+            "actor_grad_norm": float(actor_grader),
             "alpha": float(alpha),
             "q": float(q_values.detach().mean()),
             "min_q": float(min_q.detach().mean()),
@@ -1248,18 +1266,23 @@ def main(argv: list[str] | None = None) -> int:
                              " does line the two up.\n\n"
                              " 0 disables the divisor entirely and matches `dsrl_na` exactly.")
     parser.add_argument("--grad-clip", type=float, default=0.0,
-                        help="gradient-norm clip for both critics.  **0 means do not clip, which"
-                             " is what the reference does.**\n\n"
+                        help="gradient-norm clip for the **actor and both critics**.  **0 means do"
+                             " not clip, which is what the reference does.**\n\n"
                              "This help text used to claim \"the reference inherits SB3's default of"
                              " 10.0\".  It does not: `clip_grad_norm_` appears in this vendored SB3"
                              " in `a2c`, `dqn` and `ppo`, and nowhere in `sac.py`,"
                              " `off_policy_algorithm.py` or `dsrl.py`.  The claim was true of A2C and"
                              " PPO and false of the algorithm being reproduced.\n\n"
-                             "A positive value is therefore a deliberate deviation.  It is tempting"
-                             " under a sparse reward, where the TD target is order 1 and SB3's 10.0"
-                             " looks harmless; under `--reward paper` the target is about -978, so any"
-                             " finite clip squashes essentially every gradient to the same norm and"
-                             " silently rescales the learning rate.")
+                             "A positive value is therefore a deliberate deviation.  The value has to"
+                             " be chosen against the **value scale**, not copied from SB3's 10.0: under"
+                             " `--reward paper` the critic settles near `-offset*execute/(1-gamma)`,"
+                             " which is about -600 at `--execute 20` but only -340 at `--execute 5`, and"
+                             " the observed critic norm at `--execute 20` ranged from 29 to 57,000.  A"
+                             " clip of 10 would rescale essentially every update and silently cut the"
+                             " learning rate by orders of magnitude; a clip near the top of the"
+                             " observed range bounds only the outlier batches that would otherwise"
+                             " poison Adam's second moment.  The actor's norm is logged as"
+                             " `actor_grad_norm` so the two scales can be compared before choosing.")
     parser.add_argument("--bootstrap-refresh", type=int, default=32,
                         help="replay rows per round whose `chunk_next` is recomputed with the"
                              " **current** actor, ~40 ms/row (measured; `encode_prefix` is linear,"
@@ -1758,7 +1781,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"  rew {np.mean(recent_rewards):7.3f}"
                     f"  nz {(np.asarray(recent_rewards) != 0).mean() * 100:5.1f}%"
                     f"  ctrl/s {control / wall:6.1f}")
-            for key in ("critic_loss", "noise_critic_loss", "actor_loss", "alpha", "q",
+            for key in ("critic_loss", "noise_critic_loss", "actor_loss", "actor_grad_norm",
+                        "alpha", "q",
                         "min_q", "log_prob", "u_abs", "sigma", "target_q"):
                 if key in step_stats:
                     line += f"  {key} {step_stats[key]:.4f}"
