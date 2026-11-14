@@ -121,13 +121,16 @@ def test_random_is_repeatable_and_uses_one_draw_per_episode():
     assert all(p.batch_sizes[0] == p.batch_sizes[2] for p in plans)
 
 
-def test_only_target_box_and_slots_change_in_new_scene():
+def test_only_target_layout_and_source_layout_change_in_new_scene():
     old = asdict(load_config(ROOT / "configs/cookie_batch.yaml"))
     new = asdict(load_config(ROOT / "configs/cookie_2x10.yaml"))
     assert len(old["cookie_transfer"]["target_slots_local_m"]) == 10
     assert len(new["cookie_transfer"]["target_slots_local_m"]) == 20
     assert "target_rows" not in old["cookie_transfer"]
-    for key in ("target_bin_half_size_m", "target_slots_local_m"):
+    for key in (
+        "target_bin_half_size_m", "target_slots_local_m", "cookie_source_positions_m",
+        "source_bin_center_m",
+    ):
         old["cookie_transfer"].pop(key)
         new["cookie_transfer"].pop(key)
     assert new == old
@@ -284,10 +287,10 @@ def test_twenty_runner_scores_twenty_and_stores_joint_actions():
 
 @pytest.mark.parametrize("n", [0, 3, 9, "random"])
 def test_dataset_audit_checks_actual_plan_and_prompt(tmp_path, n):
-    from a3_dual_arm_sim.data.audit import CAMERA_KEYS, audit_training_dataset
-
     import pyarrow as pa
     import pyarrow.parquet as pq
+
+    from a3_dual_arm_sim.data.audit import CAMERA_KEYS, audit_training_dataset
 
     root = tmp_path / "dataset"
     (root / "meta").mkdir(parents=True)
