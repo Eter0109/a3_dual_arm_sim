@@ -1,6 +1,11 @@
 """Inference adapter for the A3 Cookie π₀.₅ checkpoint.
 
-**The checkpoint only works on the arrangement it was trained on, so
+The following scene-restoration guidance and measurements describe a specific
+2x5 checkpoint; they do not establish compatibility for 2x10 checkpoints. A
+2x10 task uses its own scene configuration and cannot accept the 2x5 scene
+fingerprint.
+
+**That 2x5 checkpoint only works on the arrangement it was trained on, so
 ``--pi05-scene ... --pi05-scene-mode full`` is required, not optional.**
 
 π₀.₅ is fine-tuned on one fixed scene and has no history, so every frame it sees must

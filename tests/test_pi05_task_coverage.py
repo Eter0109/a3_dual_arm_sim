@@ -42,6 +42,7 @@ def run_cli(*args):
         cwd=ROOT,
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
@@ -65,8 +66,26 @@ def test_pi05_reaches_the_launcher_for_supported_tasks(extra):
     """
     result = run_cli("--policy", CHECKPOINT, "--episodes", "1", "--max-steps", "1", *extra)
     text = error_text(result)
+    assert result.returncode != 0
+    assert "Missing policy checkpoint config:" in text, text
     assert "pi05: requires" not in text, text
     assert "not a valid choice" not in text, text
+
+
+def test_pi05_on_2x10_warns_that_the_training_scene_is_unverified():
+    result = run_cli("--policy", CHECKPOINT, "--task", "2x10", "--episodes", "1", "--max-steps", "1")
+    text = error_text(result)
+    assert "training scene is not verified" in text, text
+    assert "--pi05-scene is only supported for 2x5" in text, text
+    assert "Missing policy checkpoint config:" in text, text
+
+
+def test_pi05_on_2x10_warns_when_using_the_short_prompt():
+    result = run_cli(
+        "--policy", CHECKPOINT, "--task", "2x10", "--prompt-style", "short",
+        "--episodes", "1", "--max-steps", "1",
+    )
+    assert "--prompt-style short replaces the native 2x10 plan" in error_text(result)
 
 
 def test_pi05_on_2x5_still_requires_the_aligned_prompt():

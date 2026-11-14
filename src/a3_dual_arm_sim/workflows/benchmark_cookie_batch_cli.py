@@ -384,16 +384,21 @@ def main() -> int:
                     flush=True,
                 )
             elif args.task == "2x10":
-                # `--pi05-scene` is a 2x5 arrangement and is rejected for 2x10 above,
-                # so the warning below must not advise passing it. 2x10 needs no
-                # fingerprint: `configs/cookie_2x10.yaml` states that robot, cookies,
-                # source box, cameras and physics match `cookie_batch.yaml`, and those
-                # cameras are already the training cameras.
+                # The 2x5 fingerprint cannot restore a 2x10 scene. The 2x10
+                # layout may differ from a checkpoint's training scene, so do
+                # not imply that scene compatibility has been established.
                 print(
-                    "[benchmark] pi05: 2x10 uses its own config (cookie_2x10.yaml); "
-                    "no --pi05-scene fingerprint is needed or accepted.",
+                    "[benchmark] pi05: WARNING -- 2x10 uses cookie_2x10.yaml; "
+                    "compatibility with this checkpoint's training scene is not verified. "
+                    "--pi05-scene is only supported for 2x5.",
                     flush=True,
                 )
+                if args.prompt_style == "short":
+                    print(
+                        "[benchmark] pi05: WARNING -- --prompt-style short replaces the "
+                        "native 2x10 plan; verify it matches checkpoint training.",
+                        flush=True,
+                    )
             elif args.pi05_scene is None or args.pi05_scene_mode != "full":
                 print(
                     "[benchmark] pi05: WARNING -- a π₀.₅ checkpoint is scene-specific and\n"
