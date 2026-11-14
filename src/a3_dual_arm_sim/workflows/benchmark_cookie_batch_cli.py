@@ -357,10 +357,20 @@ def main() -> int:
             extra["temporal_ensemble_coeff"] = args.temporal_ensemble_coeff
         checkpoint = args.policy.split(":", 1)[1]
         if args.policy.startswith("pi05:"):
-            if (args.task == "2x5" and args.prompt_style != "pi05_aligned") or (
-                args.task not in ("2x5", *SCENARIO_TASKS)
-            ):
-                parser.error("pi05: requires 2x5 with pi05_aligned or a scenario task")
+            # 2x5 needs `pi05_aligned` because its benchmark can emit four different
+            # sentences and the checkpoint was fine-tuned on exactly one of them.
+            # 2x10 does not: its instruction comes from the plan
+            # (`Cookie2x10Plan.prompt`, sampled per seed), and `--prompt-style` only
+            # reaches `_episode_task` for "short" -- so there is no alignment flag to
+            # ask for.
+            needs_alignment = (
+                args.task == "2x5" and args.prompt_style != "pi05_aligned"
+            )
+            if needs_alignment or args.task not in ("2x5", "2x10", *SCENARIO_TASKS):
+                parser.error(
+                    "pi05: requires 2x5 with --prompt-style pi05_aligned, or --task 2x10, "
+                    "or a scenario task"
+                )
             # Not a parser error: the checkpoint can be *loaded* on any scene, and
             # `--pi05-scene-mode cameras` is a legitimate comparison. But this
             # adapter's numbers are only comparable with the published ones when the
@@ -373,6 +383,22 @@ def main() -> int:
                     "its result is not a reproduction of the checkpoint's training scene.",
                     flush=True,
                 )
+            elif args.task == "2x10":
+                # The 2x5 fingerprint cannot restore a 2x10 scene. The 2x10
+                # layout may differ from a checkpoint's training scene, so do
+                # not imply that scene compatibility has been established.
+                print(
+                    "[benchmark] pi05: WARNING -- 2x10 uses cookie_2x10.yaml; "
+                    "compatibility with this checkpoint's training scene is not verified. "
+                    "--pi05-scene is only supported for 2x5.",
+                    flush=True,
+                )
+                if args.prompt_style == "short":
+                    print(
+                        "[benchmark] pi05: WARNING -- --prompt-style short replaces the "
+                        "native 2x10 plan; verify it matches checkpoint training.",
+                        flush=True,
+                    )
             elif args.pi05_scene is None or args.pi05_scene_mode != "full":
                 print(
                     "[benchmark] pi05: WARNING -- a π₀.₅ checkpoint is scene-specific and\n"
