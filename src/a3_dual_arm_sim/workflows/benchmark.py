@@ -134,6 +134,9 @@ class CookieBatchBenchmark(EpisodeExecution):
                     "tilt_level": getattr(self, "tilt_level", None),
                     "box_quota": getattr(self, "box_quota", None),
                     "success_hold_steps": self.success_hold_steps,
+                    "complete_demonstrations": self.complete_demonstrations,
+                    "strict_policy_completion": self.strict_policy_completion,
+                    "placement_order": self.placement_order,
                     "slot_tolerance_m": self.config.cookie_transfer.target_slot_tolerance_m,
                     "wall_contact_tolerance_m": self.wall_contact_tolerance_m,
                     "policy": policy_spec,
@@ -273,6 +276,8 @@ class CookieScenarioBenchmark(CookieBatchBenchmark):
         self.required_cookies = (2 * self.box_quota if self.box_quota is not None
                                  else 5 if scenario == "prefilled" else 10)
         super().__init__(**kwargs)
+        if self.scene_options.enabled:
+            raise ValueError("scene randomization options apply only to tasks 2x5 and 2x10")
         if scenario == "two-boxes":
             scene = self.config.cookie_transfer
             x, y, z = scene.target_bin_world_position_m
@@ -365,6 +370,9 @@ def _run_single_episode_worker(args: dict[str, Any]) -> EpisodeScore:
         tilt_level=args.get("tilt_level"),
         box_quota=args.get("box_quota"),
         success_hold_steps=args.get("success_hold_steps", 5),
+        complete_demonstrations=args.get("complete_demonstrations", False),
+        strict_policy_completion=args.get("strict_policy_completion", False),
+        placement_order=args.get("placement_order", "canonical"),
         slot_tolerance_m=args.get("slot_tolerance_m", (0.015, 0.005)),
         wall_contact_tolerance_m=args.get("wall_contact_tolerance_m", 0.030),
         config_path=args["config_path"],

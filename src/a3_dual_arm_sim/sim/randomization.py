@@ -9,6 +9,7 @@ import numpy as np
 import yaml
 
 from a3_dual_arm_sim.paths import resource_root
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ def load_randomization_config(path=None, *, config=None):
     if config is None:
         with Path(path or DEFAULT_RANDOMIZATION_CONFIG).open(encoding="utf-8") as stream:
             config = yaml.safe_load(stream)
-    if not isinstance(config, dict) or set(config) != {
+    if not isinstance(config, dict) or set(config) - {"scene"} != {
         "version",
         "profile",
         "source_column",
@@ -93,13 +94,20 @@ def load_randomization_config(path=None, *, config=None):
     column = str(config["source_column"])
     if column not in ("1", "2", "3", "4", "random"):
         raise ValueError("source_column must be 1, 2, 3, 4 or random")
-    return {
+    snapshot = {
         "version": 1,
         "profile": config["profile"],
         "source_column": column,
         "profiles": profiles,
         "colors": {k: list(v) for k, v in colors.items()},
     }
+    if "scene" in config:
+        scene = CookieSceneOptions.from_settings(config)
+        snapshot["scene"] = {
+            **asdict(scene),
+            "source_gap_groups": list(scene.source_gap_groups),
+        }
+    return snapshot
 
 
 def profile_parameters(name, config=None):

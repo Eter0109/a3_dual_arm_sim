@@ -69,6 +69,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 - [2×5 分级随机化与专家采集](docs/randomization.md)：两批各五个，配置强度、来源列和外观，采集与续采。
 - [2×10 专家演示与数据采集](docs/cookie_2x10.md)：配置首夹数量，运行四次抓取、图形演示与采集。
 - [六种饼干场景 benchmark](docs/cookie_benchmark_scenarios.md)：缺列、缺口、跨列、倾倒、预填充和双盒评测。
+- [2×5 和 2×10 的可组合场景](docs/cookie_scene_randomization.md)：源盘缺块、多目标盒、轻微倾斜、夹持破损，以及对应规则专家、左臂 8D 示范采集和复现实验入口。发布快照的验证结果与尚未通过的组合见[场景专家验证记录](docs/scene_expert_validation.md)。
 - [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。

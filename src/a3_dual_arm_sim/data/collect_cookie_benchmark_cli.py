@@ -13,6 +13,7 @@ from pathlib import Path
 from a3_dual_arm_sim.data.audit import audit_training_dataset
 from a3_dual_arm_sim.data.recording import LeRobotV3Recorder
 from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 from a3_dual_arm_sim.sim.randomization import (
     choose_column,
     load_randomization_config,
@@ -53,6 +54,8 @@ def main() -> int:
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--max-attempts", type=int, default=None)
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Per-episode budget; defaults to 1600 per target box")
     parser.add_argument(
         "--seeds-file",
         type=Path,
@@ -97,11 +100,17 @@ def main() -> int:
     settings = load_randomization_config(
         _from_project(args.randomization_config) if args.randomization_config else None
     )
+    scene_options = CookieSceneOptions.from_settings(settings)
+    if scene_options.enabled:
+        args.complete_demonstrations = True
+    max_steps = args.max_steps if args.max_steps is not None else 1600 * scene_options.target_box_count
+    if max_steps < 1:
+        parser.error("--max-steps must be positive")
     profile = settings["profile"]
     source_column = settings["source_column"]
     benchmark = CookieBatchBenchmark(
         config_path,
-        max_steps=1600,
+        max_steps=max_steps,
         complete_demonstrations=args.complete_demonstrations,
         success_hold_steps=20 if args.complete_demonstrations else 5,
         profile=profile,
@@ -121,7 +130,7 @@ def main() -> int:
         "complete_demonstrations": args.complete_demonstrations,
         "placement_order": args.placement_order if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
-        "task_instruction": TASK,
+        "task_instruction": benchmark._scene_task_instruction() or TASK,
         "prompt_style": "training",
         "policy": "same_column",
         "source_action_mode": "cartesian_delta",
@@ -133,9 +142,12 @@ def main() -> int:
         "randomization_settings": benchmark.randomization_settings,
         "source_column": source_column,
         "randomization_version": 1,
-        "max_steps": 1600,
+        "max_steps": max_steps,
         "use_videos": not args.no_videos,
     }
+    if scene_options.enabled:
+        summary.update(scene_expert_version=1, target_layout="2x5", training_arm_mode="left",
+                       required_cookies=benchmark.required_cookies)
     if args.resume:
         if not summary_path.is_file():
             raise FileNotFoundError(f"cannot resume without {summary_path}")
@@ -162,6 +174,10 @@ def main() -> int:
         ):
             if previous.get(key) != json.loads(json.dumps(summary[key])):
                 raise RuntimeError(f"collection setting {key!r} changed since the initial run")
+        if scene_options.enabled:
+            for key in ("scene_expert_version", "target_layout", "training_arm_mode", "required_cookies", "task_instruction"):
+                if previous.get(key) != summary[key]:
+                    raise RuntimeError(f"scene collection setting {key!r} changed; use a new dataset")
 
     recorder = LeRobotV3Recorder(
         root,
@@ -171,6 +187,7 @@ def main() -> int:
         image_width=benchmark.config.image_width,
         use_videos=not args.no_videos,
         resume=args.resume,
+        left_arm_only=scene_options.enabled,
     )
     if not args.resume:
         summary["git_commit"] = subprocess.check_output(

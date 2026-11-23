@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 from xml.etree import ElementTree as ET
 
-from a3_dual_arm_sim.config import SimConfig
+from a3_dual_arm_sim.config import CookieSceneConfig, SimConfig
 
+from .cookie_scene_options import COOKIES_PER_GROUP, LEAN_SUPPORT_HALF_HEIGHT_M, CookieSceneOptions
 from .urdf import _vec
 
 BIN_RGBA = "0.70 0.73 0.77 1"
@@ -148,8 +150,40 @@ def _add_beveled_cookie_mesh(
     )
 
 
-def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) -> None:
+def _add_target_bin(
+    world: ET.Element, scene: CookieSceneConfig, name: str, position: tuple[float, ...],
+    yaw: float = 0.0,
+) -> None:
+    # Free boxes move only through physical contact after initialization.
+    body = ET.SubElement(world, "body", name=name, pos=_vec(position))
+    if yaw:
+        body.set("quat", _vec((math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))))
+    ET.SubElement(body, "freejoint", name=f"{name}_free")
+    ET.SubElement(
+        body, "inertial", pos="0 0 0.01", mass="0.10", diaginertia="0.0002 0.0002 0.0003"
+    )
+    _add_open_bin(
+        body,
+        name=name,
+        center=(0.0, 0.0),
+        half_size=scene.target_bin_half_size_m,
+        height=scene.target_bin_wall_height_m,
+        rgba=BIN_RGBA,
+        thickness=scene.bin_wall_thickness_m,
+        friction=scene.bin_friction,
+        floor_z=scene.target_floor_z_m,
+        wall_z=scene.target_bin_wall_height_m / 2,
+    )
+
+
+def _add_cookie_scene(
+    root: ET.Element,
+    world: ET.Element,
+    config: SimConfig,
+    options: CookieSceneOptions | None = None,
+) -> None:
     scene = config.cookie_transfer
+    options = options or CookieSceneOptions()
     assets = root.find("asset")
     if assets is None:
         raise RuntimeError("model assets must exist before adding the Cookie scene")
@@ -175,6 +209,11 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         scene.cookie_edge_bevel_m,
         bottom_bevel,
     )
+    if options.cookie_crush_force_n is not None:
+        _add_beveled_cookie_mesh(
+            assets, "cookie_crushed_mesh", visual_half_size, scene.cookie_edge_bevel_m, bottom_bevel
+        )
+        assets[-1].set("scale", "1 0.5 0.8")
     if scene.cookie_collision_mode not in ("mesh", "compound"):
         raise ValueError("cookie_collision_mode must be mesh or compound")
     if scene.cookie_collision_mode == "compound":
@@ -215,59 +254,33 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
         wall_z=scene.source_wall_base_z_m + scene.source_bin_wall_height_m / 2,
     )
 
-    # A free rigid box can only follow the gripper through physical contact.
-    target_bin = ET.SubElement(
-        world,
-        "body",
-        name="target_bin",
-        pos=_vec(scene.target_bin_world_position_m),
-    )
-    ET.SubElement(target_bin, "freejoint", name="target_bin_free")
-    ET.SubElement(
-        target_bin, "inertial", pos="0 0 0.01", mass="0.10", diaginertia="0.0002 0.0002 0.0003"
-    )
-    _add_open_bin(
-        target_bin,
-        name="target_bin",
-        center=(0.0, 0.0),
-        half_size=scene.target_bin_half_size_m,
-        height=scene.target_bin_wall_height_m,
-        rgba=BIN_RGBA,
-        thickness=scene.bin_wall_thickness_m,
-        friction=scene.bin_friction,
-        floor_z=scene.target_floor_z_m,
-        wall_z=scene.target_bin_wall_height_m / 2,
-    )
+    for name, position, yaw in options.target_boxes(scene):
+        _add_target_bin(world, scene, name, position, yaw)
     if scene.spare_target_bin_world_position_m is not None:
-        spare_bin = ET.SubElement(
-            world,
-            "body",
-            name="spare_target_bin",
-            pos=_vec(scene.spare_target_bin_world_position_m),
-        )
-        ET.SubElement(spare_bin, "freejoint", name="spare_target_bin_free")
-        ET.SubElement(
-            spare_bin,
-            "inertial",
-            pos="0 0 0.01",
-            mass="0.10",
-            diaginertia="0.0002 0.0002 0.0003",
-        )
-        _add_open_bin(
-            spare_bin,
-            name="spare_target_bin",
-            center=(0.0, 0.0),
-            half_size=scene.target_bin_half_size_m,
-            height=scene.target_bin_wall_height_m,
-            rgba=BIN_RGBA,
-            thickness=scene.bin_wall_thickness_m,
-            friction=scene.bin_friction,
-            floor_z=scene.target_floor_z_m,
-            wall_z=scene.target_bin_wall_height_m / 2,
-        )
+        _add_target_bin(world, scene, "spare_target_bin", scene.spare_target_bin_world_position_m)
+
+    if options.source_tilt_deg:
+        hx, hy, _ = scene.cookie_half_size_m
+        for index in range(COOKIES_PER_GROUP):
+            support = ET.SubElement(
+                world, "body", name=f"source_lean_support_{index}", mocap="true", pos="0 0 -2"
+            )
+            ET.SubElement(
+                support,
+                "geom",
+                type="box",
+                size=_vec((hx - 0.001, hy, LEAN_SUPPORT_HALF_HEIGHT_M)),
+                rgba=BIN_RGBA,
+                contype="1",
+                conaffinity="3",
+                friction=_vec(scene.bin_friction),
+            )
 
     columns = sorted({p[0] for p in scene.cookie_source_positions_m})
     rows = sorted({p[1] for p in scene.cookie_source_positions_m})
+    cookie_solref = scene.cookie_solref
+    if options.cookie_crush_force_n is not None:
+        cookie_solref = (max(0.010, cookie_solref[0]), cookie_solref[1])
     for index, (x, y) in enumerate(scene.cookie_source_positions_m):
         cookie = ET.SubElement(
             world,
@@ -294,7 +307,7 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             # The beveled underside has a narrower floor contact patch than the
             # old box. Its former 0.04 s soft contact let a light Cookie sink
             # deep into the bin floor, so use a firmer contact response.
-            solref=_vec(scene.cookie_solref),
+            solref=_vec(cookie_solref),
             solimp=_vec(scene.cookie_solimp),
             # condim=6 enables full tangential + torsional friction so the gripper
             # keeps lateral purchase while extracting a cookie from the stack.
@@ -341,3 +354,23 @@ def _add_cookie_scene(root: ET.Element, world: ET.Element, config: SimConfig) ->
             conaffinity="0",
             group="2",
         )
+        if options.cookie_crush_force_n is not None:
+            # Compile the second collision shape into MuJoCo's body BVH.
+            # The task disables it before the first reset and enables it on crushing.
+            ET.SubElement(
+                cookie,
+                "geom",
+                name=f"cookie_{index}_crushed",
+                type="mesh",
+                mesh="cookie_crushed_mesh",
+                mass="0",
+                rgba="0 0 0 0",
+                contype="1",
+                conaffinity="3",
+                friction=_vec(scene.cookie_friction),
+                group="2",
+                priority="1",
+                solref=_vec(cookie_solref),
+                solimp=_vec(scene.cookie_solimp),
+                condim="6",
+            )

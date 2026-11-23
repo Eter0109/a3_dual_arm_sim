@@ -30,3 +30,5 @@ class CookiePhase(Enum):
     RETRACT = auto()
     DONE = auto()
     FAILED = auto()
+    RECOVER_GRASP = auto()
+    REPOSITION_PLACE = auto()

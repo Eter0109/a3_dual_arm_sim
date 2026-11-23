@@ -27,6 +27,7 @@ from a3_dual_arm_sim.contracts import (
     validate_observation,
 )
 from a3_dual_arm_sim.sim.actions import CartesianDeltaAdapter
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 from a3_dual_arm_sim.sim.model import (
     ROBOTIQ_2F85_JAW_TRAVEL_M,
     ModelBundle,
@@ -53,6 +54,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         render_mode: str | None = None,
         render_cameras: bool = True,
         scene: SceneName = "sandbox",
+        cookie_scene: CookieSceneOptions | None = None,
     ) -> None:
         super().__init__()
         self.config = config if isinstance(config, SimConfig) else load_config(config)
@@ -66,7 +68,7 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         # cameras produce black frames without constructing an offscreen GL context.
         self.render_cameras = render_cameras
         self.scene = scene
-        bundle: ModelBundle = build_model(self.config, scene=scene)
+        bundle: ModelBundle = build_model(self.config, scene=scene, cookie_scene=cookie_scene)
         self.model = bundle.model
         self.model_xml = bundle.xml
         self.source_joints = bundle.source_joints
@@ -271,6 +273,9 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
                 if np.max(np.abs(self.data.qvel)) > 1000.0:
                     self.emergency_stop("simulator instability: object velocity exceeded threshold")
                     break
+                self._after_physics_step()
+                if self._safety_stop:
+                    break
             # mj_step integrates qpos/qvel but leaves derived state (sites, contacts,
             # sensors, camera poses) one physics substep behind; refresh it so the
             # exported observation and task scoring read a single consistent instant.
@@ -290,6 +295,9 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
             "step": self._step_count,
         }
         return observation, 0.0, terminated, truncated, info
+
+    def _after_physics_step(self) -> None:
+        """Allow a task to check contacts before the next integration substep."""
 
     def _limit_joint_action(self, canonical: np.ndarray) -> np.ndarray:
         command = validate_action(canonical, "joint_position").copy()

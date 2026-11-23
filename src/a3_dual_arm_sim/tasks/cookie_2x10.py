@@ -40,11 +40,16 @@ class A3Cookie2x10Env(A3CookieTransferEnv):
         rotations = self.data.xmat[list(self._cookie_bodies)].reshape(-1, 3, 3)
         x_extent = (np.abs(rotations) @ self.COOKIE_HALF_SIZE)[:, 0]
         nominal_x = np.asarray(self.SOURCE_POSITIONS)[:, 0]
-        columns = np.unique(nominal_x)
+        present = (
+            self._scene_randomizer.active
+            if self._scene_randomizer is not None
+            else np.ones_like(nominal_x, dtype=bool)
+        )
+        columns = np.unique(nominal_x[present])
         clearances = []
         for left, right in pairwise(columns):
-            left_indices = nominal_x == left
-            right_indices = nominal_x == right
+            left_indices = present & (nominal_x == left)
+            right_indices = present & (nominal_x == right)
             clearances.append(float(
                 np.min(positions[right_indices, 0] - x_extent[right_indices])
                 - np.max(positions[left_indices, 0] + x_extent[left_indices])
@@ -55,8 +60,8 @@ class A3Cookie2x10Env(A3CookieTransferEnv):
                 f"{min(clearances) * 1000:.3f} mm; "
                 f"at least {self.MIN_SOURCE_COLUMN_CLEARANCE_M * 1000:.3f} mm required"
             )
-        if info["cookies_in_source"] != self.task_config.cookie_count:
-            raise RuntimeError("invalid 2x10 initial state: not all cookies are inside the source box")
+        if info["cookies_in_source"] != self.initial_cookie_count:
+            raise RuntimeError("invalid 2x10 initial state: active cookies outside the source box")
         self.randomization_metadata["source_pose_resamples"] = self._source_pose_resamples
         self.randomization_metadata["source_column_clearances_m"] = clearances
         return observation, info
@@ -106,20 +111,35 @@ class A3Cookie2x10Env(A3CookieTransferEnv):
             f"cross-column clearance must be at least {self.MIN_SOURCE_COLUMN_CLEARANCE_M * 1000:.1f} mm"
         )
 
-    def target_column_counts(self, in_target: tuple[bool, ...]) -> tuple[int, int]:
+    def target_column_counts(
+        self, in_target: tuple[bool, ...], *, target_body: int | None = None
+    ) -> tuple[int, int]:
         columns = np.unique(np.asarray(self.TARGET_SLOTS_LOCAL)[:, 0])
         counts = [0, 0]
         for index, contained in enumerate(in_target):
             if contained:
-                local_x = self.privileged_cookie_target_position(index)[0]
+                local_x = self.privileged_cookie_target_position(index, target_body=target_body)[0]
                 counts[int(np.argmin(np.abs(columns - local_x)))] += 1
         return tuple(counts)
 
-    def _target_fill_is_valid(self, in_target: tuple[bool, ...]) -> bool:
-        return self.target_column_counts(in_target) == (10, 10)
+    def _target_fill_is_valid(
+        self, in_target: tuple[bool, ...], *, target_body: int | None = None
+    ) -> bool:
+        return self.target_column_counts(in_target, target_body=target_body) == (10, 10)
 
     def step(self, action):
         observation, reward, terminated, truncated, info = super().step(action)
         info["target_layout"] = "2x10"
-        info["target_column_counts"] = self.target_column_counts(info["cookies_in_target_mask"])
+        if "cookies_in_target_masks" in info:
+            counts = [
+                self.target_column_counts(mask, target_body=body)
+                for mask, body in zip(info["cookies_in_target_masks"], self.target_box_bodies,
+                                      strict=True)
+            ]
+            info["target_column_counts"] = counts[0]
+            info["scenario_metrics"]["target_column_counts_by_box"] = counts
+        else:
+            info["target_column_counts"] = self.target_column_counts(info["cookies_in_target_mask"])
+            if "scenario_metrics" in info:
+                info["scenario_metrics"]["target_column_counts_by_box"] = [info["target_column_counts"]]
         return observation, reward, terminated, truncated, info

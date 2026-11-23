@@ -107,7 +107,7 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
 
     @property
     def batch_size(self):
-        return self.plan.batch_sizes[self.batch_index] if self.batch_index < 4 else 0
+        return self.plan.batch_sizes[self._target_batch_index] if self.batch_index < self.num_batches else 0
 
     @property
     def _is_followup_batch(self):
@@ -122,7 +122,7 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
         )
 
     def _select_batch(self):
-        while self.batch_index < 4 and self.batch_size == 0:
+        while self.batch_index < self.num_batches and self.batch_size == 0:
             self.batch_reports.append(
                 {
                     "grasp": self.batch_index + 1,
@@ -134,7 +134,7 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
                 }
             )
             self.batch_index += 1
-        if self.batch_index >= 4:
+        if self.batch_index >= self.num_batches:
             self._advance(CookiePhase.DONE)
             return
         if self._selection_batch_index != self.batch_index:
@@ -157,11 +157,12 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
 
     def _place_pose(self, clearance=0.0, column_index=None):
         from .placement_order import ordered_column
-        column = ordered_column(self.env, self.batch_index // 2) if column_index is None else column_index
+        local_batch = self._target_batch_index
+        column = ordered_column(self.env, local_batch // 2) if column_index is None else column_index
         box_rotation = self.data.xmat[self._tb_id].reshape(3, 3)
         slots = np.asarray(self.env.TARGET_SLOTS_LOCAL)
         column_x = np.unique(slots[:, 0])[column]
-        rows = self.plan.target_rows(self.batch_index) if column_index is None else tuple(range(10))
+        rows = self.plan.target_rows(local_batch) if column_index is None else tuple(range(10))
         column_slots = slots[np.isclose(slots[:, 0], column_x)]
         if not rows:
             raise RuntimeError("zero-count grasp must be skipped before selecting a place pose")
@@ -175,7 +176,7 @@ class A3Cookie2x10Expert(A3VariedColumnBatchExpert):
         if column_index is None and self.plan.first_grasp > 0:
             # Leave room for the inner pad to release the second group without
             # pushing the first group over. The larger box has this clearance.
-            center[1] += -0.004 if self.batch_index % 2 == 0 else 0.004
+            center[1] += -0.004 if local_batch % 2 == 0 else 0.004
         center = self.data.xpos[self._tb_id] + box_rotation @ center
         tool_rotation = box_rotation @ self._canonical
         if (

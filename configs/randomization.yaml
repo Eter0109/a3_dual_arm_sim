@@ -6,6 +6,12 @@ version: 1
 # Select a strength and source column here, independently of one another.
 profile: basic
 source_column: 1  # 1, 2, 3, 4, or random
+# Optional and independent of the profile. Omitted fields use the original scene.
+# scene:
+#   source_gap_groups: [2, 5]  # 0, a fixed 2..5, or an inclusive range
+#   target_box_count: 3        # 1..4; fill each box to its native capacity
+#   source_tilt_deg: 8         # 0..8 degrees; one aligned five-cookie group
+#   cookie_crush_force_n: 12   # optional positive force in N
 profiles:
   basic:
     source_bin_noise_m: 0.010

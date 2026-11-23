@@ -54,7 +54,8 @@ class MemoryRecorder:
         return None
 
 
-def lerobot_features(height: int, width: int, *, use_videos: bool = False) -> dict[str, Any]:
+def lerobot_features(height: int, width: int, *, use_videos: bool = False,
+                     left_arm_only: bool = False) -> dict[str, Any]:
     """Describe one canonical A3 frame to LeRobot.
 
     LeRobot selects video storage from the feature ``dtype`` rather than from the
@@ -68,7 +69,7 @@ def lerobot_features(height: int, width: int, *, use_videos: bool = False) -> di
         "shape": (height, width, 3),
         "names": ["height", "width", "channels"],
     }
-    return {
+    features = {
         FRONT_IMAGE: image.copy(),
         LEFT_WRIST_IMAGE: image.copy(),
         RIGHT_WRIST_IMAGE: image.copy(),
@@ -86,6 +87,17 @@ def lerobot_features(height: int, width: int, *, use_videos: bool = False) -> di
         FORCE: {"dtype": "float32", "shape": (18,), "names": [f"force_{i}" for i in range(18)]},
         ACTION: {"dtype": "float32", "shape": (16,), "names": [f"action_{i}" for i in range(16)]},
     }
+    if left_arm_only:
+        for key, prefix, size in ((STATE, "state", 8), (VELOCITY, "velocity", 8),
+                                  (EEF_POSE, "eef_pose", 7), (ACTION, "action", 8)):
+            features[key] = {"dtype": "float32", "shape": (size,),
+                             "names": [f"left_{prefix}_{i}" for i in range(size)]}
+        features[FORCE] = {"dtype": "float32", "shape": (9,), "names": [
+            "left_force_x", "left_force_y", "left_force_z", "left_torque_x",
+            "left_torque_y", "left_torque_z", "left_inner_touch", "left_outer_touch",
+            "left_actuator_force",
+        ]}
+    return features
 
 
 class LeRobotV3Recorder:
@@ -101,6 +113,7 @@ class LeRobotV3Recorder:
         image_width: int,
         use_videos: bool = False,
         resume: bool = False,
+        left_arm_only: bool = False,
     ) -> None:
         try:
             from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -109,6 +122,7 @@ class LeRobotV3Recorder:
                 "Install recording support with: pip install -e '.[dataset]'"
             ) from exc
         self.root = Path(root)
+        self.left_arm_only = left_arm_only
         if self.root.exists() and any(self.root.iterdir()) and not resume:
             raise FileExistsError(f"refusing to overwrite non-empty dataset: {self.root}")
         if self.root.exists() and not resume:
@@ -128,6 +142,9 @@ class LeRobotV3Recorder:
             info = json.loads(info_path.read_text(encoding="utf-8"))
             if len(resumed_episodes) != info.get("total_episodes"):
                 raise RuntimeError("Incomplete save: LeRobot/A3 episode counts differ")
+            expected_dim = 8 if left_arm_only else 16
+            if info.get("features", {}).get(ACTION, {}).get("shape") != [expected_dim]:
+                raise RuntimeError("Training arm mode changed; use a new dataset")
         self.dataset = (
             LeRobotDataset.resume(
                 repo_id=repo_id,
@@ -144,7 +161,8 @@ class LeRobotV3Recorder:
                 # decides from the declared dtype whether a camera is stored as
                 # video, so passing `use_videos` alone leaves the dataset
                 # declaring `image` and writing frames inline in the parquet.
-                features=lerobot_features(image_height, image_width, use_videos=use_videos),
+                features=lerobot_features(image_height, image_width, use_videos=use_videos,
+                                          left_arm_only=left_arm_only),
                 use_videos=use_videos,
                 image_writer_threads=3,
             )
@@ -163,6 +181,7 @@ class LeRobotV3Recorder:
         self._randomization_metadata = {}
         self._controller_type = controller_type
         self._frames = 0
+        self._right_hold = None
 
     def add_frame(self, observation: dict[str, Any], action: np.ndarray) -> None:
         if self._context is None:
@@ -178,6 +197,19 @@ class LeRobotV3Recorder:
             ACTION: np.asarray(action, dtype=np.float32),
             TASK: self._context.task,
         }
+        if self.left_arm_only:
+            applied = np.asarray(action, dtype=np.float64)
+            if applied.shape != (16,):
+                raise ValueError("left-arm recording requires the simulator's applied 16D action")
+            if self._right_hold is None:
+                self._right_hold = applied[8:].copy()
+            elif not np.allclose(applied[8:], self._right_hold, atol=1e-8, rtol=0):
+                raise ValueError("the right arm changed during a left-only demonstration")
+            frame[STATE] = frame[STATE][:8]
+            frame[VELOCITY] = frame[VELOCITY][:8]
+            frame[EEF_POSE] = frame[EEF_POSE][:7]
+            frame[FORCE] = frame[FORCE][[0, 1, 2, 3, 4, 5, 12, 13, 16]]
+            frame[ACTION] = frame[ACTION][:8]
         self.dataset.add_frame(frame)
         self._frames += 1
 

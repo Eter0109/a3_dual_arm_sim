@@ -18,6 +18,7 @@ from a3_dual_arm_sim.config import load_config
 from a3_dual_arm_sim.contracts import EpisodeContext
 from a3_dual_arm_sim.controllers.same_column_batch_expert import A3VariedColumnBatchExpert
 from a3_dual_arm_sim.paths import resource_root
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 from a3_dual_arm_sim.sim.randomization import (
     RandomizationProfile,
     choose_column,
@@ -69,6 +70,7 @@ class EpisodeExecution:
         self.randomization_settings = load_randomization_config(
             randomization_config, config=randomization_settings
         )
+        self.scene_options = CookieSceneOptions.from_settings(self.randomization_settings)
         if randomization_config is not None:
             profile = self.randomization_settings["profile"]
             source_column = self.randomization_settings["source_column"]
@@ -118,6 +120,13 @@ class EpisodeExecution:
                 config.cookie_transfer, target_slot_tolerance_m=tuple(slot_tolerance_m)
             ),
         )
+        if self.scene_options.enabled:
+            self.scene_options.feasible_gap_range(self.config.cookie_transfer)
+            self.required_cookies = (
+                len(self.config.cookie_transfer.target_slots_local_m)
+                * self.scene_options.target_box_count
+            )
+            self.config = replace(self.config, horizon=max(self.config.horizon, self.max_steps))
 
     def create_env(self, *, render_cameras: bool = False) -> A3CookieTransferEnv:
         return A3CookieTransferEnv(
@@ -134,6 +143,7 @@ class EpisodeExecution:
             ),
             render_mode="human" if self.render else None,
             render_cameras=render_cameras,
+            scene_options=self.scene_options,
         )
 
     def _episode_task(self, column: int | None, seed: int) -> str:
@@ -144,6 +154,13 @@ class EpisodeExecution:
         )
 
     def _episode_policy(self, policy: Any, column: int | None, seed: int):
+        if self.scene_options.enabled and isinstance(policy, str) and policy == "same_column":
+            from a3_dual_arm_sim.controllers.scene_batch_expert import A3Scene2x5Expert
+
+            return ExpertPolicyAdapter(
+                lambda env: A3Scene2x5Expert(env, requested_source_column_index=(column or 1) - 1),
+                name="cookie_scene_2x5_expert",
+            )
         if column is not None and column > 1 and policy == "same_column":
 
             def expert_factory(environment):
@@ -159,10 +176,22 @@ class EpisodeExecution:
 
     def _completed_episode_metadata(self, runner_policy: Any, info: dict) -> dict:
         expert = getattr(runner_policy, "expert", None)
-        return {"grasp_reports": getattr(expert, "batch_reports", []),
-                "final_expert_phase": getattr(getattr(expert, "phase", None), "name", None)}
+        result = {"grasp_reports": getattr(expert, "batch_reports", []),
+                  "final_expert_phase": getattr(getattr(expert, "phase", None), "name", None)}
+        if self.scene_options.enabled:
+            result.update(
+                expert_failure_phase=getattr(expert, "failure_phase", None),
+                scene_recovery_reports=getattr(expert, "scene_recovery_reports", []),
+                scene_motion_reports=getattr(expert, "scene_motion_reports", []),
+                scenario_metrics=info.get("scenario_metrics"),
+                cookies_in_target=int(info.get("cookies_in_target", 0)),
+                cookies_in_source=int(info.get("cookies_in_source", 0)),
+            )
+        return result
 
     def _expected_source_count(self, env: A3CookieTransferEnv) -> int:
+        if self.scene_options.enabled:
+            return env.initial_cookie_count - self.required_cookies
         return len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
 
     def _describe_incomplete_fill(self, info: dict) -> str:
@@ -174,8 +203,9 @@ class EpisodeExecution:
         """
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
-        expected_source = (
-            len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
+        expected_source = (info.get("scenario_metrics") or {}).get(
+            "expected_source_count",
+            len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies,
         )
         parts = []
         if cookies_in_target != self.required_cookies:
@@ -202,28 +232,8 @@ class EpisodeExecution:
             parts.append("; ".join(reasons) if reasons else "success condition not met")
         return "; ".join(parts)
 
-    def run_episode(
-        self,
-        policy: Any,
-        seed: int,
-        episode_idx: int = 1,
-        env: A3CookieTransferEnv | None = None,
-        recorder: Any | None = None,
-        diagnostic: Any | None = None,
-    ) -> EpisodeScore:
-        column = choose_column(self.source_column, seed) if self.source_column is not None else None
-        task = self._episode_task(column, seed)
-        self.last_attempt_metadata = self._episode_metadata(column, seed)
-        runner_policy = self._episode_policy(policy, column, seed)
-        should_close_env = False
-        if env is None:
-            needs_cameras = (recorder is not None or diagnostic is not None) or (
-                getattr(runner_policy, "action_mode", "") == "joint_position"
-            )
-            env = self.create_env(render_cameras=needs_cameras)
-            should_close_env = True
-
-        reset_options = {
+    def reset_options(self, seed: int) -> dict[str, Any]:
+        return {
             "randomize_cookies": self.randomize_cookies,
             "randomize_boxes": self.randomize_boxes,
             "randomize_source_bin": self.randomize_boxes,
@@ -235,6 +245,42 @@ class EpisodeExecution:
             "appearance_seed": seed,
             "randomization_settings": self.randomization_settings,
         }
+
+    def _scene_task_instruction(self) -> str | None:
+        box_count = self.scene_options.target_box_count
+        if not self.scene_options.enabled:
+            return None
+        rows = self.config.cookie_transfer.target_rows
+        boxes = "the target box" if box_count == 1 else f"all {box_count} target boxes"
+        return (
+            f"Take available cookies from the source box in batches of five and fill {boxes}, "
+            f"placing {2 * rows} upright cookies in each 2 by {rows} box."
+        )
+
+    def run_episode(
+        self,
+        policy: Any,
+        seed: int,
+        episode_idx: int = 1,
+        env: A3CookieTransferEnv | None = None,
+        recorder: Any | None = None,
+        diagnostic: Any | None = None,
+    ) -> EpisodeScore:
+        column = choose_column(self.source_column, seed) if self.source_column is not None else None
+        task = self._scene_task_instruction() or self._episode_task(column, seed)
+        self.last_attempt_metadata = self._episode_metadata(column, seed)
+        if self.scene_options.enabled:
+            self.last_attempt_metadata["task_instruction"] = task
+        runner_policy = self._episode_policy(policy, column, seed)
+        should_close_env = False
+        if env is None:
+            needs_cameras = (recorder is not None or diagnostic is not None) or (
+                getattr(runner_policy, "action_mode", "") == "joint_position"
+            )
+            env = self.create_env(render_cameras=needs_cameras)
+            should_close_env = True
+
+        reset_options = self.reset_options(seed)
 
         observation, info = env.reset(seed=seed, options=reset_options)
         if getattr(self, "pi05_scene", None) is not None:
@@ -252,6 +298,15 @@ class EpisodeExecution:
                 column_order = front_camera_column_order(env)
             if self.complete_demonstrations:
                 env.demonstration_column_order = column_order
+                if self.scene_options.enabled:
+                    env.demonstration_box_column_orders = tuple(
+                        (0, 1) if getattr(self, "placement_order", "canonical") == "canonical"
+                        else front_camera_column_order(env, target_body=body)
+                        for body in env.target_box_bodies
+                    )
+                    self.last_attempt_metadata["target_box_column_orders"] = [
+                        list(order) for order in env.demonstration_box_column_orders
+                    ]
                 self.last_attempt_metadata.update(
                     placement_order="canonical" if column_order == (0, 1) else "front_camera_bottom_first",
                     target_column_order=list(column_order),
@@ -400,7 +455,9 @@ class EpisodeExecution:
 
         failure_reason = None
         if not success:
-            if terminated:
+            if info.get("safety_reason") == "cookie_crushed":
+                failure_reason = "cookie_crushed"
+            elif terminated:
                 failure_reason = "environment_safety_terminated"
             elif truncated or steps >= self.max_steps:
                 failure_reason = "max_steps_exceeded"
@@ -417,7 +474,7 @@ class EpisodeExecution:
         return EpisodeScore(
             episode=episode_idx,
             seed=seed,
-            score=cookies_in_target,
+            score=(info.get("scenario_metrics") or {}).get("target_score", cookies_in_target),
             max_score=self.required_cookies,
             success=success,
             steps=steps,

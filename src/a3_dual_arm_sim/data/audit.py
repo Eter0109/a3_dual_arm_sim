@@ -55,6 +55,47 @@ def _check_cookie_2x10_episode(episode: dict, collection_summary: dict) -> None:
         raise ValueError("2x10 grasp reports must describe twenty distinct cookies")
 
 
+def _check_scene_episode(episode: dict, collection_summary: dict) -> None:
+    """The extended task has a different inventory and full multi-box contract."""
+    metadata = episode.get("randomization", {})
+    scene = metadata.get("scene", {})
+    metrics = metadata.get("scenario_metrics") or {}
+    capacity = 20 if collection_summary.get("target_layout") == "2x10" else 10
+    box_count = len(scene.get("target_boxes", ()))
+    goal = capacity * box_count
+    if (
+        not 1 <= box_count <= 4 or goal != collection_summary.get("required_cookies")
+        or metadata.get("cookies_in_target") != goal
+        or metadata.get("cookies_in_source") != scene.get("initial_source_count", -1) - goal
+        or metrics.get("target_counts") != [capacity] * box_count
+        or metrics.get("target_filled") != [True] * box_count
+        or metrics.get("crushed_cookie_ids") != []
+        or metadata.get("final_expert_phase") != "DONE"
+        or episode.get("task") != collection_summary.get("task_instruction")
+    ):
+        raise ValueError("Extended scene demonstration failed the full released-fill contract")
+    if capacity == 20 and metrics.get("target_column_counts_by_box") != [[10, 10]] * box_count:
+        raise ValueError("Every extended 2x10 target requires ten Cookies in each column")
+    reports = metadata.get("grasp_reports", [])
+    if len(reports) != goal // 5:
+        raise ValueError("Extended scenes require one confirmed report per five-Cookie group")
+    transferred = []
+    missing = {cookie for group in scene.get("gap_groups", []) for cookie in group}
+    for index, report in enumerate(reports):
+        ids = report.get("cookies", [])
+        if (
+            report.get("target_box") != index // (capacity // 5) + 1
+            or report.get("target_batch") != index % (capacity // 5) + 1
+            or report.get("planned_count") != 5 or report.get("lifted") != 5
+            or not report.get("released") or len(ids) != 5
+            or missing.intersection(ids)
+        ):
+            raise ValueError("Extended scene grasp report is incomplete or inconsistent")
+        transferred.extend(ids)
+    if len(set(transferred)) != goal:
+        raise ValueError("Extended scene grasp reports contain duplicate Cookies")
+
+
 def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
     """Fail fast on the parts of the LeRobot v3 contract used by A3 learned policies."""
     root = root.expanduser().resolve()
@@ -166,7 +207,10 @@ def audit_training_dataset(root: Path, *, repo_id: str) -> dict[str, Any]:
         raise ValueError("Persisted Parquet frame counts differ from episode metadata")
 
     target_layout = collection_summary.get("target_layout")
-    if target_layout == "2x10":
+    if collection_summary.get("scene_expert_version") == 1:
+        for episode in episodes:
+            _check_scene_episode(episode, collection_summary)
+    elif target_layout == "2x10":
         for episode in episodes:
             _check_cookie_2x10_episode(episode, collection_summary)
     elif target_layout == "multi":

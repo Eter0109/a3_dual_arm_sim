@@ -9,8 +9,10 @@ import numpy as np
 
 from a3_dual_arm_sim.config import SimConfig
 from a3_dual_arm_sim.contracts import ARM_JOINTS, ActionMode
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 from a3_dual_arm_sim.sim.env import A3DualArmEnv
 from a3_dual_arm_sim.sim.randomization import AppearanceRandomizer
+from a3_dual_arm_sim.tasks.cookie_scene_randomizer import CookieSceneRandomizer
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
         action_mode: ActionMode = "joint_position",
         render_mode: str | None = None,
         render_cameras: bool = True,
+        scene_options: CookieSceneOptions | None = None,
     ) -> None:
         self.task_config = task_config or self.TASK_CONFIG_CLASS()
+        self.scene_options = scene_options or CookieSceneOptions()
         if config is None:
             config = SimConfig(horizon=6000)
         super().__init__(
@@ -72,6 +76,7 @@ class A3CookieTransferEnv(A3DualArmEnv):
             render_mode=render_mode,
             render_cameras=render_cameras,
             scene="cookie_transfer",
+            cookie_scene=self.scene_options,
         )
         scene_config = self.config.cookie_transfer
         if task_config is None:
@@ -130,7 +135,12 @@ class A3CookieTransferEnv(A3DualArmEnv):
             frozenset(
                 geom
                 for geom in range(self.model.ngeom)
-                if self.model.geom_bodyid[geom] == body and self.model.geom_contype[geom] != 0
+                if (
+                    self.model.geom_bodyid[geom] == body
+                    and self.model.geom_contype[geom] != 0
+                    and not (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom) or "")
+                    .endswith("_crushed")
+                )
             )
             for body in self._cookie_bodies
         )
@@ -141,6 +151,31 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self._success_hold_count = 0
         self._source_initially_filled = False
         self._appearance_randomizer = AppearanceRandomizer(self.model)
+        self._scene_randomizer = (
+            CookieSceneRandomizer(self, self.scene_options) if self.scene_options.enabled else None
+        )
+
+    @property
+    def initial_cookie_count(self) -> int:
+        if self._scene_randomizer is None:
+            return self.task_config.cookie_count
+        return int(self._scene_randomizer.active.sum())
+
+    @property
+    def target_cookie_goal(self) -> int:
+        return self.task_config.required_cookies * self.scene_options.target_box_count
+
+    @property
+    def target_box_bodies(self) -> tuple[int, ...]:
+        if self._scene_randomizer is None:
+            return (self._target_bin_body,)
+        return self._scene_randomizer.target_bodies
+
+    def _after_physics_step(self) -> None:
+        if self._scene_randomizer is not None:
+            self._scene_randomizer.check_grip_load()
+            if self._scene_randomizer.crushed_ids:
+                self.emergency_stop("cookie_crushed")
 
     @property
     def cookie_positions(self) -> np.ndarray:
@@ -154,16 +189,22 @@ class A3CookieTransferEnv(A3DualArmEnv):
         """Return simulator-truth position for expert control, never policy input."""
         return self.data.xpos[self._cookie_bodies[index]].copy()
 
-    def privileged_cookie_target_position(self, index: int) -> np.ndarray:
+    def privileged_cookie_target_position(
+        self, index: int, *, target_body: int | None = None
+    ) -> np.ndarray:
         """Return Cookie position in the moving target-bin frame."""
-        target_position = self.data.xpos[self._target_bin_body]
-        target_rotation = self.data.xmat[self._target_bin_body].reshape(3, 3)
+        body = self._target_bin_body if target_body is None else target_body
+        target_position = self.data.xpos[body]
+        target_rotation = self.data.xmat[body].reshape(3, 3)
         return target_rotation.T @ (self.data.xpos[self._cookie_bodies[index]] - target_position)
 
-    def privileged_target_slot_world(self, slot_index: int, z: float) -> np.ndarray:
+    def privileged_target_slot_world(
+        self, slot_index: int, z: float, *, target_body: int | None = None
+    ) -> np.ndarray:
         """Convert a configured target slot into a simulator-truth world point."""
-        target_position = self.data.xpos[self._target_bin_body]
-        target_rotation = self.data.xmat[self._target_bin_body].reshape(3, 3)
+        body = self._target_bin_body if target_body is None else target_body
+        target_position = self.data.xpos[body]
+        target_rotation = self.data.xmat[body].reshape(3, 3)
         slot_xy = self.TARGET_SLOTS_LOCAL[slot_index]
         return target_position + target_rotation @ np.asarray(
             [slot_xy[0], slot_xy[1], z], dtype=np.float64
@@ -191,8 +232,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
     def privileged_cookie_in_source(self, index: int) -> bool:
         return self._cookie_inside_source(index)
 
-    def privileged_cookie_in_target(self, index: int) -> bool:
-        return self._cookie_inside_target(index)
+    def privileged_cookie_in_target(self, index: int, *, target_body: int | None = None) -> bool:
+        return self._cookie_inside_target(index, target_body=target_body)
 
     def privileged_cookie_in_target_region(self, index: int) -> bool:
         """Check target-bin geometry without requiring the Cookie to be settled."""
@@ -220,6 +261,17 @@ class A3CookieTransferEnv(A3DualArmEnv):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        options = options or {}
+        settings = options.get("randomization_settings")
+        if (
+            isinstance(settings, dict)
+            and "scene" in settings
+            and CookieSceneOptions.from_settings(settings) != self.scene_options
+        ):
+            raise ValueError("construct the environment with scene_options from the reset settings")
+        scene = self._scene_randomizer
+        if scene is not None:
+            scene.before_reset()
         observation, info = super().reset(
             seed=seed,
             options={"randomize_objects": False},
@@ -237,7 +289,6 @@ class A3CookieTransferEnv(A3DualArmEnv):
         mujoco.mj_forward(self.model, self.data)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
-        options = options or {}
         randomize_cookies = options.get("randomize_cookies", True)
         randomize_boxes = options.get("randomize_boxes", False)
         randomize_source = options.get("randomize_source_bin", randomize_boxes)
@@ -270,11 +321,16 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.data.qpos[qpos_adr + 3 : qpos_adr + 7] = tquat
             self.data.qvel[dof_adr : dof_adr + 6] = 0.0
 
+        if scene is not None:
+            scene.move_target_boxes()
         for index, (base_x, base_y) in enumerate(self.SOURCE_POSITIONS):
             position, quaternion = self._sample_source_cookie_pose(
                 index, (base_x + sdx, base_y + sdy, self.COOKIE_RESET_Z), randomize_cookies
             )
             self.set_cookie_pose(index, position, quaternion)
+        if scene is not None:
+            scene_seed = self.np_random.integers(2**32) if seed is None else seed
+            scene.arrange_source(int(scene_seed))
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
         # The settle loop leaves xpos/xquat/site poses one substep behind qpos; refresh
@@ -303,8 +359,11 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self.data,
             profile,
             appearance_seed,
-            config=options.get("randomization_settings"),
+            config=settings,
         )
+        if scene is not None:
+            scene.hide_inactive_geometry()
+            self.randomization_metadata["scene"] = scene.metadata()
         self.randomization_metadata.update(
             source_bin_position=self.data.xpos[self._source_bin_body].tolist(),
             target_bin_position=self.data.xpos[self._target_bin_body].tolist(),
@@ -318,12 +377,18 @@ class A3CookieTransferEnv(A3DualArmEnv):
             success=False,
             cookies_in_target=0,
             cookies_in_source=sum(source_mask),
-            required_cookies=self.task_config.required_cookies,
+            required_cookies=self.target_cookie_goal,
             cookies_in_target_mask=[False] * self.task_config.cookie_count,
             cookies_in_source_mask=source_mask,
             target_slot_occupancy=[-1] * self.task_config.required_cookies,
             source_initially_filled=self._source_initially_filled,
         )
+        if scene is not None:
+            if sum(source_mask) != self.initial_cookie_count:
+                raise RuntimeError("scene initialization left active cookies outside the source")
+            info["scenario_metrics"] = self._scene_metrics(
+                [0] * len(self.target_box_bodies), [False] * len(self.target_box_bodies)
+            )
         return observation, info
 
     def _sample_source_cookie_pose(self, index, base_position, randomize):
@@ -375,12 +440,15 @@ class A3CookieTransferEnv(A3DualArmEnv):
         self.data.qvel[dof_address : dof_address + 6] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
-    def _cookie_speed(self, index: int, *, relative_to_target: bool = False) -> tuple[float, float]:
+    def _cookie_speed(
+        self, index: int, *, relative_to_target: bool = False, target_body: int | None = None
+    ) -> tuple[float, float]:
         dof_address = int(self.model.jnt_dofadr[self._cookie_joints[index]])
         velocity = self.data.qvel[dof_address : dof_address + 6].copy()
         if relative_to_target and hasattr(self, "_target_bin_body"):
-            tb_cvel = self.data.cvel[self._target_bin_body]
-            r = self.data.xpos[self._cookie_bodies[index]] - self.data.xpos[self._target_bin_body]
+            body = self._target_bin_body if target_body is None else target_body
+            tb_cvel = self.data.cvel[body]
+            r = self.data.xpos[self._cookie_bodies[index]] - self.data.xpos[body]
             v_expected = tb_cvel[3:] + np.cross(tb_cvel[:3], r)
             rel_v = velocity[:3] - v_expected
             rel_w = velocity[3:] - tb_cvel[:3]
@@ -431,9 +499,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
             and (settled or not require_settled)
         )
 
-    def _cookie_inside_target(self, index: int) -> bool:
-        tb_pos = self.data.xpos[self._target_bin_body]
-        tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
+    def _cookie_inside_target(self, index: int, *, target_body: int | None = None) -> bool:
+        if self._scene_randomizer is not None and (
+            not self._scene_randomizer.active[index] or index in self._scene_randomizer.crushed_ids
+        ):
+            return False
+        body = self._target_bin_body if target_body is None else target_body
+        tb_pos = self.data.xpos[body]
+        tb_mat = self.data.xmat[body].reshape(3, 3)
         c_pos = self.data.xpos[self._cookie_bodies[index]]
         c_mat = self.data.xmat[self._cookie_bodies[index]].reshape(3, 3)
 
@@ -455,7 +528,8 @@ class A3CookieTransferEnv(A3DualArmEnv):
             p_rel[2] - half_extent[2] >= floor_top - 0.003
             and p_rel[2] - half_extent[2] < self.TARGET_WALL_HEIGHT
         )
-        if self.task_config.require_released:
+        require_released = self.task_config.require_released or self.scene_options.target_box_count > 1
+        if require_released:
             vertically_inside = vertically_inside and p_rel[2] - half_extent[2] <= floor_top + 0.004
         if not footprint_inside or not vertically_inside:
             return False
@@ -463,17 +537,21 @@ class A3CookieTransferEnv(A3DualArmEnv):
             abs(float(r_rel[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
             or abs(float(c_mat[2, 2])) >= np.cos(self.task_config.max_tilt_rad)
         )
-        linear_speed, angular_speed = self._cookie_speed(index, relative_to_target=True)
+        linear_speed, angular_speed = self._cookie_speed(
+            index, relative_to_target=True, target_body=body
+        )
         settled = (
             linear_speed <= max(self.task_config.max_linear_speed_m_s, 0.09)
             and angular_speed <= self.task_config.max_angular_speed_rad_s
         )
-        released = not self.task_config.require_released or not any(
-            self.privileged_left_finger_contacts(index)
-        )
+        released = not require_released or not any(self.privileged_left_finger_contacts(index))
         return footprint_inside and vertically_inside and upright and settled and released
 
     def _cookie_inside_source(self, index: int) -> bool:
+        if self._scene_randomizer is not None and (
+            not self._scene_randomizer.active[index] or index in self._scene_randomizer.crushed_ids
+        ):
+            return False
         source_center = (
             self.data.xpos[self._source_bin_body][:2]
             if hasattr(self, "_source_bin_body")
@@ -489,9 +567,12 @@ class A3CookieTransferEnv(A3DualArmEnv):
             require_settled=False,
         )
 
-    def _target_slot_occupancy(self, in_target: tuple[bool, ...]) -> tuple[int, ...]:
-        tb_pos = self.data.xpos[self._target_bin_body]
-        tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
+    def _target_slot_occupancy(
+        self, in_target: tuple[bool, ...], *, target_body: int | None = None
+    ) -> tuple[int, ...]:
+        body = self._target_bin_body if target_body is None else target_body
+        tb_pos = self.data.xpos[body]
+        tb_mat = self.data.xmat[body].reshape(3, 3)
         occupancy = [-1] * len(self.TARGET_SLOTS_LOCAL)
         candidates: dict[int, list[int]] = {}
         for cookie_index, eligible in enumerate(in_target):
@@ -527,11 +608,13 @@ class A3CookieTransferEnv(A3DualArmEnv):
         inner_half_size: np.ndarray,
         *,
         is_target: bool = False,
+        target_body: int | None = None,
     ) -> bool:
         edges: list[tuple[np.ndarray, np.ndarray]] = []
         if is_target:
-            tb_pos = self.data.xpos[self._target_bin_body]
-            tb_mat = self.data.xmat[self._target_bin_body].reshape(3, 3)
+            body = self._target_bin_body if target_body is None else target_body
+            tb_pos = self.data.xpos[body]
+            tb_mat = self.data.xmat[body].reshape(3, 3)
             for index, use_cookie in enumerate(included):
                 if not use_cookie:
                     continue
@@ -562,51 +645,77 @@ class A3CookieTransferEnv(A3DualArmEnv):
             and np.all(upper >= inner_upper - self.task_config.wall_contact_tolerance_m)
         )
 
-    def _target_fill_is_valid(self, in_target: tuple[bool, ...]) -> bool:
+    def _target_fill_is_valid(
+        self, in_target: tuple[bool, ...], *, target_body: int | None = None
+    ) -> bool:
         return True
+
+    def _scene_metrics(self, counts: list[int], fills: list[bool]) -> dict:
+        scene = self._scene_randomizer
+        return {
+            "target_counts": counts,
+            "target_filled": fills,
+            "target_score": sum(min(n, self.task_config.required_cookies) for n in counts),
+            "target_box_capacity": self.task_config.required_cookies,
+            "expected_source_count": self.initial_cookie_count - self.target_cookie_goal,
+            "crushed_cookie_ids": list(scene.crushed_ids),
+            "peak_cookie_grip_load_n": scene.peak_load_n,
+        }
 
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         observation, _, safety_terminated, truncated, info = super().step(action)
-        in_target = tuple(
-            self._cookie_inside_target(index) for index in range(self.task_config.cookie_count)
-        )
-        in_source = tuple(
-            self._cookie_inside_source(index) for index in range(self.task_config.cookie_count)
-        )
-        target_count = sum(in_target)
+        cookie_indices = range(self.task_config.cookie_count)
+        in_source = tuple(self._cookie_inside_source(index) for index in cookie_indices)
         source_count = sum(in_source)
-        occupancy = self._target_slot_occupancy(in_target)
-        target_touches_all_walls = self._collection_touches_all_walls(
-            in_target,
-            self.TARGET_CENTER,
-            self.TARGET_INNER_HALF_SIZE,
-            is_target=True,
+        target_masks = []
+        counts = []
+        occupancies = []
+        wall_checks = []
+        exact_checks = []
+        fill_checks = []
+        counted = [False] * self.task_config.cookie_count
+        for body in self.target_box_bodies:
+            included = tuple(
+                not counted[i] and self._cookie_inside_target(i, target_body=body)
+                for i in cookie_indices
+            )
+            mask_count = sum(included)
+            occupancy = self._target_slot_occupancy(included, target_body=body)
+            touches_walls = self._collection_touches_all_walls(
+                included, self.TARGET_CENTER, self.TARGET_INNER_HALF_SIZE,
+                is_target=True, target_body=body,
+            )
+            count_ok = mask_count == self.task_config.required_cookies
+            exact_ok = count_ok and all(i >= 0 for i in occupancy) and touches_walls
+            layout_ok = exact_ok if self.task_config.require_exact_slots else count_ok
+            target_masks.append(included)
+            counts.append(mask_count)
+            occupancies.append(occupancy)
+            wall_checks.append(touches_walls)
+            exact_checks.append(exact_ok)
+            fill_checks.append(layout_ok and self._target_fill_is_valid(included, target_body=body))
+            counted = [old or new for old, new in zip(counted, included, strict=True)]
+        target_count = sum(counts)
+        source_ok = source_count == self.initial_cookie_count - self.target_cookie_goal
+        count_fill = source_ok and all(n == self.task_config.required_cookies for n in counts)
+        exact_fill = source_ok and all(exact_checks)
+        task_filled = (
+            source_ok and all(fill_checks)
+            and (self._scene_randomizer is None or not self._scene_randomizer.crushed_ids)
         )
-        exact_fill = (
-            target_count == self.task_config.required_cookies
-            and source_count == self.task_config.cookie_count - self.task_config.required_cookies
-            and all(index >= 0 for index in occupancy)
-            and target_touches_all_walls
-        )
-        count_fill = (
-            target_count == self.task_config.required_cookies
-            and source_count == self.task_config.cookie_count - self.task_config.required_cookies
-        )
-        task_filled = exact_fill if self.task_config.require_exact_slots else count_fill
-        task_filled = task_filled and self._target_fill_is_valid(in_target)
         self._success_hold_count = self._success_hold_count + 1 if task_filled else 0
         success = self._success_hold_count >= self.task_config.success_hold_steps
         terminated = safety_terminated or (success and self.task_config.terminate_on_success)
-        reward = min(target_count / self.task_config.required_cookies, 1.0)
+        reward = min(target_count / self.target_cookie_goal, 1.0)
         info.update(
             success=success,
             cookies_in_target=target_count,
             cookies_in_source=source_count,
-            required_cookies=self.task_config.required_cookies,
-            cookies_in_target_mask=in_target,
+            required_cookies=self.target_cookie_goal,
+            cookies_in_target_mask=tuple(counted),
             cookies_in_source_mask=in_source,
-            target_slot_occupancy=occupancy,
-            target_touches_all_walls=target_touches_all_walls,
+            target_slot_occupancy=occupancies[0],
+            target_touches_all_walls=all(wall_checks),
             source_initially_filled=self._source_initially_filled,
             count_fill=count_fill,
             success_criterion="exact_slots"
@@ -617,4 +726,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             cookie_positions=self.cookie_positions,
         )
         info[f"exact_2x{self.config.cookie_transfer.target_rows}_fill"] = exact_fill
+        if self._scene_randomizer is not None:
+            info["scenario_metrics"] = self._scene_metrics(counts, fill_checks)
+            reward = info["scenario_metrics"]["target_score"] / self.target_cookie_goal
+        if len(counts) > 1:
+            info["cookies_in_target_masks"] = target_masks
+            info["target_slot_occupancies"] = occupancies
         return observation, reward, terminated, truncated and not terminated, info

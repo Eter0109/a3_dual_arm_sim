@@ -32,6 +32,13 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
         super().__init__(config_path or resource_root() / "configs/cookie_2x10.yaml", **kwargs)
         if self.config.cookie_transfer.target_rows != 10:
             raise ValueError("the 2x10 runner requires configs/cookie_2x10.yaml")
+        if self.scene_options.enabled:
+            # The opt-in scene task consumes intact, contiguous five-Cookie
+            # groups. An arbitrary native n/(10-n) split need not be possible
+            # after removing entire five-Cookie groups. Keep the requested mode
+            # in the metadata; the unmodified native task still supports 0..9.
+            self.scene_requested_first_grasp = self.first_grasp
+            self.first_grasp = 5
 
     def create_env(self, *, render_cameras=False):
         return A3Cookie2x10Env(
@@ -46,6 +53,7 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
             ),
             render_mode="human" if self.render else None,
             render_cameras=render_cameras,
+            scene_options=self.scene_options,
         )
 
     def _episode_task(self, column, seed):
@@ -53,6 +61,16 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
 
     def _episode_policy(self, policy, column, seed):
         if isinstance(policy, str) and policy == "variable_grasp":
+            if self.scene_options.enabled:
+                from a3_dual_arm_sim.controllers.scene_batch_expert import A3Scene2x10Expert
+
+                return ExpertPolicyAdapter(
+                    lambda env: A3Scene2x10Expert(
+                        env, first_grasp=5, sampling_seed=seed,
+                        requested_source_column_index=(column or 1) - 1,
+                    ),
+                    name="cookie_scene_2x10_expert",
+                )
             return ExpertPolicyAdapter(
                 lambda env: A3Cookie2x10Expert(
                     env,
@@ -67,11 +85,19 @@ class Cookie2x10EpisodeExecution(EpisodeExecution):
         return super()._episode_policy(policy, column, seed)
 
     def _episode_metadata(self, column, seed):
-        return {
+        metadata = {
             **super()._episode_metadata(column, seed),
             **Cookie2x10Plan.from_seed(self.first_grasp, seed).metadata(),
             "task_instruction": self._episode_task(column, seed),
         }
+        if self.scene_options.enabled:
+            metadata.update(
+                required_cookies=self.required_cookies,
+                grasp_counts=[5] * (self.required_cookies // 5),
+                scene_requested_first_grasp=self.scene_requested_first_grasp,
+                scene_grasp_plan="five_cookie_groups",
+            )
+        return metadata
 
     def _completed_episode_metadata(self, runner_policy, info):
         expert = getattr(runner_policy, "expert", None)

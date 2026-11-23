@@ -8,6 +8,12 @@ version: 1
 profile: basic
 source_column: 1  # 1, 2, 3, 4, or random
 first_grasp: random  # 0..9, or random (sample once per episode; plan [n,10-n,n,10-n])
+# Optional and independent of the profile. Omitted fields use the original scene.
+# scene:
+#   source_gap_groups: [2, 5]  # four groups at most with three target boxes
+#   target_box_count: 3        # 1..4; four boxes need all 80 cookies
+#   source_tilt_deg: 8         # 0..8 degrees; one aligned five-cookie group
+#   cookie_crush_force_n: 12   # optional positive force in N
 profiles:
   basic:
     source_bin_noise_m: 0.010

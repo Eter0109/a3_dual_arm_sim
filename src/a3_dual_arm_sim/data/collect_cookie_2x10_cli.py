@@ -13,6 +13,7 @@ from pathlib import Path
 from a3_dual_arm_sim.data.audit import audit_training_dataset
 from a3_dual_arm_sim.data.recording import LeRobotV3Recorder
 from a3_dual_arm_sim.paths import project_root
+from a3_dual_arm_sim.sim.cookie_scene_options import CookieSceneOptions
 from a3_dual_arm_sim.sim.randomization import (
     choose_column,
     profile_parameters,
@@ -58,7 +59,8 @@ def main() -> int:
         default=None,
         help="Optional override of YAML first_grasp (0..9 or random)",
     )
-    parser.add_argument("--max-steps", type=int, default=3200)
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Per-episode budget; defaults to 3200 per target box")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -82,7 +84,7 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
-    if args.max_steps <= 0:
+    if args.max_steps is not None and args.max_steps <= 0:
         parser.error("--max-steps must be positive")
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -96,6 +98,11 @@ def main() -> int:
     )
     if args.first_grasp is not None:
         first_grasp = args.first_grasp
+    scene_options = CookieSceneOptions.from_settings(settings)
+    if scene_options.enabled:
+        args.complete_demonstrations = True
+    if args.max_steps is None:
+        args.max_steps = 3200 * scene_options.target_box_count
     profile = settings["profile"]
     source_column = settings["source_column"]
     benchmark = Cookie2x10Benchmark(
@@ -118,12 +125,12 @@ def main() -> int:
         "complete_demonstrations": args.complete_demonstrations,
         "placement_order": args.placement_order if args.complete_demonstrations else "legacy",
         "task": "cookie_transfer",
-        "task_instruction": TASK,
+        "task_instruction": benchmark._scene_task_instruction() or TASK,
         "repo_id": args.repo_id,
         "policy": "cookie_2x10_variable_grasp",
         "target_layout": "2x10",
-        "required_cookies": 20,
-        "first_grasp_mode": first_grasp,
+        "required_cookies": benchmark.required_cookies,
+        "first_grasp_mode": benchmark.first_grasp,
         "first_grasp_sampling_version": 1,
         "zero_grasp_behavior": "skip",
         "grasp_plan": "[n, 10-n, n, 10-n]",
@@ -140,17 +147,21 @@ def main() -> int:
         "max_steps": args.max_steps,
         "use_videos": not args.no_videos,
     }
+    if scene_options.enabled:
+        summary.update(scene_expert_version=1, training_arm_mode="left",
+                       scene_requested_first_grasp=first_grasp,
+                       grasp_plan="five-cookie groups across all target boxes")
     if args.dry_run:
         previews = []
         for seed in range(args.seed_start, args.seed_start + 3):
             column = choose_column(source_column, seed)
-            plan = Cookie2x10Plan.from_seed(first_grasp, seed)
+            plan = Cookie2x10Plan.from_seed(benchmark.first_grasp, seed)
             previews.append(
                 {
                     "seed": seed,
                     "source_column": column,
-                    **plan.metadata(),
-                    "prompt": plan.prompt(column),
+                    **(benchmark._episode_metadata(column, seed) if scene_options.enabled else plan.metadata()),
+                    "prompt": benchmark._scene_task_instruction() or plan.prompt(column),
                 }
             )
         print(json.dumps({"collection": summary, "preview": previews}, indent=2))
@@ -194,6 +205,10 @@ def main() -> int:
         ):
             if previous.get(key) != json.loads(json.dumps(summary[key])):
                 raise RuntimeError(f"collection setting {key!r} changed since the initial run")
+        if scene_options.enabled:
+            for key in ("scene_expert_version", "training_arm_mode", "scene_requested_first_grasp", "task_instruction"):
+                if previous.get(key) != summary[key]:
+                    raise RuntimeError(f"scene collection setting {key!r} changed; use a new dataset")
 
     recorder = LeRobotV3Recorder(
         root,
@@ -203,6 +218,7 @@ def main() -> int:
         image_width=benchmark.config.image_width,
         use_videos=not args.no_videos,
         resume=args.resume,
+        left_arm_only=scene_options.enabled,
     )
     if not args.resume:
         summary["git_commit"] = subprocess.check_output(

@@ -13,6 +13,7 @@ from a3_dual_arm_sim.config import SimConfig
 from a3_dual_arm_sim.contracts import LEFT_JOINTS, RIGHT_JOINTS
 from a3_dual_arm_sim.paths import asset_root
 
+from .cookie_scene_options import CookieSceneOptions
 from .model_types import JointSource as JointSource
 from .model_types import ModelBundle as ModelBundle
 from .object_builder import BIN_RGBA as BIN_RGBA
@@ -31,7 +32,9 @@ from .urdf import _vec as _vec
 SceneName = Literal["sandbox", "cookie_transfer"]
 
 
-def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBundle:
+def build_model(
+    config: SimConfig, *, scene: SceneName = "sandbox", cookie_scene: CookieSceneOptions | None = None
+) -> ModelBundle:
     if scene not in ("sandbox", "cookie_transfer"):
         raise ValueError(f"unsupported scene: {scene}")
     urdf, source_joints = _source()
@@ -249,7 +252,7 @@ def build_model(config: SimConfig, *, scene: SceneName = "sandbox") -> ModelBund
             joint.set("actuatorfrcrange", f"{-effort} {effort}")
 
     if scene == "cookie_transfer":
-        _add_cookie_scene(root, world, config)
+        _add_cookie_scene(root, world, config, cookie_scene)
     else:
         colors = (
             (0.68, -0.22, 0.79, "0.85 0.15 0.12 1"),
