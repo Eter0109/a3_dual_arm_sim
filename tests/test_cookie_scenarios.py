@@ -164,7 +164,7 @@ def test_two_box_positions_pass_existing_grasp_reachability_preflight():
 @pytest.mark.parametrize("tolerance_y", [0.005, 0.0025])
 def test_prefilled_cookies_settle_when_target_box_is_rotated(tolerance_y):
     env = make_cookie_benchmark(
-        "prefilled", profile="advanced", slot_tolerance_m=(0.015, tolerance_y)
+        "prefilled", profile="basic", slot_tolerance_m=(0.015, tolerance_y)
     ).create_env()
     try:
         _, info = env.reset(
@@ -172,10 +172,10 @@ def test_prefilled_cookies_settle_when_target_box_is_rotated(tolerance_y):
             options={
                 "randomize_boxes": True,
                 "randomize_cookies": True,
-                "source_bin_noise_m": 0.02,
-                "target_bin_noise_m": 0.02,
-                "target_bin_yaw_noise_rad": 0.08,
-                "randomization_profile": "advanced",
+                "source_bin_noise_m": 0.01,
+                "target_bin_noise_m": 0.01,
+                "target_bin_yaw_noise_rad": 0.03,
+                "randomization_profile": "basic",
             },
         )
         assert info["scenario_metrics"]["target_counts"] == [5]
@@ -186,17 +186,17 @@ def test_prefilled_cookies_settle_when_target_box_is_rotated(tolerance_y):
 
 
 def test_fallen_variant_preserves_actual_inventory_and_pose():
-    env = make_cookie_benchmark("tilted", tilt_level="fallen", profile="advanced").create_env()
+    env = make_cookie_benchmark("tilted", tilt_level="fallen", profile="basic").create_env()
     try:
         _, info = env.reset(
             seed=2,
             options={
                 "randomize_boxes": True,
                 "randomize_cookies": True,
-                "source_bin_noise_m": 0.02,
-                "target_bin_noise_m": 0.02,
-                "target_bin_yaw_noise_rad": 0.08,
-                "randomization_profile": "advanced",
+                "source_bin_noise_m": 0.01,
+                "target_bin_noise_m": 0.01,
+                "target_bin_yaw_noise_rad": 0.03,
+                "randomization_profile": "basic",
             },
         )
         metadata = env.scenario_metadata
@@ -246,13 +246,23 @@ def test_missing_columns_use_actual_inventory_for_success():
 @pytest.mark.parametrize("task", SCENARIO_TASKS)
 def test_benchmark_produces_the_existing_report_format(task):
     benchmark = make_cookie_benchmark(task, max_steps=1)
-    result = benchmark.evaluate("expert", num_episodes=1, seed_start=0, verbose=False)
+    class HoldPolicy:
+        action_mode = "cartesian_delta"
+        finished = False
+
+        def reset(self, context):
+            pass
+
+        def act(self, observation, task):
+            return np.zeros(14)
+
+    result = benchmark.evaluate(HoldPolicy(), num_episodes=1, seed_start=0, verbose=False)
     report = result.to_dict()
     episode = report["episodes"][0]
     assert report["summary"]["total_episodes"] == 1
     assert episode["randomization"]["scenario"]["name"] == task
     assert episode["randomization"]["task_instruction"] == benchmark._episode_task(None, 0)
-    assert episode["max_score"] == (5 if task == "prefilled" else 10)
+    assert episode["max_score"] == episode["randomization"]["scenario"]["required_new_cookies"]
     assert episode["scenario_metrics"]["new_correct_cookies"] == episode["score"]
     assert episode["steps"] == 1
 
@@ -265,3 +275,21 @@ def test_parallel_workers_preserve_scenario_and_seed_metadata():
     for first, second in zip(serial.episodes, parallel.episodes, strict=True):
         assert first.randomization["scenario"] == second.randomization["scenario"]
         assert first.scenario_metrics == second.scenario_metrics
+
+
+def test_variable_prefill_all_counts_and_score_denominators():
+    env = make_cookie_benchmark("variable-prefill").create_env()
+    counts = set()
+    try:
+        for seed in range(13000, 13100):
+            _, info = env.reset(seed=seed)
+            count = len(env.scenario_metadata["prefilled_cookie_ids"])
+            counts.add(count)
+            assert info["required_cookies"] == 10 - count
+            assert info["scenario_metrics"]["target_counts"] == [count]
+            assert info["scenario_metrics"]["new_correct_cookies"] == 0
+            if len(counts) == 9:
+                break
+        assert counts == set(range(1, 10))
+    finally:
+        env.close()

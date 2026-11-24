@@ -69,7 +69,8 @@ def summarize(rows, planned, profiles=PROFILES):
                     "planned": planned,
                     "mean_final_count": sum(counts) / len(counts) if counts else None,
                     "total_final_count": sum(counts),
-                    "complete_successes": sum(bool(row["success"]) for row in cell),
+                    "complete_successes": (sum(bool(row["success"]) for row in cell)
+                                           if all("success" in row for row in cell) else None),
                     "front_first_observed": sum(value is not None for value in ordering),
                     "front_first_count": sum(value is True for value in ordering),
                     "total_capacity": capacity * len(counts),
@@ -94,19 +95,20 @@ def main():
     parser.add_argument("--dataset-root", type=Path, default=None)
     parser.add_argument("--repo-id", default=None)
     parser.add_argument("--output", type=Path, default=root / "outputs/smolvla_grid_500_3200")
-    parser.add_argument("--episodes", type=int, default=20, help="Episodes per cell")
+    parser.add_argument("--episodes", type=int, default=None, help="Episodes per cell")
     parser.add_argument("--seed-start", type=int, default=13000)
-    parser.add_argument("--max-steps", type=int, default=500, help="2x5 episode step limit")
-    parser.add_argument("--max-steps-2x10", type=int, default=3200, help="2x10 episode step limit")
+    parser.add_argument("--max-steps", type=int, default=None, help="2x5 episode step limit")
+    parser.add_argument("--max-steps-2x10", type=int, default=None, help="2x10 episode step limit")
+    parser.add_argument("--protocol", choices=("course-v1", "legacy"), default=None)
     parser.add_argument("--n-action-steps", type=int, default=8)
     parser.add_argument("--num-steps", type=int, default=25, help="Flow inference steps")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--profiles", nargs="+", choices=PROFILES, default=list(PROFILES))
     parser.add_argument(
-        "--prompt-style-2x5", choices=("training", "task", "short"), default="training"
+        "--prompt-style-2x5", choices=("training", "task", "short"), default=None
     )
     parser.add_argument(
-        "--prompt-style-2x10", choices=("training", "task", "short"), default="task"
+        "--prompt-style-2x10", choices=("training", "task", "short"), default=None
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--strict-policy-completion", action="store_true",
@@ -115,6 +117,13 @@ def main():
         "--dry-run", action="store_true", help="Print experiment settings without loading a policy"
     )
     args = parser.parse_args()
+    if args.protocol is None:
+        args.protocol = "legacy" if args.prompt_style_2x5 or args.prompt_style_2x10 else "course-v1"
+    if args.protocol == "course-v1" and (args.prompt_style_2x5 or args.prompt_style_2x10):
+        parser.error("course-v1 uses the same fixed prompt for both tasks")
+    args.episodes = args.episodes if args.episodes is not None else (5 if args.protocol == "course-v1" else 20)
+    args.max_steps = args.max_steps if args.max_steps is not None else (6000 if args.protocol == "course-v1" else 500)
+    args.max_steps_2x10 = args.max_steps_2x10 if args.max_steps_2x10 is not None else (12000 if args.protocol == "course-v1" else 3200)
     if min(
         args.episodes, args.max_steps, args.max_steps_2x10,
         args.n_action_steps, args.num_steps,
@@ -122,7 +131,9 @@ def main():
         parser.error("episode and step counts must be positive")
     if len(set(args.profiles)) != len(args.profiles):
         parser.error("profiles must not contain duplicates")
-    prompt_styles = {"2x5": args.prompt_style_2x5, "2x10": args.prompt_style_2x10}
+    prompt_styles = ({"2x5": "course", "2x10": "course"} if args.protocol == "course-v1"
+                     else {"2x5": args.prompt_style_2x5 or "training",
+                           "2x10": args.prompt_style_2x10 or "task"})
     max_steps_by_task = {"2x5": args.max_steps, "2x10": args.max_steps_2x10}
     checkpoint, dataset, output = (
         args.checkpoint.resolve(),
@@ -151,14 +162,17 @@ def main():
         "device": args.device,
         "profiles": args.profiles,
         "prompt_styles": prompt_styles,
-        "metric": "complete task successes and final cookies_in_target (stable/released when strict mode is enabled)",
+        "benchmark_protocol": args.protocol,
+        "metric": ("target-only complete successes with released, upright and stable cookies"
+                   if args.protocol == "course-v1" else
+                   "complete task successes and final cookies_in_target (stable/released when strict mode is enabled)"),
         "prompt_2x5": (
-            "transfer 10 cookies into target box"
+            "Fill the target box." if args.protocol == "course-v1" else "transfer 10 cookies into target box"
             if prompt_styles["2x5"] in ("training", "short")
             else "column-specific task prompt; actual text saved per episode"
         ),
         "prompt_2x10": (
-            "transfer 20 cookies into target box"
+            "Fill the target box." if args.protocol == "course-v1" else "transfer 20 cookies into target box"
             if prompt_styles["2x10"] == "short"
             else "native Cookie2x10Plan prompt; actual text saved per episode"
         ),
@@ -261,6 +275,7 @@ def main():
                 extra = {"first_grasp": first_grasp} if task == "2x10" else {}
                 runners[task, profile] = make_cookie_benchmark(
                     task=task,
+                    protocol=args.protocol,
                     prompt_style=prompt_styles[task],
                     profile=profile,
                     source_column="1",

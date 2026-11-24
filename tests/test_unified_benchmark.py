@@ -46,6 +46,8 @@ def test_parallel_retains_task_plan_and_metadata(tmp_path):
             str(ROOT / "examples/benchmark_cookie_batch.py"),
             "--task",
             "2x10",
+            "--protocol",
+            "legacy",
             "--policy",
             "expert",
             "--first-grasp",

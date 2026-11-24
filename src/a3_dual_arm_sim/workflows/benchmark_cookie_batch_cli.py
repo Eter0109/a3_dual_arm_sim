@@ -15,15 +15,25 @@ from pathlib import Path
 
 from a3_dual_arm_sim.paths import project_root
 from a3_dual_arm_sim.sim.randomization import load_randomization_config
+from a3_dual_arm_sim.tasks.cookie_2x10 import SOURCE_TASKS
 from a3_dual_arm_sim.tasks.cookie_2x10_plan import parse_first_grasp
-from a3_dual_arm_sim.tasks.cookie_2x10_settings import load_cookie_2x10_settings
-from a3_dual_arm_sim.tasks.cookie_scenarios import SCENARIO_TASKS
+from a3_dual_arm_sim.tasks.cookie_2x10_settings import (
+    load_cookie_2x10_settings,
+    load_expanded_randomization,
+)
+from a3_dual_arm_sim.tasks.cookie_scenarios import SCENARIO_2X10_TASKS, SCENARIO_TASKS
 from a3_dual_arm_sim.workflows.benchmark import (
     ACTPolicyAdapter,
     CookieBatchBenchmark,
     PI05PolicyAdapter,
     SmolVLAPolicyAdapter,
     make_cookie_benchmark,
+)
+from a3_dual_arm_sim.workflows.course_protocol import (
+    COURSE_PROMPT,
+    COURSE_PROTOCOL,
+    LEGACY_PROTOCOL,
+    course_max_steps,
 )
 
 # Backward-compatible import for existing callers.
@@ -45,41 +55,77 @@ def run_metadata(args, benchmark):
         "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
         "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
     }
+    if benchmark.task in SOURCE_TASKS:
+        metadata["success_conditions"].update(
+            target_column_counts=[10, 10],
+            source_quota=("five per source column" if benchmark.task == SOURCE_TASKS[0]
+                          else "ten from each instructed source into its assigned target column"),
+        )
     if benchmark.task in SCENARIO_TASKS:
         metadata["success_conditions"] = {
-            "required_new_cookies": benchmark.required_cookies,
+            "required_new_cookies": ("10 - initial_target_count" if benchmark.task == "variable-prefill" else benchmark.required_cookies),
             "required_cookies_in_source": "initial_source_count - required_new_cookies",
             "target_counts": ([benchmark.box_quota, benchmark.box_quota]
                               if benchmark.task == "two-boxes" else [10]),
-            "prefilled_cookies_must_remain": benchmark.task == "prefilled",
+            "prefilled_cookies_must_remain": benchmark.task in ("prefilled", "variable-prefill"),
             "require_exact_slots": benchmark.task != "two-boxes" or benchmark.box_quota == 10,
             "require_released_upright_and_settled": True,
             "success_hold_steps": benchmark.success_hold_steps,
             "slot_tolerance_m": benchmark.config.cookie_transfer.target_slot_tolerance_m,
             "wall_contact_tolerance_m": benchmark.wall_contact_tolerance_m,
         }
+    if benchmark.protocol == COURSE_PROTOCOL:
+        rows = benchmark.config.cookie_transfer.target_rows
+        metadata["success_conditions"] = {
+            "target_column_counts": [rows, rows] if benchmark.task != "two-boxes" else None,
+            "target_box_counts": ([benchmark.box_quota, benchmark.box_quota]
+                                  if benchmark.task == "two-boxes" else [2 * rows]),
+            "require_released_upright_and_settled": True,
+            "success_hold_steps": benchmark.success_hold_steps,
+            "source_inventory_and_prefill_identity_are_diagnostic_only": True,
+        }
+    metadata["protocol"] = benchmark.protocol
+    metadata["task_instruction"] = (COURSE_PROMPT if benchmark.protocol == COURSE_PROTOCOL
+                                    else benchmark._episode_task(None, getattr(args, "seed_start", 0)))
+    if benchmark.task in (*SOURCE_TASKS, *SCENARIO_TASKS) or benchmark.protocol == COURSE_PROTOCOL:
         package_root = Path(__file__).resolve().parents[1]
         protocol_files = (
+            package_root / "tasks/cookie_2x10.py",
+            package_root / "tasks/cookie_2x10_settings.py",
             package_root / "tasks/cookie_scenarios.py",
+            package_root / "tasks/expanded_ik.py",
+            package_root / "tasks/source_clearance.py",
             package_root / "tasks/cookie_transfer.py",
+            package_root / "controllers/course_expert.py",
+            package_root / "controllers/course_sparse_expert.py",
+            package_root / "controllers/batch_expert.py",
+            package_root / "controllers/same_column_batch_expert.py",
+            package_root / "controllers/cookie_2x10_expert.py",
             package_root / "config.py",
             package_root / "sim/env.py",
+            package_root / "sim/actions.py",
+            package_root / "sim/randomization.py",
             package_root / "sim/object_builder.py",
             package_root / "workflows/benchmark.py",
             package_root / "workflows/benchmark_results.py",
+            package_root / "workflows/cookie_2x10_execution.py",
             package_root / "workflows/episode_execution.py",
             package_root / "workflows/benchmark_cookie_batch_cli.py",
+            package_root / "workflows/course_protocol.py",
+            package_root / "workflows/course_benchmark_cli.py",
         )
         metadata["scenario_protocol"] = {
-            "version": 1,
+            "version": 2,
             "source_sha256": {
                 str(path.relative_to(package_root)): hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in protocol_files
             },
         }
     metadata["task"] = benchmark.task
+    if benchmark.task in (*SOURCE_TASKS, *SCENARIO_TASKS):
+        metadata["profile"] = benchmark.profile
     metadata["first_grasp"] = getattr(benchmark, "first_grasp", None)
-    if benchmark.task == "tilted":
+    if benchmark.task in ("tilted", "2x10-tilted"):
         metadata["tilt_level"] = benchmark.tilt_level
     if benchmark.task == "two-boxes":
         metadata["box_quota"] = benchmark.box_quota
@@ -145,8 +191,8 @@ def main() -> int:
     parser.add_argument(
         "--episodes",
         type=int,
-        default=20,
-        help="Number of benchmark episodes (default: 20)",
+        default=None,
+        help="Number of benchmark episodes (course: 5; legacy: 20)",
     )
     parser.add_argument(
         "--seed-start",
@@ -157,8 +203,8 @@ def main() -> int:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=1000,
-        help="Maximum steps allowed per episode (default: 1000)",
+        default=None,
+        help="Maximum steps per episode (course: 6000 for 2x5, 12000 for 2x10)",
     )
     parser.add_argument(
         "--no-randomize-boxes",
@@ -231,7 +277,8 @@ def main() -> int:
     parser.add_argument("--diagnostic-dir", type=Path, default=None)
     parser.add_argument("--pi05-scene", type=Path, help="Explicit provider scene fingerprint; changes evaluation protocol")
     parser.add_argument("--pi05-scene-mode", choices=("cameras", "full"), default="cameras")
-    parser.add_argument("--task", choices=("2x5", "2x10", *SCENARIO_TASKS), default="2x5")
+    parser.add_argument("--task", choices=("2x5", "2x10", *SOURCE_TASKS, *SCENARIO_TASKS), default="2x5")
+    parser.add_argument("--protocol", choices=(COURSE_PROTOCOL, LEGACY_PROTOCOL), default=None)
     parser.add_argument("--profile", choices=("basic", "medium", "advanced"))
     parser.add_argument("--source-column", choices=("1", "2", "3", "4", "random"))
     parser.add_argument("--randomization-config", type=Path)
@@ -242,21 +289,35 @@ def main() -> int:
                         help="Two-boxes task only: cookies per target box (default: 5)")
     parser.add_argument(
         "--prompt-style",
-        choices=("training", "task", "short", "pi05_aligned"),
+        choices=("course", "training", "task", "short", "pi05_aligned"),
         default=None,
-        help="Default: training for 2x5/2x10; task for the six scenario benchmarks",
+        help="Default: training for 2x5/2x10; task for the scenario benchmarks",
     )
     parser.add_argument("--num-steps", type=int, default=None, help="SmolVLA or pi05 flow inference steps")
     args = parser.parse_args()
-    if args.prompt_style is None:
-        args.prompt_style = "task" if args.task in SCENARIO_TASKS else "training"
-    if args.tilt_level is not None and args.task != "tilted":
+    if args.protocol is None:
+        args.protocol = (LEGACY_PROTOCOL if args.task in SOURCE_TASKS
+                         or args.prompt_style not in (None, "course")
+                         or args.tilt_level == "fallen" or args.box_quota == 10 else COURSE_PROTOCOL)
+    if args.protocol == COURSE_PROTOCOL:
+        if args.task in SOURCE_TASKS or args.prompt_style not in (None, "course"):
+            parser.error("course-v1 requires a course task and the unified prompt")
+        args.prompt_style = "course"
+    elif args.prompt_style is None:
+        args.prompt_style = "task" if args.task in (*SOURCE_TASKS, *SCENARIO_TASKS) else "training"
+    if args.episodes is None:
+        args.episodes = 5 if args.protocol == COURSE_PROTOCOL else 20
+    if args.max_steps is None:
+        args.max_steps = course_max_steps(args.task) if args.protocol == COURSE_PROTOCOL else 1000
+    if args.task in (*SOURCE_TASKS, *SCENARIO_TASKS) and args.profile not in (None, "basic"):
+        parser.error("expanded scenario tasks support only --profile basic")
+    if args.tilt_level is not None and args.task not in ("tilted", "2x10-tilted"):
         parser.error("--tilt-level requires --task tilted")
     if args.box_quota is not None and args.task != "two-boxes":
         parser.error("--box-quota requires --task two-boxes")
     if min(args.episodes, args.max_steps, args.workers) < 1:
         parser.error("episodes, max-steps and workers must be positive")
-    if args.task == "2x10" and (args.compare or args.policy in ("same_column", "cross_column")):
+    if args.task in ("2x10", *SOURCE_TASKS) and (args.compare or args.policy in ("same_column", "cross_column")):
         parser.error(
             "2x10 supports --policy expert or variable_grasp, not same_column/cross_column/compare"
         )
@@ -265,8 +326,8 @@ def main() -> int:
     if args.task in SCENARIO_TASKS:
         if args.first_grasp is not None or args.policy == "variable_grasp":
             parser.error("first-grasp and variable_grasp require --task 2x10")
-        if args.prompt_style != "task":
-            parser.error("the six scenario tasks require --prompt-style task")
+        if args.prompt_style not in ("task", "course"):
+            parser.error("the scenario tasks require the task or course prompt")
         if args.compare:
             parser.error("run scenario expert policies separately; --compare supports 2x5")
     if args.num_steps is not None and (
@@ -296,14 +357,18 @@ def main() -> int:
 
     randomization = {}
     first_grasp = args.first_grasp
-    if args.task == "2x10" or args.profile or args.source_column or args.randomization_config:
-        if args.task == "2x10":
+    if args.protocol == COURSE_PROTOCOL or args.task in ("2x10", *SOURCE_TASKS) or args.profile or args.source_column or args.randomization_config:
+        if args.task in ("2x10", *SOURCE_TASKS):
             settings, configured_grasp = load_cookie_2x10_settings(args.randomization_config)
             if first_grasp is None:
                 first_grasp = configured_grasp
         else:
-            settings = load_randomization_config(args.randomization_config)
-        settings["profile"] = args.profile or settings["profile"]
+            settings = (load_expanded_randomization(args.randomization_config)
+                        if args.task in SCENARIO_2X10_TASKS
+                        else load_randomization_config(args.randomization_config))
+        settings["profile"] = args.profile or (
+            "basic" if args.task in (*SOURCE_TASKS, *SCENARIO_TASKS) else settings["profile"]
+        )
         settings["source_column"] = args.source_column or settings["source_column"]
         randomization = {
             "profile": settings["profile"],
@@ -313,6 +378,7 @@ def main() -> int:
 
     benchmark = make_cookie_benchmark(
         task=args.task,
+        protocol=args.protocol,
         prompt_style=args.prompt_style,
         first_grasp=first_grasp,
         tilt_level=args.tilt_level,
@@ -364,9 +430,10 @@ def main() -> int:
             # reaches `_episode_task` for "short" -- so there is no alignment flag to
             # ask for.
             needs_alignment = (
-                args.task == "2x5" and args.prompt_style != "pi05_aligned"
+                args.protocol != COURSE_PROTOCOL and args.task == "2x5"
+                and args.prompt_style != "pi05_aligned"
             )
-            if needs_alignment or args.task not in ("2x5", "2x10", *SCENARIO_TASKS):
+            if needs_alignment or args.task not in ("2x5", "2x10", *SOURCE_TASKS, *SCENARIO_TASKS):
                 parser.error(
                     "pi05: requires 2x5 with --prompt-style pi05_aligned, or --task 2x10, "
                     "or a scenario task"
@@ -383,7 +450,7 @@ def main() -> int:
                     "its result is not a reproduction of the checkpoint's training scene.",
                     flush=True,
                 )
-            elif args.task == "2x10":
+            elif args.task in ("2x10", *SOURCE_TASKS):
                 # The 2x5 fingerprint cannot restore a 2x10 scene. The 2x10
                 # layout may differ from a checkpoint's training scene, so do
                 # not imply that scene compatibility has been established.
@@ -491,6 +558,9 @@ def main() -> int:
 
         return 0
 
+    # Capture the actual source fingerprint before execution. A second check
+    # marks runs where files changed while the policy was executing.
+    start_metadata = run_metadata(args, benchmark) if args.output else None
     # Capture configuration before close() releases the loaded model.
     loaded_policy = getattr(getattr(policy, "plugin", None), "_policy", None)
     effective_config = asdict(loaded_policy.config) if loaded_policy is not None else None
@@ -510,7 +580,13 @@ def main() -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         report = result.to_dict()
-        report["run"] = run_metadata(args, benchmark)
+        report["run"] = start_metadata
+        end_metadata = run_metadata(args, benchmark)
+        start_sources = start_metadata.get("scenario_protocol", {}).get("source_sha256")
+        end_sources = end_metadata.get("scenario_protocol", {}).get("source_sha256")
+        report["run"]["protocol_sources_changed_during_run"] = start_sources != end_sources
+        if start_sources != end_sources:
+            report["run"]["protocol_source_sha256_at_end"] = end_sources
         if effective_config is not None:
             report["run"]["effective_policy_config"] = effective_config
         if inference_protocol is not None:

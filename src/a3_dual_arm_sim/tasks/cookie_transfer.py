@@ -27,6 +27,9 @@ class CookieTransferTaskConfig:
     terminate_on_success: bool = True
     require_exact_slots: bool = True
     require_released: bool = False
+    # Course evaluation judges the final target, independently of source
+    # inventory and the particular slots used during the transfer.
+    target_only: bool = False
 
     def __post_init__(self) -> None:
         if self.success_hold_steps < 1:
@@ -138,6 +141,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             self._id(mujoco.mjtObj.mjOBJ_GEOM, f"L_finger_{finger}_geom")
             for finger in ("inner", "outer")
         )
+        self._right_finger_geoms = tuple(
+            self._id(mujoco.mjtObj.mjOBJ_GEOM, f"R_finger_{finger}_geom")
+            for finger in ("inner", "outer")
+        )
         self._success_hold_count = 0
         self._source_initially_filled = False
         self._appearance_randomizer = AppearanceRandomizer(self.model)
@@ -171,12 +178,19 @@ class A3CookieTransferEnv(A3DualArmEnv):
 
     def privileged_left_finger_contacts(self, index: int) -> tuple[bool, bool]:
         """Report target-Cookie contact for each left finger from MuJoCo contacts."""
+        return self._finger_contacts(index, self._left_finger_geoms)
+
+    def privileged_right_finger_contacts(self, index: int) -> tuple[bool, bool]:
+        """Report target-Cookie contact for each right finger from MuJoCo contacts."""
+        return self._finger_contacts(index, self._right_finger_geoms)
+
+    def _finger_contacts(self, index: int, finger_geoms: tuple[int, int]) -> tuple[bool, bool]:
         cookie_geoms = self._cookie_collision_geoms[index]
         contacts = [False, False]
         for contact_index in range(self.data.ncon):
             contact = self.data.contact[contact_index]
             pair = {int(contact.geom1), int(contact.geom2)}
-            for finger_index, finger_geom in enumerate(self._left_finger_geoms):
+            for finger_index, finger_geom in enumerate(finger_geoms):
                 if finger_geom in pair and bool(pair & cookie_geoms):
                     contacts[finger_index] = True
         return contacts[0], contacts[1]
@@ -468,8 +482,9 @@ class A3CookieTransferEnv(A3DualArmEnv):
             linear_speed <= max(self.task_config.max_linear_speed_m_s, 0.09)
             and angular_speed <= self.task_config.max_angular_speed_rad_s
         )
-        released = not self.task_config.require_released or not any(
-            self.privileged_left_finger_contacts(index)
+        released = not self.task_config.require_released or (
+            not any(self.privileged_left_finger_contacts(index))
+            and (not self.task_config.target_only or not any(self.privileged_right_finger_contacts(index)))
         )
         return footprint_inside and vertically_inside and upright and settled and released
 
@@ -565,6 +580,17 @@ class A3CookieTransferEnv(A3DualArmEnv):
     def _target_fill_is_valid(self, in_target: tuple[bool, ...]) -> bool:
         return True
 
+    def target_column_counts(self, in_target: tuple[bool, ...]) -> tuple[int, int]:
+        columns = np.unique(np.asarray(self.TARGET_SLOTS_LOCAL)[:, 0])
+        if len(columns) != 2:
+            raise ValueError("the target layout must have two columns")
+        counts = [0, 0]
+        for index, contained in enumerate(in_target):
+            if contained:
+                local_x = self.privileged_cookie_target_position(index)[0]
+                counts[int(np.argmin(np.abs(columns - local_x)))] += 1
+        return tuple(counts)
+
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         observation, _, safety_terminated, truncated, info = super().step(action)
         in_target = tuple(
@@ -592,7 +618,14 @@ class A3CookieTransferEnv(A3DualArmEnv):
             target_count == self.task_config.required_cookies
             and source_count == self.task_config.cookie_count - self.task_config.required_cookies
         )
-        task_filled = exact_fill if self.task_config.require_exact_slots else count_fill
+        if self.task_config.target_only:
+            per_column = self.task_config.required_cookies // 2
+            task_filled = (
+                target_count == self.task_config.required_cookies
+                and self.target_column_counts(in_target) == (per_column, per_column)
+            )
+        else:
+            task_filled = exact_fill if self.task_config.require_exact_slots else count_fill
         task_filled = task_filled and self._target_fill_is_valid(in_target)
         self._success_hold_count = self._success_hold_count + 1 if task_filled else 0
         success = self._success_hold_count >= self.task_config.success_hold_steps
@@ -607,9 +640,10 @@ class A3CookieTransferEnv(A3DualArmEnv):
             cookies_in_source_mask=in_source,
             target_slot_occupancy=occupancy,
             target_touches_all_walls=target_touches_all_walls,
+            target_column_counts=self.target_column_counts(in_target),
             source_initially_filled=self._source_initially_filled,
             count_fill=count_fill,
-            success_criterion="exact_slots"
+            success_criterion="target_only" if self.task_config.target_only else "exact_slots"
             if self.task_config.require_exact_slots
             else "released_count",
             success_hold_count=self._success_hold_count,

@@ -16,7 +16,7 @@ from a3_dual_arm_sim.workflows.benchmark import (
 
 
 def test_incomplete_fill_reason_reports_source_disturbance():
-    benchmark = make_cookie_benchmark(task="2x5", max_steps=1)
+    benchmark = make_cookie_benchmark(task="2x5", max_steps=1, protocol="legacy")
     reason = benchmark._describe_incomplete_fill(
         {
             "cookies_in_target": 10,
@@ -32,7 +32,7 @@ def test_incomplete_fill_reason_reports_source_disturbance():
 
 
 def test_incomplete_fill_reason_reports_unmet_acceptance():
-    benchmark = make_cookie_benchmark(task="2x5", max_steps=1)
+    benchmark = make_cookie_benchmark(task="2x5", max_steps=1, protocol="legacy")
     reason = benchmark._describe_incomplete_fill(
         {
             "cookies_in_target": 10,
@@ -46,6 +46,16 @@ def test_incomplete_fill_reason_reports_unmet_acceptance():
     assert "slots not one-to-one" in reason
     assert "all walls" in reason
     assert "held 2/5" in reason
+
+
+def test_course_incomplete_reason_ignores_source_inventory():
+    benchmark = make_cookie_benchmark(task="2x5", max_steps=1)
+    reason = benchmark._describe_incomplete_fill({
+        "cookies_in_target": 10, "cookies_in_source": 69,
+        "target_column_counts": (5, 5), "success_hold_count": 0,
+    })
+    assert "held=0/5" in reason
+    assert "69/70" not in reason and "collateral" not in reason
 
 
 def test_benchmark_policy_protocol_conformance():

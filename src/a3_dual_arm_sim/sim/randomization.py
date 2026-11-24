@@ -106,6 +106,50 @@ def profile_parameters(name, config=None):
     return dict((config or load_randomization_config())["profiles"][name])
 
 
+def require_basic_expanded_profile(name, task):
+    """Reject non-basic profiles for an expanded benchmark task."""
+    if name != "basic":
+        raise ValueError(
+            f"expanded task {task!r} only supports the basic randomization profile; "
+            f"got {name!r}"
+        )
+
+
+def expanded_basic_reset_options(options, task_config, task):
+    """Validate actual reset noise against the selected basic profile."""
+    options = dict(options or {})
+    require_basic_expanded_profile(options.get("randomization_profile", "basic"), task)
+    settings = load_randomization_config(config=options.get("randomization_settings"))
+    if "basic" not in settings["profiles"]:
+        raise ValueError(f"expanded task {task!r} requires a basic randomization profile")
+    settings["profile"] = "basic"
+    basic = settings["profiles"]["basic"]
+    options["randomization_profile"] = "basic"
+    options["randomization_settings"] = settings
+
+    checks = []
+    if options.get("randomize_cookies", True):
+        checks.extend((
+            ("cookie_noise_m", task_config.position_noise_m),
+            ("cookie_yaw_noise_rad", task_config.yaw_noise_rad),
+        ))
+    randomize_boxes = options.get("randomize_boxes", False)
+    if options.get("randomize_source_bin", randomize_boxes):
+        checks.append(("source_bin_noise_m", options.get("source_bin_noise_m", 0.001)))
+    if options.get("randomize_target_bin", randomize_boxes):
+        checks.extend((
+            ("target_bin_noise_m", options.get("target_bin_noise_m", 0.002)),
+            ("target_bin_yaw_noise_rad", options.get("target_bin_yaw_noise_rad", 0.015)),
+        ))
+    for key, value in checks:
+        if not math.isfinite(value) or value < 0 or value > basic[key] + 1e-12:
+            raise ValueError(
+                f"expanded task {task!r}: {key}={value} exceeds the basic profile "
+                f"limit {basic[key]}"
+            )
+    return options
+
+
 def choose_column(choice, seed):
     """Public columns 1..4 are sorted by source X; independent RNG stream."""
     if str(choice) == "random":

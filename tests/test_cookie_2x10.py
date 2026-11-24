@@ -403,3 +403,40 @@ def test_expert_done_requires_complete_environment_goal(columns, source_count, s
     expert._fail = failures.append
     expert._verify_complete_fill()
     assert bool(failures) == should_fail
+
+
+def test_source_quota_2x10_does_not_terminate_on_wrong_source_columns():
+    from a3_dual_arm_sim.tasks.cookie_2x10 import SourceQuota2x10Env
+
+    env = SourceQuota2x10Env(
+        task_config=Cookie2x10TaskConfig(success_hold_steps=2, terminate_on_success=True),
+        render_cameras=False,
+    )
+    try:
+        env.reset(seed=0, options={"randomize_boxes": False, "randomize_cookies": False})
+        # Fill all 20 target slots using only source column 0 (indices 0..19) -> violates four-source quota.
+        for slot, idx in enumerate(range(20)):
+            pos = env.privileged_target_slot_world(slot, env._target_cookie_center_z)
+            env.set_cookie_pose(idx, tuple(pos))
+        for _ in range(5):
+            _, _, terminated, _, info = env.step(env.DEPLOYMENT_HOME)
+        assert info["cookies_in_target"] == 5
+        assert info["success"] is False
+        assert terminated is False
+
+        # Now reset and place 5 from each of the 4 columns (20 total, 10 per target column).
+        env.reset(seed=0, options={"randomize_boxes": False, "randomize_cookies": False})
+        chosen = [col * 20 + row for col in range(4) for row in range(5)]
+        for slot, idx in enumerate(chosen):
+            pos = env.privileged_target_slot_world(slot, env._target_cookie_center_z)
+            env.set_cookie_pose(idx, tuple(pos))
+        for _ in range(150):
+            mujoco.mj_step(env.model, env.data)
+        mujoco.mj_forward(env.model, env.data)
+        for _ in range(2):
+            _, _, terminated, _, info = env.step(env.DEPLOYMENT_HOME)
+        assert info["cookies_in_target"] == 20
+        assert info["success"] is True
+        assert terminated is True
+    finally:
+        env.close()

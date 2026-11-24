@@ -1,6 +1,6 @@
 """Additional, reproducible initial states for the cookie benchmark.
 
-The six tasks share the 2x5 robot, camera and object geometry. Removed cookies
+The scenario tasks share the 2x5 robot, camera and Cookie geometry. Removed cookies
 are physically hidden and collision-disabled; prefilled cookies remain real
 rigid bodies. Their initial identities are excluded from the transfer score.
 """
@@ -10,9 +10,13 @@ from __future__ import annotations
 import mujoco
 import numpy as np
 
+from a3_dual_arm_sim.sim.randomization import expanded_basic_reset_options
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv
+from a3_dual_arm_sim.tasks.expanded_ik import ExpandedAbsoluteIKMixin
+from a3_dual_arm_sim.tasks.source_clearance import SourceColumnClearanceMixin
 
-SCENARIO_TASKS = (
+SCENARIO_2X5_TASKS = (
+    "variable-prefill", "sparse-exact-ten", "whole-row-lean", "rotated-target",
     "missing-columns",
     "partial-gaps",
     "cross-column",
@@ -21,7 +25,22 @@ SCENARIO_TASKS = (
     "two-boxes",
 )
 
+SCENARIO_2X10_BASE = {
+    "2x10-missing-columns": "missing-columns",
+    "2x10-partial-gaps": "partial-gaps",
+    "2x10-cross-column": "cross-column",
+    "2x10-sparse-exact-twenty": "sparse-exact-ten",
+    "2x10-tilted": "tilted",
+    "2x10-whole-row-lean": "whole-row-lean",
+}
+SCENARIO_2X10_TASKS = tuple(SCENARIO_2X10_BASE)
+SCENARIO_TASKS = (*SCENARIO_2X5_TASKS, *SCENARIO_2X10_TASKS)
+
 SCENARIO_PROMPTS = {
+    "variable-prefill": "Keep the existing cookies in the target box and fill it completely.",
+    "sparse-exact-ten": "Transfer all ten remaining cookies into the target box.",
+    "whole-row-lean": "Transfer ten cookies from the leaning row into the target box, upright.",
+    "rotated-target": "Fill the rotated target box with ten upright cookies.",
     "missing-columns": "Transfer 10 cookies from the available source columns into the target box.",
     "partial-gaps": "Transfer 10 available cookies from the source box into the target box.",
     "cross-column": "Transfer 10 cookies from the available source columns into the target box.",
@@ -31,7 +50,7 @@ SCENARIO_PROMPTS = {
 }
 
 
-class A3CookieScenarioEnv(A3CookieTransferEnv):
+class A3CookieScenarioEnv(SourceColumnClearanceMixin, ExpandedAbsoluteIKMixin, A3CookieTransferEnv):
     """A benchmark-only environment with scenario-aware counting and success."""
 
     def __init__(
@@ -46,7 +65,9 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         if scenario not in SCENARIO_TASKS:
             raise ValueError(f"unknown cookie scenario: {scenario}")
         self.scenario = scenario
-        if scenario == "tilted":
+        self.base_scenario = SCENARIO_2X10_BASE.get(scenario, scenario)
+        self.target_capacity = 2 * config.cookie_transfer.target_rows
+        if self.base_scenario == "tilted":
             self.tilt_level = tilt_level or "mild"
             if self.tilt_level not in ("mild", "fallen"):
                 raise ValueError("tilt_level must be mild or fallen")
@@ -54,7 +75,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             raise ValueError("tilt_level only applies to the tilted scenario")
         else:
             self.tilt_level = None
-        if scenario == "two-boxes":
+        if self.base_scenario == "two-boxes":
             self.box_quota = 5 if box_quota is None else box_quota
             if self.box_quota not in (5, 10):
                 raise ValueError("box_quota must be 5 or 10")
@@ -66,8 +87,8 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             2 * self.box_quota
             if self.box_quota is not None
             else 5
-            if scenario == "prefilled"
-            else 10
+            if self.base_scenario == "prefilled"
+            else self.target_capacity
         )
         super().__init__(config, **kwargs)
         self._cookie_all_geoms = tuple(
@@ -80,7 +101,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         self._original_source_position = self.model.body_pos[self._source_bin_body].copy()
         self._spare_body = (
             self._id(mujoco.mjtObj.mjOBJ_BODY, "spare_target_bin")
-            if scenario == "two-boxes"
+            if self.base_scenario == "two-boxes"
             else None
         )
         self._active = np.ones(self.task_config.cookie_count, dtype=bool)
@@ -123,30 +144,92 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         mujoco.mju_mat2Quat(quaternion, rotation)
         self.set_cookie_pose(index, tuple(position), tuple(quaternion))
 
+    def _check_container_contacts(self):
+        """Reject settled overlaps between distinct source and target boxes."""
+        bodies = {self._source_bin_body, self._target_bin_body}
+        if self._spare_body is not None:
+            bodies.add(self._spare_body)
+        for contact in self.data.contact:
+            first = int(self.model.geom_bodyid[int(contact.geom1)])
+            second = int(self.model.geom_bodyid[int(contact.geom2)])
+            if first in bodies and second in bodies and first != second and contact.dist < -1e-5:
+                first_name = self.model.body(first).name
+                second_name = self.model.body(second).name
+                raise RuntimeError(
+                    f"invalid {self.scenario} initial state: {first_name} and {second_name} "
+                    f"overlap by {-1000 * contact.dist:.3f} mm after settling"
+                )
+
     def reset(self, *, seed=None, options=None):
+        # Retrying the scenario geometry, not the basic noise profile, avoids
+        # returning a scene where a tilted cookie was knocked out while settling.
+        attempts = 8 if self.base_scenario == "tilted" else 1
+        recoverable = ("active source cookies remain inside", "cookies did not settle",
+                       "tilted scenario did not retain both tilted cookies",
+                       "settled source columns have insufficient clearance")
+        for attempt in range(attempts):
+            try:
+                return self._reset_once(seed=seed, options=options, scenario_attempt=attempt)
+            except RuntimeError as exc:
+                if attempt + 1 == attempts or not any(reason in str(exc) for reason in recoverable):
+                    raise
+        raise RuntimeError(f"could not initialize {self.scenario}")
+
+    def _reset_once(self, *, seed=None, options=None, scenario_attempt=0):
+        options = expanded_basic_reset_options(options, self.task_config, self.scenario)
         self._restore_model()
         self._active[:] = True
         self._prefilled = set()
+        self._begin_source_clearance_sampling()
         _, info = super().reset(seed=seed, options=options)
         # Independent of the existing layout, appearance and column streams.
-        rng = np.random.default_rng(np.random.SeedSequence([int(seed or 0), 0xA3C001]))
+        entropy = [int(seed or 0), 0xA3C001]
+        if scenario_attempt:
+            entropy.append(scenario_attempt)
+        rng = np.random.default_rng(np.random.SeedSequence(entropy))
         columns = self._source_columns()
         if len(columns) != 4 or any(len(column) != 20 for column in columns):
-            raise ValueError("scenario benchmarks require the 4-column, 80-cookie 2x5 layout")
+            raise ValueError("scenario benchmarks require the 4-column, 80-cookie source layout")
         removed = []
         setup = {}
-        if self.scenario == "missing-columns":
+        self._eligible = None
+        if self.base_scenario == "sparse-exact-ten":
+            factor = self.target_capacity // 10
+            counts = rng.permutation([factor, 2 * factor, 3 * factor, 4 * factor]).tolist()
+            for column, count in zip(columns, counts, strict=True):
+                start = int(rng.integers(21 - count))
+                removed.extend(column[:start] + column[start + count:])
+            setup["initial_column_counts"] = counts
+        elif self.base_scenario == "rotated-target":
+            yaw = float(rng.uniform(50, 85) * rng.choice([-1, 1]))
+            angle = np.deg2rad(yaw) / 2
+            joint = self.model.joint("target_bin_free")
+            adr = int(joint.qposadr[0])
+            self.data.qpos[adr+3:adr+7] = [np.cos(angle), 0, 0, np.sin(angle)]
+            setup["requested_yaw_deg"] = yaw
+        elif self.base_scenario == "whole-row-lean":
+            selected = int(rng.integers(4))
+            sign = int(rng.choice([-1, 1]))
+            self._eligible = set(columns[selected])
+            angle = np.deg2rad(10 * sign)
+            for index in columns[selected]:
+                pos = self.cookie_positions[index].copy()
+                pos[2] = (self.SOURCE_FLOOR_TOP_Z + abs(np.sin(angle))*self.COOKIE_HALF_SIZE[1]
+                          + np.cos(angle)*self.COOKIE_HALF_SIZE[2])
+                self.set_cookie_pose(index, tuple(pos), (np.cos(angle/2), np.sin(angle/2), 0, 0))
+            setup.update(lean_column=selected+1, lean_sign=sign)
+        elif self.base_scenario == "missing-columns":
             selected = sorted(rng.choice(4, size=int(rng.integers(1, 3)), replace=False).tolist())
             removed = [index for column in selected for index in columns[column]]
             setup["removed_columns"] = [column + 1 for column in selected]
-        elif self.scenario == "partial-gaps":
+        elif self.base_scenario == "partial-gaps":
             # Every column has both a missing front section and an internal gap.
             start = int(rng.integers(7, 11))
             removed = [
                 index for column in columns for index in (column[:3] + column[start : start + 3])
             ]
             setup["gap_rows_zero_based"] = [0, 1, 2, start, start + 1, start + 2]
-        elif self.scenario == "cross-column":
+        elif self.base_scenario == "cross-column":
             starts = rng.integers(0, 13, size=4).tolist()
             removed = [
                 index
@@ -156,11 +239,13 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             ]
             setup["remaining_row_starts_zero_based"] = starts
             setup["remaining_per_column"] = 8
-        elif self.scenario == "prefilled":
+        elif self.base_scenario in ("prefilled", "variable-prefill"):
+            count = int(rng.integers(1, 10)) if self.base_scenario == "variable-prefill" else 5
+            self.goal_count = 10 - count
             source_column = int(rng.integers(4))
             target_column = int(rng.integers(2))
-            self._prefilled = set(columns[source_column][:5])
-            slots = list(range(target_column, 10, 2))
+            self._prefilled = set(columns[source_column][:count])
+            slots = (list(range(target_column, 10, 2)) + list(range(1-target_column, 10, 2)))[:count]
             slot_rows = np.unique(np.asarray(self.TARGET_SLOTS_LOCAL)[:, 1])
             nominal_pitch = float(np.median(np.diff(slot_rows)))
             prefilled_pitch = min(0.0085, nominal_pitch + 0.45 * self.TARGET_SLOT_TOLERANCE[1])
@@ -175,7 +260,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             setup["prefilled_source_column"] = source_column + 1
             setup["prefilled_target_column"] = target_column + 1
             setup["prefilled_pitch_m"] = float(prefilled_pitch)
-        elif self.scenario == "tilted":
+        elif self.base_scenario == "tilted":
             selected = sorted(rng.choice(4, size=2, replace=False).tolist())
             row = int(rng.integers(7, 12))
             indices = [columns[column][row] for column in selected]
@@ -193,7 +278,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         settle_steps = 0
         angles = (
             ((90.0,) if self.tilt_level == "fallen" else (16.0, 22.0, 28.0, 34.0))
-            if self.scenario == "tilted"
+            if self.base_scenario == "tilted"
             else (None,)
         )
         min_tilt = 60.0 if self.tilt_level == "fallen" else 5.0
@@ -223,7 +308,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
                 mujoco.mj_step(self.model, self.data)
             settle_steps += 250
             mujoco.mj_forward(self.model, self.data)
-            if requested_angle is None or any(self._tilt_degrees()[i] >= min_tilt for i in indices):
+            if requested_angle is None or all(self._tilt_degrees()[i] >= min_tilt for i in indices):
                 break
         # Reject unstable samples rather than presenting a still-falling scene
         # to the policy. Limits are the existing target-settling thresholds.
@@ -243,6 +328,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             raise RuntimeError(f"invalid {self.scenario} initial state: cookies did not settle")
         if not np.all(np.isfinite(self.data.qpos)) or not np.all(np.isfinite(self.data.qvel)):
             raise RuntimeError(f"invalid {self.scenario} initial state: non-finite physics state")
+        self._check_container_contacts()
         self.data.time = 0.0
         self._success_hold_count = 0
         self._scenario_hold_count = 0
@@ -257,6 +343,10 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
                 f"invalid {self.scenario} initial state: {self.initial_source_count}/{expected} "
                 "active source cookies remain inside the source box"
             )
+        # Scenario setup may remove cookies, move prefilled cookies to the
+        # target, or intentionally tilt source cookies. Check the final state,
+        # using the actual source inventory rather than hidden/target objects.
+        self._record_settled_source_clearances(source_mask)
         if self._prefilled and not all(self._cookie_inside_target(i) for i in self._prefilled):
             raise RuntimeError("prefilled cookies did not settle in the target box")
         if self._prefilled:
@@ -266,11 +356,23 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             if any(initial_slots[slot] < 0 for slot in setup["prefilled_slot_ids"]):
                 raise RuntimeError("prefilled cookies do not match the configured target slots")
         tilts = self._tilt_degrees()
-        if self.scenario == "tilted" and sum(tilts[i] >= min_tilt for i in indices) < 1:
-            raise RuntimeError("tilted scenario settled without a tilted cookie")
+        if self.base_scenario == "tilted" and not all(tilts[i] >= min_tilt for i in indices):
+            raise RuntimeError("tilted scenario did not retain both tilted cookies after settling")
         self._source_initially_filled = all(source_mask) and self._collection_touches_all_walls(
             source_mask, self.data.xpos[self._source_bin_body][:2], self.SOURCE_INNER_HALF_SIZE
         )
+        if self.base_scenario == "whole-row-lean":
+            matrices = self.data.xmat[[self._cookie_bodies[i] for i in columns[selected]]].reshape(-1, 3, 3)
+            signed = np.rad2deg(np.arctan2(-matrices[:, 1, 2], matrices[:, 2, 2]))
+            setup["signed_lean_deg"] = signed.tolist()
+            if not (np.all((signed * sign >= 5) & (signed * sign <= 15))
+                    and np.all((tilts[columns[selected]] >= 5) & (tilts[columns[selected]] <= 15))):
+                raise RuntimeError(f"invalid settled row angles: {signed.round(2)}")
+        if self.base_scenario == "rotated-target":
+            matrix = self.data.xmat[self._target_bin_body].reshape(3, 3)
+            setup["actual_yaw_deg"] = float(np.rad2deg(np.arctan2(matrix[1,0], matrix[0,0])))
+            if abs(setup["actual_yaw_deg"]) <= 45:
+                raise RuntimeError("target rotation below required threshold")
         self._initial_positions = self.cookie_positions.copy()
         self._initial_tilts = tilts
         target_bodies = [self._target_bin_body] + (
@@ -278,13 +380,14 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         )
         self.scenario_metadata = {
             "name": self.scenario,
-            "version": 1,
+            "version": 2,
+            "scenario_attempt": scenario_attempt,
             "active_cookie_ids": np.flatnonzero(self._active).tolist(),
             "removed_cookie_ids": removed,
             "initial_source_count": self.initial_source_count,
             "required_new_cookies": self.goal_count,
             "target_quotas": (
-                [self.box_quota, self.box_quota] if self.box_quota is not None else [10]
+                [self.box_quota, self.box_quota] if self.box_quota is not None else [self.target_capacity]
             ),
             "initial_target_counts": [len(self._prefilled)]
             + ([0] if self._spare_body is not None else []),
@@ -370,7 +473,11 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         in_source = [i for i in active if self._cookie_inside_source(i)]
         present = set(in_source).union(*map(set, in_bin_regions))
         outside = [i for i in active if i not in present]
-        transferred = [i for i in active if i not in self._prefilled]
+        transferred = [
+            i for i in active
+            if i not in self._prefilled
+            and (self.task_config.target_only or self._eligible is None or i in self._eligible)
+        ]
         new_counts = [sum(i in transferred for i in contained) for contained in in_bins]
         score = (
             sum(min(n, self.box_quota) for n in new_counts)
@@ -382,8 +489,13 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         disturbed = [i for i in in_source if displacement[i] > 0.01 or tilt_delta[i] > 15.0]
         return {
             "initial_source_count": self.initial_source_count,
+            **({"remaining_per_column": [sum(i in in_source for i in col) for col in self._source_columns()]}
+               if self.base_scenario == "sparse-exact-ten" else {}),
             "expected_source_count": self.initial_source_count - self.goal_count,
             "target_counts": [len(items) for items in in_bins],
+            "target_column_counts": list(self.target_column_counts(
+                tuple(i in in_bins[0] for i in range(self.task_config.cookie_count))
+            )),
             "new_target_counts": new_counts,
             "new_correct_cookies": score,
             "prefilled_remaining": sum(i in in_bins[0] for i in self._prefilled),
@@ -402,9 +514,13 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
         count_ok = (
             metrics["target_counts"] == [self.box_quota, self.box_quota]
             if self._spare_body is not None
-            else metrics["target_counts"] == [10]
+            else metrics["target_counts"] == [self.target_capacity]
         )
-        if self._spare_body is None:
+        if self.task_config.target_only:
+            if self._spare_body is None:
+                half = self.target_capacity // 2
+                count_ok = count_ok and metrics["target_column_counts"] == [half, half]
+        elif self._spare_body is None:
             count_ok = count_ok and all(int(i) >= 0 for i in info["target_slot_occupancy"])
             count_ok = count_ok and bool(info["target_touches_all_walls"])
         elif self.box_quota == 10 and count_ok:
@@ -424,9 +540,11 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
                     )
             finally:
                 self._target_bin_body = original
-        count_ok = count_ok and metrics["prefilled_remaining"] == len(self._prefilled)
-        count_ok = count_ok and metrics["cookies_in_source"] == metrics["expected_source_count"]
-        count_ok = count_ok and metrics["cookies_outside_containers"] == 0
+        if not self.task_config.target_only:
+            count_ok = count_ok and metrics["new_correct_cookies"] == self.goal_count
+            count_ok = count_ok and metrics["prefilled_remaining"] == len(self._prefilled)
+            count_ok = count_ok and metrics["cookies_in_source"] == metrics["expected_source_count"]
+            count_ok = count_ok and metrics["cookies_outside_containers"] == 0
         self._scenario_hold_count = self._scenario_hold_count + 1 if count_ok else 0
         success = self._scenario_hold_count >= self.task_config.success_hold_steps
         info.update(
@@ -435,6 +553,7 @@ class A3CookieScenarioEnv(A3CookieTransferEnv):
             cookies_in_source=metrics["cookies_in_source"],
             required_cookies=self.goal_count,
             success_hold_count=self._scenario_hold_count,
+            success_criterion="target_only" if self.task_config.target_only else "scenario",
             scenario_metrics=metrics,
         )
         return (

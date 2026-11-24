@@ -1,0 +1,139 @@
+{
+  "purpose": "One-step CLI plumbing and metadata check; not a physical task success test",
+  "verified_test_commands": 18,
+  "verified_demo_commands": 18,
+  "render_gui_checks": [
+    "2x5 full physical 10/10",
+    "2x10 1 step",
+    "2x10-sparse-exact-twenty 1 step",
+    "two-boxes 1 step"
+  ],
+  "results": [
+    {
+      "task": "2x5",
+      "profile": "advanced",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10",
+      "profile": "advanced",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "missing-columns",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-missing-columns",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "partial-gaps",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-partial-gaps",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "cross-column",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-cross-column",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "sparse-exact-ten",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-sparse-exact-twenty",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "tilted",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-tilted",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "whole-row-lean",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "2x10-whole-row-lean",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "prefilled",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "two-boxes",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "rotated-target",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    },
+    {
+      "task": "variable-prefill",
+      "profile": "basic",
+      "seed": 0,
+      "exit_code": 0,
+      "steps": 1
+    }
+  ]
+}

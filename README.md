@@ -68,7 +68,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 - [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
 - [2×5 分级随机化与专家采集](docs/randomization.md)：两批各五个，配置强度、来源列和外观，采集与续采。
 - [2×10 专家演示与数据采集](docs/cookie_2x10.md)：配置首夹数量，运行四次抓取、图形演示与采集。
-- [六种饼干场景 benchmark](docs/cookie_benchmark_scenarios.md)：缺列、缺口、跨列、倾倒、预填充和双盒评测。
+- [饼干扩展场景 benchmark](docs/cookie_benchmark_scenarios.md)：缺列、缺口、跨列、倾倒、预填充和双盒评测。
 - [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
 - [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
 - [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
@@ -90,7 +90,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ## 统一评测与网格测试
 
-2×5、2×10 和六种扩展场景统一使用 `examples/benchmark_cookie_batch.py`，通过 `--task` 选任务，`--policy expert|smolvla:<检查点>|act:<检查点>|module:factory` 选策略。2×5 和 2×10 按回合结束时的目标盒饼干数量计分，满分分别为 10 和 20；扩展场景的初始化、评分规则和命令见 [六种饼干场景 benchmark](docs/cookie_benchmark_scenarios.md)。
+课程版包含 14 个基础任务和 4 个 Bonus 任务，统一提示词为 `Fill the target box.`。通过 `examples/benchmark_cookie_batch.py --task` 运行单项，或使用课程任务组入口执行全部任务；新 2×10 场景、目标盒评分、随机化和专家使用方法见 [课程 Benchmark 说明](src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。两个旧来源配额任务保留原有提示词和评分，见 [历史扩展场景](docs/cookie_benchmark_scenarios.md)。
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
@@ -105,7 +105,7 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --output outputs/smolvla_grid_short_500
 ```
 
-网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列。上例显式指定 2×5 使用训练原指令、2×10 使用 `transfer 20 cookies into target box`；短指令数量 baseline 不验证随机四次抓取计划。省略指令参数时，2×10 仍使用原生长指令。单任务入口可用 `--prompt-style short`，网格可加 `--profiles basic` 只测 basic。
+上例网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列。上例显式指定 2×5 使用训练原指令、2×10 使用 `transfer 20 cookies into target box`；短指令数量 baseline 不验证随机四次抓取计划。显式传入旧提示词参数时使用 legacy 协议；省略提示词参数时两个任务都使用课程统一提示词。网格可加 `--profiles basic` 只测 basic。
 结果保存到 `summary.md`、`summary.json` 和 `episodes.jsonl`；原命令加 `--resume` 可续跑。
 500 步为控制预算，不保证专家或模型完成四次抓取。完整参数、可视化、录制与自定义策略示例见 [完整流程指南](docs/workflow_guide.md)。
 

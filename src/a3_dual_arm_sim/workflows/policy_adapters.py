@@ -40,6 +40,11 @@ class BenchmarkPolicy(Protocol):
         ...
 
 
+def policy_needs_cameras(policy):
+    """External policies receive RGB by default; state-only policies may opt out."""
+    return policy is not None and getattr(policy, "requires_cameras", True)
+
+
 class ExpertPolicyAdapter:
     """Adapts an expert model to the standard BenchmarkPolicy interface."""
 
@@ -47,6 +52,7 @@ class ExpertPolicyAdapter:
         self.expert_factory = expert_factory
         self.name = name
         self.expert: Any | None = None
+        self.requires_cameras = False
         self.action_mode: ActionMode = "cartesian_delta"
 
     def bind_env(self, env: A3CookieTransferEnv) -> None:

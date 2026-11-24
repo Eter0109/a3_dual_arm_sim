@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -496,8 +497,17 @@ class A3DualArmEnv(gym.Env[dict[str, Any], np.ndarray]):
         # contexts.  Destroy the viewer first; GLFW may otherwise tear down shared
         # process state while the visible context is still live (exit-time SIGSEGV).
         if self._viewer is not None:
-            self._viewer.close()
+            viewer = self._viewer
+            viewer.close()
             self._viewer = None
+            # MuJoCo's passive Handle.close() requests exit but does not join
+            # its daemon render thread.  Wait for the underlying Simulate
+            # object to be released before GLFW's process-exit cleanup runs.
+            sim_ref = getattr(viewer, "_sim", None)
+            if callable(sim_ref):
+                deadline = time.monotonic() + 5.0
+                while sim_ref() is not None and time.monotonic() < deadline:
+                    time.sleep(0.01)
         if self._renderer is not None:
             self._renderer.close()
             self._renderer = None

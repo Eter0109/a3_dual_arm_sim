@@ -154,7 +154,7 @@ a3-sim train-act \
 
 ## 4. 统一仿真评测
 
-统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。支持 2×5、2×10 和[六种扩展场景](cookie_benchmark_scenarios.md)，以及专家、SmolVLA、ACT、`module:factory` 插件。
+统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。课程版包含 14 个基础任务与 4 个 Bonus 任务，支持专家、SmolVLA、ACT、`module:factory` 插件；课程任务组和六个新 2×10 场景见[课程 Benchmark 说明](../src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。
 
 ### 4.1 专家与模型数量评测
 
@@ -179,7 +179,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
   --output outputs/smolvla_2x10_basic_500.json
 ```
 
-改 `--profile medium|advanced` 切换难度，`--randomization-config` 可指定自己的 YAML。2×5 默认 `--prompt-style training` 使用原短指令 `transfer 10 cookies into target box`；若模型用新按列指令训练，应显式选 `--prompt-style task`。2×10 默认使用包含当前数量计划的原生长指令；`--prompt-style short` 使用 `transfer 20 cookies into target box`，用于数量 baseline，不验证遵守四次抓取计划。
+基础 `2x5`、`2x10` 保留 basic、medium、advanced 三个档位；其他课程场景和两个历史来源配额任务仅支持 `--profile basic`。课程版默认提示词为 `Fill the target box.`，抓取数量计划仅供专家和诊断使用，不影响成功判定。`--randomization-config` 可指定自己的 YAML；如需历史提示词及评分，显式传入 `--protocol legacy`。
 
 `--seed-start` 控制场景；`--inference-seed` 控制策略采样。统一 CLI 的单个 `--inference-seed` 会在每次重置重置为同一个值；网格脚本则逐回合设为该回合的场景随机种子，复现网格单条时两者都传对应随机种子。模型评测用单进程；专家支持 `--workers N`。
 
@@ -203,7 +203,7 @@ env -u MUJOCO_GL python examples/benchmark_cookie_batch.py \
 - 2×5：每次 0–10 块；均值 `mean_score`，总数 `total_score / (10N)`。
 - 2×10：每次 0–20 块；均值 `mean_score`，总数 `total_score / (20N)`。
 
-JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录。完整任务 `success` 保留作诊断，不作为这组数量评测的主排名指标。计数采用任务环境的盒内、姿态和稳定等规则，肉眼看见接触目标盒不一定立即计入。
+JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录。课程版以完整任务 `success` 为主要指标，目标盒计数是进度诊断；物体需要位于目标盒内、直立、释放并稳定，肉眼看见接触目标盒不一定立即计入。旧数量评测使用 legacy 协议，不能与课程版混排。
 
 500 是控制步上限；20 Hz 下为最多 25 秒仿真时间，推理和渲染会使实际耗时更长。2×10 的四次抓取可能被预算截断，必须与同为 500 步的结果比较。更改步数、指令、来源列、权重、后处理或统计量后，使用新的结果文件，避免混合协议。
 
@@ -220,7 +220,7 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --output outputs/smolvla_grid_short_500
 ```
 
-默认六项为 `2x5/2x10 × basic/medium/advanced`；每项 20 次，总共 120 次。按随机种子一轮轮执行六项，固定来源第 1 列；2×10 首夹数量读取 `configs/randomization_2x10.yaml`。上例显式采用2×5训练原指令、2×10简短二十块指令；省略指令参数时，2×5默认为训练原指令，2×10默认为原生长指令。可用 `--profiles basic` 只测一个档位。当前脚本不自动切换不同任务的检查点；如果只在 2×5 训练，2×10 成绩应标为迁移测试。
+网格覆盖 `2x5/2x10 × basic/medium/advanced`；课程协议默认每项 5 次，共 30 次。上例显式设置每项 20 次并指定旧提示词，故执行 120 次 legacy 评测。省略提示词参数时，两个任务均使用课程统一提示词。可用 `--profiles basic` 只测一个档位；不同任务共用一个检查点，因此只在 2×5 训练的模型，其 2×10 成绩应标为迁移测试。
 
 首次运行输出目录必须不存在。先加 `--dry-run` 可打印配置、不加载策略；中断后用**完全相同的命令加 `--resume`**，跳过已写入的完整回合。Ctrl+C/SIGTERM 会标记停止；正在执行但未写完的回合不计入成绩，续跑会重做。配置、检查点、脚本或共享执行代码哈希变化会拒绝续跑，应换新目录。
 

@@ -21,3 +21,17 @@ def load_cookie_2x10_settings(path=None):
     physics = {key: value for key, value in config.items() if key != "first_grasp"}
     settings = load_randomization_config(config=physics)
     return settings, first_grasp
+
+
+def load_expanded_randomization(path=None):
+    """Accept either standard YAML for expanded 2x10 scenes; no plan is exposed."""
+    if path is None:
+        return load_randomization_config()
+    with Path(path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict):
+        raise TypeError("randomization config must be a mapping")
+    if "first_grasp" in config:
+        parse_first_grasp(config["first_grasp"])
+        config = {key: value for key, value in config.items() if key != "first_grasp"}
+    return load_randomization_config(config=config)

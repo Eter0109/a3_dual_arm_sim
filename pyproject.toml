@@ -31,6 +31,7 @@ a3-sim = "a3_dual_arm_sim.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["a3_dual_arm_sim.outputs", "a3_dual_arm_sim.outputs.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,578 @@
+{
+  "purpose": "Post-reset physical scene illustrations; not a policy observation or success result",
+  "seed": 0,
+  "image_size": [
+    960,
+    600
+  ],
+  "protocol": "course-v1",
+  "render_backend": "egl",
+  "mujoco_version": "3.6.0",
+  "python_version": "3.13.12",
+  "sha256": {
+    "workflows/course_protocol.py": "307f9ff7a2bd9a2dcd906210f66d3252cb34cf9498aaa863c9c398445bacbbd8",
+    "workflows/benchmark.py": "3dd035d93b204cb90689d85c79d2f2217a37e5d1e5c02dce97d2dde78956140f",
+    "config.py": "63ef0bcdc9d0c9da411f7ab8d8f8785a437a2de181d3df84a9d92743383f7c12",
+    "tasks/cookie_scenarios.py": "522d6a468e8faebf4326d9dded9802600b8b0179120714f732f0794cd287ca27",
+    "tasks/cookie_transfer.py": "663a238c53e58eeb70c24133a29c26a7dd6b5afc47b7f96952a6573f60bdf202",
+    "tasks/cookie_2x10.py": "fa27e9a460c58c69d03b18811768b379997c55bb0589db6fcaaa24fca35dbc19",
+    "tasks/cookie_2x10_settings.py": "9aa98446f665f3f84c25ee3b80519368db53f2f94ce6ff10d3a56ed4a700b6f5",
+    "tasks/expanded_ik.py": "75e095269ac8c9278bc18dca4099293ca9467f1ba6013f669cde897edb02581f",
+    "tasks/source_clearance.py": "f4f6159d6c08e399f83cebecaee5d94267c9c1e84f9edde59deab07f6bf82f30",
+    "sim/env.py": "717861ec6ef8910a72783864923ed84043dc9bb2cf10d3c956b25b13c9e828b5",
+    "sim/model.py": "46f7a327f4020045e2d6e596bb991b93bb0afc2065cdb4a5fcff01c753868b99",
+    "sim/object_builder.py": "4f52d0b9f19ca58c37277ad85ffaa11c76f511f1b31b5d05f017005f9d8f746f",
+    "sim/robot_builder.py": "84973b5084d3651d4040e5f954cc91fa01fec29137b6b5557a9f5ec6ebb321b8",
+    "sim/randomization.py": "41a5d81e95a4018d2e648980d18813780e4e0626865791cc006df70f4faf6b1a",
+    "configs/cookie_batch.yaml": "62f6c8638955c84761b8f3c6ef6198ecb448aafb839f72103844f4a154812df9",
+    "configs/cookie_2x10.yaml": "f8199215a88c66c8fa345767fb23a50e39be514ae81ac5fb5822f9eddf06d8af",
+    "configs/randomization.yaml": "4ca7e80144d2f350bdcb275614c670313410ac7d341d1f85a7eaf095fa7cafb0",
+    "configs/randomization_2x10.yaml": "b8c8dd5347b07369504d5b4b680a49e67e4083472584cdf7f5e04ee202027180"
+  },
+  "scenes": [
+    {
+      "task": "2x5",
+      "seed": 0,
+      "profile": "advanced",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.18047846749285817,
+        0.30579146855055483,
+        0.0
+      ],
+      "target_position_m": [
+        0.07663894095744779,
+        0.08066110542114116,
+        0.749748020002844
+      ],
+      "overview": "images/2x5_overview.png",
+      "detail": "images/2x5_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {}
+    },
+    {
+      "task": "2x10",
+      "seed": 0,
+      "profile": "advanced",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.17647846749285817,
+        0.30579146855055483,
+        0.0
+      ],
+      "target_position_m": [
+        0.07663894095744779,
+        0.08066110542114116,
+        0.7497480200037758
+      ],
+      "overview": "images/2x10_overview.png",
+      "detail": "images/2x10_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {}
+    },
+    {
+      "task": "missing-columns",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 40,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/missing-columns_overview.png",
+      "detail": "images/missing-columns_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "removed_columns": [
+          1,
+          3
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "2x10-missing-columns",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 40,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/2x10-missing-columns_overview.png",
+      "detail": "images/2x10-missing-columns_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "removed_columns": [
+          1,
+          3
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "partial-gaps",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 56,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/partial-gaps_overview.png",
+      "detail": "images/partial-gaps_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "gap_rows_zero_based": [
+          0,
+          1,
+          2,
+          9,
+          10,
+          11
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "2x10-partial-gaps",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 56,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/2x10-partial-gaps_overview.png",
+      "detail": "images/2x10-partial-gaps_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "gap_rows_zero_based": [
+          0,
+          1,
+          2,
+          9,
+          10,
+          11
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "cross-column",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 32,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/cross-column_overview.png",
+      "detail": "images/cross-column_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "remaining_row_starts_zero_based": [
+          8,
+          11,
+          0,
+          7
+        ],
+        "remaining_per_column": 8,
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "2x10-cross-column",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 32,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/2x10-cross-column_overview.png",
+      "detail": "images/2x10-cross-column_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "remaining_row_starts_zero_based": [
+          8,
+          11,
+          0,
+          7
+        ],
+        "remaining_per_column": 8,
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "sparse-exact-ten",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 10,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/sparse-exact-ten_overview.png",
+      "detail": "images/sparse-exact-ten_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "initial_column_counts": [
+          4,
+          2,
+          1,
+          3
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "2x10-sparse-exact-twenty",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 20,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/2x10-sparse-exact-twenty_overview.png",
+      "detail": "images/2x10-sparse-exact-twenty_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "initial_column_counts": [
+          8,
+          4,
+          2,
+          6
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "tilted",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098955957
+      ],
+      "overview": "images/tilted_overview.png",
+      "detail": "images/tilted_detail.png",
+      "marked_cookie_ids": [
+        49,
+        69
+      ],
+      "scenario": {
+        "tilted_cookie_ids": [
+          49,
+          69
+        ],
+        "scenario_attempt": 0,
+        "initial_tilt_degrees": {
+          "49": 14.076,
+          "69": 13.83
+        }
+      }
+    },
+    {
+      "task": "2x10-tilted",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098955957
+      ],
+      "overview": "images/2x10-tilted_overview.png",
+      "detail": "images/2x10-tilted_detail.png",
+      "marked_cookie_ids": [
+        49,
+        69
+      ],
+      "scenario": {
+        "tilted_cookie_ids": [
+          49,
+          69
+        ],
+        "scenario_attempt": 0,
+        "initial_tilt_degrees": {
+          "49": 14.076,
+          "69": 13.83
+        }
+      }
+    },
+    {
+      "task": "whole-row-lean",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/whole-row-lean_overview.png",
+      "detail": "images/whole-row-lean_detail.png",
+      "marked_cookie_ids": [
+        50
+      ],
+      "scenario": {
+        "lean_column": 3,
+        "lean_sign": 1,
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "2x10-whole-row-lean",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/2x10-whole-row-lean_overview.png",
+      "detail": "images/2x10-whole-row-lean_detail.png",
+      "marked_cookie_ids": [
+        50
+      ],
+      "scenario": {
+        "lean_column": 3,
+        "lean_sign": 1,
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "prefilled",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 75,
+      "target_counts": [
+        5
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581941960972755,
+        0.0903305507762753,
+        0.7497113636449582
+      ],
+      "overview": "images/prefilled_overview.png",
+      "detail": "images/prefilled_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "prefilled_slot_ids": [
+          1,
+          3,
+          5,
+          7,
+          9
+        ],
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "two-boxes",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0,
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581947047872389,
+        0.1303305527105706,
+        0.7497718098958365
+      ],
+      "overview": "images/two-boxes_overview.png",
+      "detail": "images/two-boxes_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "rotated-target",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 80,
+      "target_counts": [
+        0
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        -0.004180529521276107,
+        0.09033055271057058,
+        0.7497718098958365
+      ],
+      "overview": "images/rotated-target_overview.png",
+      "detail": "images/rotated-target_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "requested_yaw_deg": -82.2327242986901,
+        "scenario_attempt": 0
+      }
+    },
+    {
+      "task": "variable-prefill",
+      "seed": 0,
+      "profile": "basic",
+      "source_count": 73,
+      "target_counts": [
+        7
+      ],
+      "source_position_m": [
+        0.15773923374642912,
+        0.3103957342752774,
+        0.0
+      ],
+      "target_position_m": [
+        0.08581950033393185,
+        0.09033055734262037,
+        0.7496879397169468
+      ],
+      "overview": "images/variable-prefill_overview.png",
+      "detail": "images/variable-prefill_detail.png",
+      "marked_cookie_ids": [],
+      "scenario": {
+        "prefilled_slot_ids": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          1,
+          3
+        ],
+        "scenario_attempt": 0
+      }
+    }
+  ]
+}

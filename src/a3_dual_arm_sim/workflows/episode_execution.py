@@ -26,9 +26,11 @@ from a3_dual_arm_sim.sim.randomization import (
 from a3_dual_arm_sim.tasks.cookie_transfer import A3CookieTransferEnv, CookieTransferTaskConfig
 
 from .benchmark_results import EpisodeScore
+from .course_protocol import COURSE_PROMPT, COURSE_PROTOCOL, LEGACY_PROTOCOL
 from .policy_adapters import (
     ExpertPolicyAdapter,
     make_policy_adapter,
+    policy_needs_cameras,
 )
 
 DEFAULT_CONFIG_PATH = resource_root() / "configs" / "cookie_batch.yaml"
@@ -62,7 +64,13 @@ class EpisodeExecution:
         slot_tolerance_m: tuple[float, float] = (0.015, 0.005),
         wall_contact_tolerance_m: float = 0.030,
         placement_order: str = "canonical",
+        protocol: str = LEGACY_PROTOCOL,
     ):
+        if protocol not in (COURSE_PROTOCOL, LEGACY_PROTOCOL):
+            raise ValueError(f"unknown benchmark protocol: {protocol}")
+        if protocol == COURSE_PROTOCOL and complete_demonstrations:
+            raise ValueError("demonstration recording requires the legacy protocol")
+        self.protocol = protocol
         self.complete_demonstrations = complete_demonstrations
         self.strict_policy_completion = strict_policy_completion
         self.placement_order = placement_order
@@ -114,6 +122,7 @@ class EpisodeExecution:
         config = load_config(self.config_path)
         self.config = replace(
             config,
+            horizon=max(config.horizon, max_steps) if protocol == COURSE_PROTOCOL else config.horizon,
             cookie_transfer=replace(
                 config.cookie_transfer, target_slot_tolerance_m=tuple(slot_tolerance_m)
             ),
@@ -125,7 +134,9 @@ class EpisodeExecution:
             task_config=CookieTransferTaskConfig(
                 cookie_count=80,
                 required_cookies=10,
-                require_released=self.complete_demonstrations or self.strict_policy_completion,
+                require_released=self.complete_demonstrations or self.strict_policy_completion
+                or self.protocol == COURSE_PROTOCOL,
+                target_only=self.protocol == COURSE_PROTOCOL,
                 terminate_on_success=not self.complete_demonstrations,
                 success_hold_steps=self.success_hold_steps,
                 wall_contact_tolerance_m=self.wall_contact_tolerance_m,
@@ -137,6 +148,8 @@ class EpisodeExecution:
         )
 
     def _episode_task(self, column: int | None, seed: int) -> str:
+        if self.protocol == COURSE_PROTOCOL:
+            return COURSE_PROMPT
         return (
             "transfer 10 cookies into target box"
             if column is None
@@ -155,11 +168,24 @@ class EpisodeExecution:
         return make_policy_adapter(policy)
 
     def _episode_metadata(self, column: int | None, seed: int) -> dict:
-        return {"profile": self.profile or "basic", "source_column": column, "seed": seed}
+        return {"profile": self.profile or "basic", "source_column": column, "seed": seed,
+                "protocol": self.protocol, "task_instruction": self._episode_task(column, seed)}
 
     def _completed_episode_metadata(self, runner_policy: Any, info: dict) -> dict:
         expert = getattr(runner_policy, "expert", None)
-        return {"grasp_reports": getattr(expert, "batch_reports", []),
+        reports = [dict(report) for report in getattr(expert, "batch_reports", [])]
+        if self.protocol == COURSE_PROTOCOL and info.get("success") and reports:
+            last = reports[-1]
+            cookies = last.get("cookies", ())
+            if cookies and not last.get("released") and all(
+                not any(expert.env.privileged_left_finger_contacts(i))
+                and not any(expert.env.privileged_right_finger_contacts(i)) for i in cookies
+            ):
+                # The environment may terminate on success before the expert
+                # reaches its own release-verification phase.
+                last["released"] = True
+                last["release_verified_by"] = "environment_success"
+        return {"grasp_reports": reports,
                 "final_expert_phase": getattr(getattr(expert, "phase", None), "name", None)}
 
     def _expected_source_count(self, env: A3CookieTransferEnv) -> int:
@@ -174,6 +200,10 @@ class EpisodeExecution:
         """
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
+        if self.protocol == COURSE_PROTOCOL:
+            return (f"target incomplete: count={cookies_in_target}, "
+                    f"columns={info.get('target_column_counts')}, "
+                    f"held={info.get('success_hold_count', 0)}/{self.success_hold_steps}")
         expected_source = (
             len(self.config.cookie_transfer.cookie_source_positions_m) - self.required_cookies
         )
@@ -218,7 +248,7 @@ class EpisodeExecution:
         should_close_env = False
         if env is None:
             needs_cameras = (recorder is not None or diagnostic is not None) or (
-                getattr(runner_policy, "action_mode", "") == "joint_position"
+                policy_needs_cameras(runner_policy)
             )
             env = self.create_env(render_cameras=needs_cameras)
             should_close_env = True
@@ -260,7 +290,7 @@ class EpisodeExecution:
             else:
                 self.last_attempt_metadata.update(
                     evaluation_target_column_order=list(column_order),
-                    evaluation_completion_contract="released_and_20_step_stable",
+                    evaluation_completion_contract=f"released_and_{self.success_hold_steps}_step_stable",
                 )
 
         try:
@@ -351,13 +381,11 @@ class EpisodeExecution:
         cookies_in_target = int(info.get("cookies_in_target", 0))
         cookies_in_source = int(info.get("cookies_in_source", 0))
         env_success = bool(info.get("success", False))
+        required = getattr(env, "goal_count", self.required_cookies)
         expected_source = self._expected_source_count(env)
-        success = (
-            env_success
-            and cookies_in_target == self.required_cookies
-            and cookies_in_source == expected_source
-            and not info.get("safety_reason")
-        )
+        success = env_success and not info.get("safety_reason")
+        if self.protocol != COURSE_PROTOCOL:
+            success = success and cookies_in_target == required and cookies_in_source == expected_source
         if self.complete_demonstrations:
             expert = getattr(runner_policy, "expert", None)
             success = success and getattr(getattr(expert, "phase", None), "name", None) == "DONE"
@@ -375,9 +403,8 @@ class EpisodeExecution:
                                         else None),
             )
         if recorder is not None:
-            success = (
-                success and cookies_in_source == expected_source and not info.get("safety_reason")
-            )
+            if self.protocol != COURSE_PROTOCOL:
+                success = success and cookies_in_source == expected_source
             if hasattr(recorder, "set_episode_metadata"):
                 recorder.set_episode_metadata(self.last_attempt_metadata)
             if success:
@@ -418,7 +445,7 @@ class EpisodeExecution:
             episode=episode_idx,
             seed=seed,
             score=cookies_in_target,
-            max_score=self.required_cookies,
+            max_score=required,
             success=success,
             steps=steps,
             wall_seconds=round(wall_time, 2),

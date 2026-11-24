@@ -97,7 +97,8 @@ def _assert_weights_loaded(policy, checkpoint: Path) -> None:
     from safetensors import safe_open
 
     with safe_open(str(checkpoint / "model.safetensors"), framework="pt") as handle:
-        keys = [key for key in handle if key.startswith("model.")]
+        # safetensors.safe_open handles are not iterable in all supported versions.
+        keys = [key for key in handle.keys() if key.startswith("model.")]  # noqa: SIM118
         if not keys:
             raise RuntimeError(f"{checkpoint} has no model.* tensors to verify against")
         state = policy.state_dict()

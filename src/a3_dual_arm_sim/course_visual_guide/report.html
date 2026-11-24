@@ -1,0 +1,329 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>A3 课程 Benchmark 场景图鉴</title><style>
+@page { size: A4; margin: 13mm 14mm 12mm; }
+* { box-sizing: border-box; }
+body { margin: 0; color: #172236; font-family: "Noto Sans CJK SC", "Noto Sans CJK", sans-serif; font-size: 9.4pt; line-height: 1.42; }
+.page { height: 270mm; break-after: page; page-break-after: always; display:flex; flex-direction:column; }
+.page:last-child { break-after: auto; page-break-after:auto; }
+.cover { padding-top: 3mm; }
+.cover .accent { width: 20mm; height: 2.2mm; background:#ec9f36; border-radius:2px; margin-bottom: 12mm; }
+.cover h1 { font-size: 30pt; line-height:1.18; letter-spacing:-0.6px; margin: 0 0 4mm; color:#172236; }
+.cover .subtitle { font-size: 14pt; color:#425d7d; margin-bottom: 11mm; }
+.cover h3 { margin:6mm 0 2mm; font-size:12pt; color:#223d5c; }
+.cover p { margin:0 0 3mm; }
+.cover .band { background:#edf3f7; border-left:4px solid #1e7494; padding:4mm 5mm; margin: 4mm 0; }
+.cover .notice { padding: 4mm 5mm; background:#fff6e7; border:1px solid #eacb92; border-radius:5px; margin-top:5mm; }
+.eyebrow { font-size:9pt; font-weight:700; letter-spacing:0.5px; color:#187590; text-transform:uppercase; }
+.eyebrow span { float:right; color:#8392a4; font-size:8pt; letter-spacing:0; }
+h2 { margin:2mm 0 0; font-size:21pt; line-height:1.2; color:#172236; }
+.taskid { font: 9pt "DejaVu Sans Mono", monospace; color:#687e95; margin:1mm 0 3mm; }
+.meta { background:#edf3f7; color:#345774; padding:2mm 3mm; border-radius:4px; font-size:8.5pt; margin-bottom:4mm; }
+.pair { display:flex; gap:4mm; }
+.pair figure { margin:0; flex:1; min-width:0; }
+.pair img { display:block; width:100%; aspect-ratio: 8 / 5; object-fit:cover; border-radius:3px; }
+.pair figcaption { color:#788797; font-size:8.8pt; text-align:center; margin-top:1mm; }
+.description { margin:4mm 0 1mm; font-size:10pt; line-height:1.48; }
+.prompt { color:#465c70; margin:1mm 0 2mm; font-size:8.7pt; }
+.prompt b { font-family:"DejaVu Sans Mono",monospace; font-size:8.4pt; color:#19324a; }
+.label { color:#1c718b; font-size:9.4pt; font-weight:700; margin:2.5mm 0 1mm; }
+pre { white-space:pre; background:#f2f5f8; border:1px solid #e1e7ee; border-radius:5px; color:#1a2e45; padding:3mm; margin:0; font: 9.0pt/1.5 "DejaVu Sans Mono", monospace; }
+.footer { border-top:1px solid #dbe4ec; margin-top:auto; padding-top:3mm; font-size:7.7pt; color:#8492a1; }
+.footer b { float:right; color:#4c6278; }
+</style></head><body><section class="page cover"><div class="accent"></div>
+<div class="eyebrow">A3 DUAL ARM SIMULATION · COURSE-V1</div>
+<h1>课程 Benchmark<br>场景图鉴与运行指南</h1><div class="subtitle">18 个场景 · 初始化截图 · 评测命令 · 专家渲染演示</div>
+<div class="band"><b>统一提示词</b> &nbsp; <span style="font-family:DejaVu Sans Mono,monospace">Fill the target box.</span><br>14 个基础任务 + 4 个 Bonus；ACT 不消费文本，结果仍记录提示词。</div>
+<h3>如何阅读截图</h3><p>每个场景各有工作区全景和关键区域细节，截图均在物理沉降后、策略执行前采集。标准任务使用 advanced，其余场景使用 basic，示例种子为 0。白蓝标记仅用于指出倾斜物体或其所在列；展示视角不是策略输入。</p>
+<h3>运行与 render</h3><p>请在已安装项目依赖的环境中，从仓库根目录执行后续命令。测试命令运行 5 回合；演示命令运行 1 回合并打开 MuJoCo 窗口。窗口需要可用的图形桌面和 DISPLAY；EGL 离屏渲染不能替代显示窗口。</p>
+<pre>cd "$(git rev-parse --show-toplevel)"
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1</pre>
+<h3>如何看待结果</h3><p>目标盒内物体须直立、稳定，并从左右夹爪释放。2×5 为两列各 5 块，2×10 为两列各 10 块，双盒各 5 块。来源列、原预填物身份和源盒剩余数量仅作诊断；该规则及扩展场景的 basic 档位与课程 PDF 部分要求不同。</p>
+<div class="notice"><b>专家不是训练模型。</b> <span>expert</span> 是读取仿真真值、通过物理接触搬运的规则控制器。可将命令中的策略替换为真实检查点；不同种子不保证成功。单项默认上限为 2×5 的 6000 步或 2×10 的 12000 步。</div>
+<div class="footer">A3 双臂仿真 · 课程任务图鉴 <b>01 / 19</b></div></section><section class="page scene">
+ <div class="eyebrow">基础 01/14 <span>COURSE-V1 · 场景 01 / 18</span></div>
+ <h2>标准搬运 2×5</h2><div class="taskid">2x5</div>
+ <div class="meta">seed=0 · advanced · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x5_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x5_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">源盒完整；目标盒最终两列各放 5 块。 图中源盒初始有 80 块，目标盒初始为空。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x5 --protocol course-v1 \
+  --policy expert --profile advanced --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x5.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x5 --protocol course-v1 \
+  --policy expert --profile advanced --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x5.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>02 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 02/14 <span>COURSE-V1 · 场景 02 / 18</span></div>
+ <h2>标准搬运 2×10</h2><div class="taskid">2x10</div>
+ <div class="meta">seed=0 · advanced · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">源盒完整；目标盒最终两列各放 10 块。 图中源盒初始有 80 块，目标盒初始为空。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10 --protocol course-v1 \
+  --policy expert --profile advanced --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10 --protocol course-v1 \
+  --policy expert --profile advanced --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>03 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 03/14 <span>COURSE-V1 · 场景 03 / 18</span></div>
+ <h2>缺失整列 2×5</h2><div class="taskid">missing-columns</div>
+ <div class="meta">seed=0 · basic · 源盒 40 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/missing-columns_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/missing-columns_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">随机移除 1 或 2 个源列；从剩余物体中填满 2×5 目标盒。 图中移除源列：1、3。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task missing-columns --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/missing-columns.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task missing-columns --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/missing-columns.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>04 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 04/14 <span>COURSE-V1 · 场景 04 / 18</span></div>
+ <h2>缺失整列 2×10</h2><div class="taskid">2x10-missing-columns</div>
+ <div class="meta">seed=0 · basic · 源盒 40 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-missing-columns_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-missing-columns_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">随机移除 1 或 2 个源列；从剩余物体中填满 2×10 目标盒。 图中移除源列：1、3。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-missing-columns --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-missing-columns.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-missing-columns --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-missing-columns.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>05 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 05/14 <span>COURSE-V1 · 场景 05 / 18</span></div>
+ <h2>局部缺口 2×5</h2><div class="taskid">partial-gaps</div>
+ <div class="meta">seed=0 · basic · 源盒 56 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/partial-gaps_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/partial-gaps_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">每个源列的前端和内部均有缺口，使用剩余物体填满 2×5 目标盒。 图中每列移除的行号（从 1 计）：1、2、3、10、11、12。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task partial-gaps --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/partial-gaps.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task partial-gaps --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/partial-gaps.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>06 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 06/14 <span>COURSE-V1 · 场景 06 / 18</span></div>
+ <h2>局部缺口 2×10</h2><div class="taskid">2x10-partial-gaps</div>
+ <div class="meta">seed=0 · basic · 源盒 56 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-partial-gaps_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-partial-gaps_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">每个源列的前端和内部均有缺口，使用剩余物体填满 2×10 目标盒。 图中每列移除的行号（从 1 计）：1、2、3、10、11、12。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-partial-gaps --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-partial-gaps.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-partial-gaps --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-partial-gaps.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>07 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 07/14 <span>COURSE-V1 · 场景 07 / 18</span></div>
+ <h2>跨列取料 2×5</h2><div class="taskid">cross-column</div>
+ <div class="meta">seed=0 · basic · 源盒 32 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/cross-column_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/cross-column_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">四个源列各保留连续 8 块，目标是直立放入 10 块。 图中四列保留段的起始行（从 1 计）：9、12、1、8。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task cross-column --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/cross-column.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task cross-column --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/cross-column.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>08 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 08/14 <span>COURSE-V1 · 场景 08 / 18</span></div>
+ <h2>跨列取料 2×10</h2><div class="taskid">2x10-cross-column</div>
+ <div class="meta">seed=0 · basic · 源盒 32 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-cross-column_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-cross-column_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">四个源列各保留连续 8 块，目标是直立放入 20 块。 图中四列保留段的起始行（从 1 计）：9、12、1、8。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-cross-column --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-cross-column.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-cross-column --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-cross-column.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>09 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 09/14 <span>COURSE-V1 · 场景 09 / 18</span></div>
+ <h2>稀疏精确清空 2×5</h2><div class="taskid">sparse-exact-ten</div>
+ <div class="meta">seed=0 · basic · 源盒 10 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/sparse-exact-ten_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/sparse-exact-ten_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">四列分别保留 1、2、3、4 块，共 10 块，目标盒最终两列各 5 块。 图中源列数量（源盒局部 X 从小到大）：4、2、1、3。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task sparse-exact-ten --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/sparse-exact-ten.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task sparse-exact-ten --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/sparse-exact-ten.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>10 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 10/14 <span>COURSE-V1 · 场景 10 / 18</span></div>
+ <h2>稀疏精确清空 2×10</h2><div class="taskid">2x10-sparse-exact-twenty</div>
+ <div class="meta">seed=0 · basic · 源盒 20 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-sparse-exact-twenty_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-sparse-exact-twenty_detail.png"><figcaption>源盒细节</figcaption></figure></div>
+ <p class="description">四列分别保留 2、4、6、8 块，共 20 块，目标盒最终两列各 10 块。 图中源列数量（源盒局部 X 从小到大）：8、4、2、6。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-sparse-exact-twenty --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-sparse-exact-twenty.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-sparse-exact-twenty --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-sparse-exact-twenty.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>11 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 11/14 <span>COURSE-V1 · 场景 11 / 18</span></div>
+ <h2>局部倾斜 2×5</h2><div class="taskid">tilted</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/tilted_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/tilted_detail.png"><figcaption>源盒倾斜细节</figcaption></figure></div>
+ <p class="description">两列各有一块倾斜物体；目标盒最终两列各 5 块，评分不要求必须抓取倾斜物。 图中标记了倾斜饼干，沉降后角度约 14.1°、13.8°。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task tilted --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/tilted.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task tilted --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/tilted.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>12 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 12/14 <span>COURSE-V1 · 场景 12 / 18</span></div>
+ <h2>局部倾斜 2×10</h2><div class="taskid">2x10-tilted</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-tilted_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-tilted_detail.png"><figcaption>源盒倾斜细节</figcaption></figure></div>
+ <p class="description">两列各有一块倾斜物体；目标盒最终两列各 10 块，评分不要求必须抓取倾斜物。 图中标记了倾斜饼干，沉降后角度约 14.1°、13.8°。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-tilted --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-tilted.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-tilted --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-tilted.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>13 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 13/14 <span>COURSE-V1 · 场景 13 / 18</span></div>
+ <h2>整列轻倾 2×5</h2><div class="taskid">whole-row-lean</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/whole-row-lean_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/whole-row-lean_detail.png"><figcaption>源盒倾斜细节</figcaption></figure></div>
+ <p class="description">一个源列的物体同向轻倾；目标盒最终两列各 5 块。 图中第 3 源列轻倾约 10°；标记点位于该列。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task whole-row-lean --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/whole-row-lean.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task whole-row-lean --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/whole-row-lean.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>14 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">基础 14/14 <span>COURSE-V1 · 场景 14 / 18</span></div>
+ <h2>整列轻倾 2×10</h2><div class="taskid">2x10-whole-row-lean</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/2x10-whole-row-lean_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10-whole-row-lean_detail.png"><figcaption>源盒倾斜细节</figcaption></figure></div>
+ <p class="description">一个源列的物体同向轻倾；目标盒最终两列各 10 块。 图中第 3 源列轻倾约 10°；标记点位于该列。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-whole-row-lean --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10-whole-row-lean.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task 2x10-whole-row-lean --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/2x10-whole-row-lean.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>15 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">Bonus 01/04 <span>COURSE-V1 · 场景 15 / 18</span></div>
+ <h2>固定预填</h2><div class="taskid">prefilled</div>
+ <div class="meta">seed=0 · basic · 源盒 75 块 · 目标盒 5 块</div>
+ <div class="pair"><figure><img src="images/prefilled_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/prefilled_detail.png"><figcaption>目标区域细节</figcaption></figure></div>
+ <p class="description">目标盒初始已有 5 块，目标是使盒内最终两列各有 5 块。 图中目标盒初始有 5 块，源盒初始有 75 块。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task prefilled --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/prefilled.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task prefilled --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/prefilled.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>16 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">Bonus 02/04 <span>COURSE-V1 · 场景 16 / 18</span></div>
+ <h2>双目标盒</h2><div class="taskid">two-boxes</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0, 0 块</div>
+ <div class="pair"><figure><img src="images/two-boxes_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/two-boxes_detail.png"><figcaption>目标区域细节</figcaption></figure></div>
+ <p class="description">一个源盒对应两个目标盒，最终要求每个目标盒各有 5 块。 图中两个目标盒初始均为空，最终各放 5 块。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task two-boxes --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/two-boxes.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task two-boxes --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/two-boxes.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>17 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">Bonus 03/04 <span>COURSE-V1 · 场景 17 / 18</span></div>
+ <h2>旋转目标盒</h2><div class="taskid">rotated-target</div>
+ <div class="meta">seed=0 · basic · 源盒 80 块 · 目标盒 0 块</div>
+ <div class="pair"><figure><img src="images/rotated-target_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/rotated-target_detail.png"><figcaption>目标区域细节</figcaption></figure></div>
+ <p class="description">目标盒水平旋转，最终仍需两列各放 5 块。 图中初始化抽取的目标盒旋转角为 -82.2°。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task rotated-target --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/rotated-target.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task rotated-target --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/rotated-target.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>18 / 19</b></div>
+ </section><section class="page scene">
+ <div class="eyebrow">Bonus 04/04 <span>COURSE-V1 · 场景 18 / 18</span></div>
+ <h2>可变预填</h2><div class="taskid">variable-prefill</div>
+ <div class="meta">seed=0 · basic · 源盒 73 块 · 目标盒 7 块</div>
+ <div class="pair"><figure><img src="images/variable-prefill_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/variable-prefill_detail.png"><figcaption>目标区域细节</figcaption></figure></div>
+ <p class="description">目标盒初始随机放置 1–9 块，目标是使盒内最终两列各有 5 块。 图中目标盒初始有 7 块，本回合需补 3 块。</p>
+ <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
+ <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task variable-prefill --protocol course-v1 \
+  --policy expert --profile basic --episodes 5 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/variable-prefill.json</pre>
+ <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+  --task variable-prefill --protocol course-v1 \
+  --policy expert --profile basic --episodes 1 --seed-start 0 \
+  --workers 1 --render --output outputs/course_demos/variable-prefill.json</pre>
+ <div class="footer">A3 双臂仿真 · 截图为初始状态 · 每项结果均以实际运行记录为准 <b>19 / 19</b></div>
+ </section></body></html>
