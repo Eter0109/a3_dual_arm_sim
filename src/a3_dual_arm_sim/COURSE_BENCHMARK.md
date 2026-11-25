@@ -24,8 +24,9 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
 可先加 `--dry-run` 查看 22 个任务与档位组合，不执行仿真。`--episodes N` 会将所有
 组合统一覆盖为 N 回合；`--standard-episodes`、`--expanded-episodes` 和
 `--bonus-episodes` 可分别覆盖对应组。`--standard-profile basic|medium|advanced`
-可只运行某一个标准档位。上述覆盖用于自定义测试，结果中的 `is_standard_assessment`
-会标明是否仍为完整的 140 回合标准方案。中断或抛错时已完成回合与未完成回合分开记录。
+可只运行某一个标准档位。上述覆盖以及 `--max-steps` 步数覆盖用于自定义测试，结果中的
+`is_standard_assessment` 会标明是否仍为完整的标准方案。中断或抛错时已完成回合与未完成
+回合分开记录。
 
 单项任务继续通过现有入口运行：
 

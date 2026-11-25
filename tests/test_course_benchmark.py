@@ -323,7 +323,9 @@ def test_course_dry_run_shows_schedule_without_creating_environments(monkeypatch
     assert report["status"] == "planned"
     assert report["base"]["expected"] == 120 and report["bonus"]["expected"] == 20
     assert report["total"]["completed"] == 0 and report["total"]["expected"] == 140
-    assert report["bonus"]["points"] is None
+    assert report["bonus"]["points"] is None and report["is_standard_assessment"]
+    shortened = course_benchmark_cli.evaluate_course(policy="expert", dry_run=True, max_steps=1)
+    assert not shortened["is_standard_assessment"] and shortened["max_steps_override"] == 1
 
 
 def test_course_convenience_entrypoint_defaults_to_five_episodes():

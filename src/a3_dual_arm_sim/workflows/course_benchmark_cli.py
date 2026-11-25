@@ -133,12 +133,14 @@ def evaluate_course(*, policy, episodes=None, standard_episodes=None, expanded_e
         "is_standard_assessment": (
             tuple(profiles) == COURSE_STANDARD_PROFILES
             and counts == {"standard": 10, "expanded": 5, "bonus": 5}
+            and max_steps is None
         ),
         "prompt": COURSE_PROMPT,
         "policy": policy if isinstance(policy, str) else getattr(policy, "name", type(policy).__name__),
         "episodes_per_task": uniform_episodes,
         "episodes_per_group": counts,
         "seed_start": seed_start,
+        "max_steps_override": max_steps,
         "standard_profile": standard_profile,
         "standard_profiles": list(profiles),
         "expanded_profile": "basic",
