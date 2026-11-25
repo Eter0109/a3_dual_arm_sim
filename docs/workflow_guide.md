@@ -154,7 +154,7 @@ a3-sim train-act \
 
 ## 4. 统一仿真评测
 
-统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。课程版包含 14 个基础任务与 4 个 Bonus 任务，支持专家、SmolVLA、ACT、`module:factory` 插件；课程任务组和六个新 2×10 场景见[课程 Benchmark 说明](../src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。
+统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。课程版包含 14 种基础任务与 4 种 Bonus 任务，支持专家、SmolVLA、ACT、`module:factory` 插件；标准化任务组按 6 个标准布局与档位组合各 10 次、12 个基础扩展任务各 5 次和 4 个 Bonus 任务各 5 次运行，共 140 回合；课程任务组和六个新 2×10 场景见[课程 Benchmark 说明](../src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。
 
 ### 4.1 专家与模型数量评测
 

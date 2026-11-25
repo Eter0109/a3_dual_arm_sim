@@ -1,11 +1,11 @@
 # A3 课程 Benchmark：18 个场景图鉴与运行命令
 
-本文基于当前 `course-v1`，涵盖 14 个基础任务和 4 个 Bonus。每个场景提供两张真实 MuJoCo 初始截图、5 回合测试命令和带 `--render` 的单回合专家演示命令。
+本文基于当前 `course-v1`，涵盖 14 种基础任务和 4 种 Bonus。每个场景提供两张真实 MuJoCo 初始截图、单项测试命令和带 `--render` 的单回合专家演示命令。标准化任务组把两个标准布局分别按三个档位评测，共 22 个任务与档位组合、140 回合。
 
 - **截图条件：** `seed=0`；标准 `2x5`、`2x10` 使用 `advanced`，其余场景使用 `basic`。截图是在初始化和物理沉降后、专家开始执行前采集的；图中视角用于展示，不是策略相机。倾斜场景的白蓝标记仅用于标识物体。
 - **统一提示词：** `Fill the target box.`；ACT 不使用文本，但结果仍记录该提示词。
 - **评分：** 2×5 目标盒两列各 5 块；2×10 两列各 10 块；双盒各 5 块。物体必须直立、稳定，并从左右夹爪释放。来源列、原预填物身份和源盒剩余数量仅作诊断。扩展场景使用 basic、只按目标状态判成功，与 PDF 部分规则不同。
-- **步数与结果：** 默认上限 2×5 为 6000 步、2×10 为 12000 步。测试命令每项运行 5 回合，结果写入 `outputs/course_tests/`；演示命令运行 1 回合并写入 `outputs/course_demos/`。`expert` 是读取模拟器特权状态的规则控制器，并非训练模型。不同种子不保证成功。
+- **步数与结果：** 默认上限 2×5 为 6000 步、2×10 为 12000 步。标准布局的示例测试命令按 advanced 运行 10 回合，其余场景各运行 5 回合，结果写入 `outputs/course_tests/`；演示命令运行 1 回合并写入 `outputs/course_demos/`。`expert` 是读取模拟器特权状态的规则控制器，并非训练模型。不同种子不保证成功。
 
 ## 运行前
 
@@ -17,6 +17,8 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 ```
 
 `--render` 使用 MuJoCo/GLFW 图形窗口，需可用的图形桌面和 `DISPLAY`；纯 SSH 或无桌面环境可先运行无窗口测试，或配置可用的图形显示。`MUJOCO_GL=egl` 可用于离屏渲染，但本身不能替代可显示的窗口。演示统一设置 `--workers 1`，可以用鼠标调整窗口视角。截图是静态初态；演示会真实执行专家动作。
+
+标准布局的完整评估还需将对应命令中的 `--profile advanced` 分别改为 `basic` 和 `medium`，各运行 10 回合，并为不同档位指定不同的 `--output` 路径。也可直接运行[课程任务组](../COURSE_BENCHMARK.md)，自动执行 140 回合。
 
 下列测试命令默认评测 `expert`。若要测自己训练的策略，可将 `--policy expert` 替换为例如 `--policy smolvla:/绝对路径/pretrained_model` 或 `--policy act:/绝对路径/pretrained_model`，并按项目说明提供对应依赖和数据配置；路径需要替换为真实检查点。
 
@@ -38,13 +40,13 @@ MUJOCO_GL=egl python src/a3_dual_arm_sim/course_visual_guide/generate_screenshot
 | :---: | :---: |
 | ![标准搬运 2×5工作区全景](images/2x5_overview.png) | ![标准搬运 2×5源盒细节](images/2x5_detail.png) |
 
-**5 回合测试：**
+**10 回合测试（advanced）：**
 
 ```bash
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x5 --protocol course-v1 \
-  --policy expert --profile advanced --episodes 5 --seed-start 0 \
-  --workers 1 --output outputs/course_tests/2x5.json
+  --policy expert --profile advanced --episodes 10 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x5_advanced.json
 ```
 
 **渲染专家演示：**
@@ -68,13 +70,13 @@ MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
 | :---: | :---: |
 | ![标准搬运 2×10工作区全景](images/2x10_overview.png) | ![标准搬运 2×10源盒细节](images/2x10_detail.png) |
 
-**5 回合测试：**
+**10 回合测试（advanced）：**
 
 ```bash
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x10 --protocol course-v1 \
-  --policy expert --profile advanced --episodes 5 --seed-start 0 \
-  --workers 1 --output outputs/course_tests/2x10.json
+  --policy expert --profile advanced --episodes 10 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10_advanced.json
 ```
 
 **渲染专家演示：**

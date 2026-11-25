@@ -10,7 +10,7 @@
   "mujoco_version": "3.6.0",
   "python_version": "3.13.12",
   "sha256": {
-    "workflows/course_protocol.py": "307f9ff7a2bd9a2dcd906210f66d3252cb34cf9498aaa863c9c398445bacbbd8",
+    "workflows/course_protocol.py": "d8cc34d5c9d694799cf6e6b4dcbd995290b96f128124915bb05e274c27adb5a9",
     "workflows/benchmark.py": "3dd035d93b204cb90689d85c79d2f2217a37e5d1e5c02dce97d2dde78956140f",
     "config.py": "63ef0bcdc9d0c9da411f7ab8d8f8785a437a2de181d3df84a9d92743383f7c12",
     "tasks/cookie_scenarios.py": "522d6a468e8faebf4326d9dded9802600b8b0179120714f732f0794cd287ca27",

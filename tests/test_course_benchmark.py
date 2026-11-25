@@ -178,36 +178,152 @@ def test_policy_act_receives_course_prompt():
     assert result.episodes[0].randomization["task_instruction"] == COURSE_PROMPT
 
 
-def test_course_suite_has_90_episodes_and_distinct_profile_contract(monkeypatch):
+def test_course_suite_has_140_episodes_and_distinct_profile_contract(monkeypatch):
     from a3_dual_arm_sim.workflows import course_benchmark_cli
 
     calls = []
 
     class Result:
+        def __init__(self, count):
+            self.count = count
+
         def to_dict(self):
-            return {"summary": {}, "episodes": [{"success": True} for _ in range(5)]}
+            return {"summary": {}, "episodes": [{"success": True} for _ in range(self.count)]}
 
     class Benchmark:
-        config = type("Config", (), {"horizon": 12000})()
+        def __init__(self, limit):
+            self.config = type("Config", (), {"horizon": limit})()
 
         def evaluate(self, policy, **kwargs):
-            assert kwargs["num_episodes"] == 5
-            return Result()
+            calls[-1][2] = kwargs["num_episodes"]
+            return Result(kwargs["num_episodes"])
 
     def make(task, **kwargs):
-        calls.append((task, kwargs))
-        return Benchmark()
+        calls.append([task, kwargs, None])
+        return Benchmark(kwargs["max_steps"])
 
     monkeypatch.setattr(course_benchmark_cli, "make_cookie_benchmark", make)
     report = course_benchmark_cli.evaluate_course(policy="expert")
     assert report["status"] == "complete"
-    assert report["base"] == {"completed": 70, "expected": 70, "successes": 70}
+    assert report["is_standard_assessment"]
+    assert report["standard"] == {"completed": 60, "expected": 60, "successes": 60}
+    assert report["expanded"] == {"completed": 60, "expected": 60, "successes": 60}
+    assert report["base"] == {"completed": 120, "expected": 120, "successes": 120}
     assert report["bonus"] == {"completed": 20, "expected": 20, "successes": 20, "points": 20}
-    assert len(calls) == 18
-    assert all(kwargs["profile"] == ("advanced" if task in ("2x5", "2x10") else "basic")
-               for task, kwargs in calls)
+    assert report["total"] == {"completed": 140, "expected": 140, "successes": 140}
+    assert len(calls) == len(report["tasks"]) == 22
+    assert {(task, kwargs["profile"], count) for task, kwargs, count in calls
+            if task in ("2x5", "2x10")} == {
+                (task, profile, 10) for task in ("2x5", "2x10")
+                for profile in ("basic", "medium", "advanced")
+            }
+    assert all(kwargs["profile"] == "basic" and count == 5
+               for task, kwargs, count in calls if task not in ("2x5", "2x10"))
     assert all(kwargs["max_steps"] == (12000 if task.startswith("2x10") else 6000)
-               for task, kwargs in calls)
+               for task, kwargs, _ in calls)
+    assert {key for key, value in report["tasks"].items() if value["group"] == "standard"} == {
+        f"{task}@{profile}" for task in ("2x5", "2x10")
+        for profile in ("basic", "medium", "advanced")
+    }
+
+
+def test_course_old_uniform_override_and_group_precedence():
+    from a3_dual_arm_sim.workflows.course_benchmark_cli import build_course_schedule
+
+    schedule, counts, profiles = build_course_schedule(episodes=5, standard_profile="advanced")
+    assert len(schedule) == 18 and sum(case["episodes"] for case in schedule) == 90
+    assert counts == {"standard": 5, "expanded": 5, "bonus": 5}
+    assert profiles == ("advanced",)
+    schedule, counts, profiles = build_course_schedule(
+        episodes=2, standard_episodes=3, expanded_episodes=4, bonus_episodes=5
+    )
+    assert len(schedule) == 22 and sum(case["episodes"] for case in schedule) == 86
+    assert counts == {"standard": 3, "expanded": 4, "bonus": 5}
+    assert profiles == ("basic", "medium", "advanced")
+
+
+def test_course_error_keeps_completed_episodes_and_does_not_infer_failures(monkeypatch):
+    from a3_dual_arm_sim.workflows import course_benchmark_cli
+
+    class Episode:
+        def __init__(self, number):
+            self.number = number
+
+        def to_dict(self):
+            return {"episode": self.number, "success": self.number == 1}
+
+    class Result:
+        def __init__(self, count, fail_one=False):
+            self.count = count
+            self.fail_one = fail_one
+
+        def to_dict(self):
+            return {"summary": {}, "episodes": [
+                {"episode": i + 1, "success": not self.fail_one or i != 0}
+                for i in range(self.count)
+            ]}
+
+    class Benchmark:
+        config = type("Config", (), {"horizon": 12000})()
+
+        def __init__(self, task, profile):
+            self.task, self.profile = task, profile
+
+        def evaluate(self, policy, **kwargs):
+            if self.task == "2x10" and self.profile == "medium":
+                for number in (2, 1):
+                    kwargs["on_episode_end"](Episode(number))
+                raise RuntimeError("simulated interruption")
+            return Result(kwargs["num_episodes"], fail_one=self.task == "missing-columns")
+
+    monkeypatch.setattr(course_benchmark_cli, "make_cookie_benchmark",
+                        lambda task, **kwargs: Benchmark(task, kwargs["profile"]))
+    report = course_benchmark_cli.evaluate_course(policy="expert")
+    interrupted = report["tasks"]["2x10@medium"]
+    assert report["status"] == "incomplete" and interrupted["status"] == "error"
+    assert [ep["episode"] for ep in interrupted["episodes"]] == [1, 2]
+    assert report["base"] == {"completed": 112, "expected": 120, "successes": 110}
+    assert report["bonus"] == {"completed": 20, "expected": 20, "successes": 20, "points": 20}
+
+
+def test_course_source_change_does_not_count_partial_episodes(monkeypatch):
+    from a3_dual_arm_sim.workflows import course_benchmark_cli
+
+    source = {"version": "before"}
+
+    class Episode:
+        def to_dict(self):
+            return {"episode": 1, "success": True}
+
+    class Benchmark:
+        config = type("Config", (), {"horizon": 6000})()
+
+        def evaluate(self, policy, **kwargs):
+            kwargs["on_episode_end"](Episode())
+            source["version"] = "after"
+            raise RuntimeError("source changed")
+
+    monkeypatch.setattr(course_benchmark_cli, "_source_hashes", lambda: dict(source))
+    monkeypatch.setattr(course_benchmark_cli, "make_cookie_benchmark", lambda *args, **kwargs: Benchmark())
+    report = course_benchmark_cli.evaluate_course(policy="expert")
+    first = report["tasks"]["2x5@basic"]
+    assert first["episodes"] == [] and first["invalid_episodes"][0]["success"]
+    assert report["status"] == "incomplete" and report["total"]["completed"] == 0
+    assert report["bonus"]["points"] is None
+
+
+def test_course_dry_run_shows_schedule_without_creating_environments(monkeypatch):
+    from a3_dual_arm_sim.workflows import course_benchmark_cli
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("dry-run must not construct an environment")
+
+    monkeypatch.setattr(course_benchmark_cli, "make_cookie_benchmark", unexpected)
+    report = course_benchmark_cli.evaluate_course(policy="expert", dry_run=True)
+    assert report["status"] == "planned"
+    assert report["base"]["expected"] == 120 and report["bonus"]["expected"] == 20
+    assert report["total"]["completed"] == 0 and report["total"]["expected"] == 140
+    assert report["bonus"]["points"] is None
 
 
 def test_course_convenience_entrypoint_defaults_to_five_episodes():
@@ -314,3 +430,41 @@ def test_course_success_requires_balanced_released_and_stable_targets(monkeypatc
         assert hold(env)["success"]
     finally:
         env.close()
+
+
+def test_course_uniform_override_evaluates_single_profile_compatibly(monkeypatch):
+    from a3_dual_arm_sim.workflows import course_benchmark_cli
+
+    class Result:
+        def __init__(self, count):
+            self.count = count
+
+        def to_dict(self):
+            return {"summary": {}, "episodes": [{"success": True} for _ in range(self.count)]}
+
+    class Benchmark:
+        config = type("Config", (), {"horizon": 12000})()
+
+        def evaluate(self, policy, **kwargs):
+            return Result(kwargs["num_episodes"])
+
+    monkeypatch.setattr(course_benchmark_cli, "make_cookie_benchmark", lambda *args, **kwargs: Benchmark())
+    report = course_benchmark_cli.evaluate_course(
+        policy="expert", episodes=5, standard_profile="advanced"
+    )
+    assert report["status"] == "complete" and not report["is_standard_assessment"]
+    assert report["standard_profiles"] == ["advanced"] and report["episodes_per_task"] == 5
+    assert report["base"] == {"completed": 70, "expected": 70, "successes": 70}
+    assert report["bonus"] == {"completed": 20, "expected": 20, "successes": 20, "points": 20}
+    assert report["total"]["expected"] == report["total"]["completed"] == 90
+
+
+@pytest.mark.parametrize("options", [
+    {"episodes": 0}, {"standard_episodes": -1}, {"expanded_episodes": 0},
+    {"bonus_episodes": True}, {"standard_profile": "invalid"},
+])
+def test_course_rejects_invalid_schedule_options(options):
+    from a3_dual_arm_sim.workflows.course_benchmark_cli import build_course_schedule
+
+    with pytest.raises(ValueError):
+        build_course_schedule(**options)

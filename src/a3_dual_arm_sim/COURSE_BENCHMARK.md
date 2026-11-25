@@ -1,6 +1,6 @@
 # 课程饼干 Benchmark
 
-`course-v1` 包含 14 个基础任务和 4 个 Bonus 任务。全部任务向语言策略传入同一句
+`course-v1` 包含 14 种基础任务和 4 种 Bonus 任务。全部任务向语言策略传入同一句
 `Fill the target box.`；ACT 不使用文本。每回合按目标盒内直立、释放且稳定的物体判定：
 2×5 目标盒两列各 5 块，2×10 两列各 10 块，双盒任务每盒 5 块。释放检查覆盖左右夹爪。
 源盒库存、取料列、
@@ -12,13 +12,20 @@
 
 ```bash
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
-  --policy expert --episodes 5 --seed-start 13000 --output course_results.json
+  --policy expert --seed-start 13000 --output course_results.json
 ```
 
-默认标准 2×5 和 2×10 使用 `advanced`；通过 `--standard-profile basic|medium|advanced`
-可修改两个标准任务的档位。所有扩展和 Bonus 任务只支持 `basic`。每个任务默认 5 回合，
-基础任务共 70 次，Bonus 共 20 次；报告中的 Bonus 每个完整成功记 1 分。未完成或抛错的
-任务标记为 incomplete，不计作已完成回合。`--episodes` 更改样本量时不计算课程 Bonus 分。
+标准化评估把标准 2×5 和 2×10 分别按 `basic`、`medium`、`advanced` 运行：6 个
+任务与档位的组合各 10 回合，共 60 回合。其余 12 种基础扩展任务只使用 `basic`，
+各 5 回合，共 60 回合；基础部分合计 120 回合。4 种 Bonus 任务各 5 回合，共 20 回合，
+全部合计 **140 回合**。报告分别记录标准、扩展、基础和 Bonus 的已完成数、计划数和
+完整成功数；Bonus 在 20 回合完整执行时，每个完整成功记 1 分，不推算课程总分。
+
+可先加 `--dry-run` 查看 22 个任务与档位组合，不执行仿真。`--episodes N` 会将所有
+组合统一覆盖为 N 回合；`--standard-episodes`、`--expanded-episodes` 和
+`--bonus-episodes` 可分别覆盖对应组。`--standard-profile basic|medium|advanced`
+可只运行某一个标准档位。上述覆盖用于自定义测试，结果中的 `is_standard_assessment`
+会标明是否仍为完整的 140 回合标准方案。中断或抛错时已完成回合与未完成回合分开记录。
 
 单项任务继续通过现有入口运行：
 

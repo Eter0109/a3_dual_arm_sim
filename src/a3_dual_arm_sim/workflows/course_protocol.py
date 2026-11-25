@@ -3,9 +3,11 @@
 COURSE_PROTOCOL = "course-v1"
 LEGACY_PROTOCOL = "legacy"
 COURSE_PROMPT = "Fill the target box."
+COURSE_STANDARD_TASKS = ("2x5", "2x10")
+COURSE_STANDARD_PROFILES = ("basic", "medium", "advanced")
 
 COURSE_BASE_TASKS = (
-    "2x5", "2x10",
+    *COURSE_STANDARD_TASKS,
     "missing-columns", "2x10-missing-columns",
     "partial-gaps", "2x10-partial-gaps",
     "cross-column", "2x10-cross-column",
@@ -14,6 +16,7 @@ COURSE_BASE_TASKS = (
     "whole-row-lean", "2x10-whole-row-lean",
 )
 COURSE_BONUS_TASKS = ("prefilled", "two-boxes", "rotated-target", "variable-prefill")
+COURSE_EXPANDED_TASKS = tuple(task for task in COURSE_BASE_TASKS if task not in COURSE_STANDARD_TASKS)
 COURSE_TASKS = (*COURSE_BASE_TASKS, *COURSE_BONUS_TASKS)
 
 

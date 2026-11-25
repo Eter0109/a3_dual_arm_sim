@@ -31,9 +31,9 @@ pre { white-space:pre; background:#f2f5f8; border:1px solid #e1e7ee; border-radi
 </style></head><body><section class="page cover"><div class="accent"></div>
 <div class="eyebrow">A3 DUAL ARM SIMULATION · COURSE-V1</div>
 <h1>课程 Benchmark<br>场景图鉴与运行指南</h1><div class="subtitle">18 个场景 · 初始化截图 · 评测命令 · 专家渲染演示</div>
-<div class="band"><b>统一提示词</b> &nbsp; <span style="font-family:DejaVu Sans Mono,monospace">Fill the target box.</span><br>14 个基础任务 + 4 个 Bonus；ACT 不消费文本，结果仍记录提示词。</div>
+<div class="band"><b>统一提示词</b> &nbsp; <span style="font-family:DejaVu Sans Mono,monospace">Fill the target box.</span><br>14 种基础任务 + 4 种 Bonus；标准化评估共 22 个任务与档位组合、140 回合。ACT 不消费文本。</div>
 <h3>如何阅读截图</h3><p>每个场景各有工作区全景和关键区域细节，截图均在物理沉降后、策略执行前采集。标准任务使用 advanced，其余场景使用 basic，示例种子为 0。白蓝标记仅用于指出倾斜物体或其所在列；展示视角不是策略输入。</p>
-<h3>运行与 render</h3><p>请在已安装项目依赖的环境中，从仓库根目录执行后续命令。测试命令运行 5 回合；演示命令运行 1 回合并打开 MuJoCo 窗口。窗口需要可用的图形桌面和 DISPLAY；EGL 离屏渲染不能替代显示窗口。</p>
+<h3>运行与 render</h3><p>请在已安装项目依赖的环境中，从仓库根目录执行后续命令。标准布局的示例测试按 advanced 运行 10 回合，其他场景各运行 5 回合；完整标准评估还需 basic 和 medium 各 10 回合。演示命令运行 1 回合并打开 MuJoCo 窗口。窗口需要可用的图形桌面和 DISPLAY；EGL 离屏渲染不能替代显示窗口。</p>
 <pre>cd "$(git rev-parse --show-toplevel)"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1</pre>
 <h3>如何看待结果</h3><p>目标盒内物体须直立、稳定，并从左右夹爪释放。2×5 为两列各 5 块，2×10 为两列各 10 块，双盒各 5 块。来源列、原预填物身份和源盒剩余数量仅作诊断；该规则及扩展场景的 basic 档位与课程 PDF 部分要求不同。</p>
@@ -45,10 +45,10 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1</pre>
  <div class="pair"><figure><img src="images/2x5_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x5_detail.png"><figcaption>源盒细节</figcaption></figure></div>
  <p class="description">源盒完整；目标盒最终两列各放 5 块。 图中源盒初始有 80 块，目标盒初始为空。</p>
  <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
- <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+ <div class="label">01 / 10 回合测试（advanced）</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x5 --protocol course-v1 \
-  --policy expert --profile advanced --episodes 5 --seed-start 0 \
-  --workers 1 --output outputs/course_tests/2x5.json</pre>
+  --policy expert --profile advanced --episodes 10 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x5_advanced.json</pre>
  <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x5 --protocol course-v1 \
   --policy expert --profile advanced --episodes 1 --seed-start 0 \
@@ -61,10 +61,10 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1</pre>
  <div class="pair"><figure><img src="images/2x10_overview.png"><figcaption>工作区全景</figcaption></figure><figure><img src="images/2x10_detail.png"><figcaption>源盒细节</figcaption></figure></div>
  <p class="description">源盒完整；目标盒最终两列各放 10 块。 图中源盒初始有 80 块，目标盒初始为空。</p>
  <p class="prompt">实际提示词 <b>Fill the target box.</b></p>
- <div class="label">01 / 5 回合测试</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
+ <div class="label">01 / 10 回合测试（advanced）</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x10 --protocol course-v1 \
-  --policy expert --profile advanced --episodes 5 --seed-start 0 \
-  --workers 1 --output outputs/course_tests/2x10.json</pre>
+  --policy expert --profile advanced --episodes 10 --seed-start 0 \
+  --workers 1 --output outputs/course_tests/2x10_advanced.json</pre>
  <div class="label">02 / 渲染专家演示</div><pre>MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli \
   --task 2x10 --protocol course-v1 \
   --policy expert --profile advanced --episodes 1 --seed-start 0 \
