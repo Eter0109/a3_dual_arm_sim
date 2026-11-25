@@ -87,11 +87,10 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 课程版包含 14 种基础任务和 4 种 Bonus 任务，统一提示词为 `Fill the target box.`。标准化评估将两个标准布局各按三个档位运行 10 次，其余 12 个基础扩展任务和 4 个 Bonus 任务各运行 5 次，共 140 回合。通过 `examples/benchmark_cookie_batch.py --task` 运行单项，或使用课程任务组入口执行全部任务；新 2×10 场景、目标盒评分、随机化和专家使用方法见 [课程 Benchmark 说明](docs/course_benchmark.md)。两个旧来源配额任务保留原有提示词和评分，见 [历史扩展场景](docs/cookie_benchmark_scenarios.md)。
 
-直接启动完整课程任务组（默认规则专家，结果写入指定的 JSON）：
+直接启动完整课程任务组（默认规则专家，自动生成新报告路径）：
 
 ```bash
-MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
-  --policy expert --seed-start 0 --output outputs/course_benchmark/expert_seed0.json
+MUJOCO_GL=egl python -m a3_dual_arm_sim.examples.course_benchmark
 ```
 
 下面分别是 500 步单项调试和 legacy 网格示例：

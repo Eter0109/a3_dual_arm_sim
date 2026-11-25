@@ -53,39 +53,44 @@ Fill the target box.
 在仓库根目录、已安装本项目依赖的环境中运行：
 
 ```bash
-MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
-  --policy expert --seed-start 0 --workers 1 \
-  --output outputs/course_benchmark/expert_seed0.json
+MUJOCO_GL=egl python -m a3_dual_arm_sim.examples.course_benchmark
 ```
 
-该入口运行 `expert` 和上述完整的 140 回合，种子从 0 开始，使用 1 个 worker，
-每个任务与档位组合结束后更新指定的 JSON 报告。**请为每次运行选择新输出路径**；
-已有输出文件会被覆盖。
+示例脚本默认运行 `expert` 和上述完整的 140 回合，种子从 0 开始，使用 1 个 worker。
+它在 `outputs/course_benchmark/` 下自动生成报告文件名，并在终端显示路径；每个任务与
+档位组合结束后更新 JSON 报告。
 
 先查看完整计划、不运行仿真：
 
 ```bash
-MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli --dry-run
+MUJOCO_GL=egl python -m a3_dual_arm_sim.examples.course_benchmark --dry-run
 ```
 
-`--dry-run` 在终端输出计划；指定 `--output` 时也会写入计划 JSON。替换策略、种子
-和输出路径即可运行模型评测，例如：
+`--dry-run` 在终端输出计划，也将计划 JSON 保存到报告路径。可以指定策略、种子和新
+报告路径；参数转交课程评测入口：
 
 ```bash
-MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
+MUJOCO_GL=egl python -m a3_dual_arm_sim.examples.course_benchmark \
   --policy smolvla:/绝对路径/pretrained_model --seed-start 13000 --workers 1 \
   --output outputs/course_benchmark/smolvla_13000.json
 ```
 
 策略还可使用 `act:/绝对路径/pretrained_model`、`pi05:/绝对路径/pretrained_model` 或
-`module:factory`。路径和模型依赖需与实际检查点一致；模型适配器使用其默认推理配置，
-需自定义时可提供策略工厂。
+`module:factory`。路径和模型依赖需与实际检查点一致；示例脚本拒绝使用已存在的输出路径，
+请为每次运行选择新路径。模型适配器使用其默认推理配置，需自定义时可提供策略工厂。
 
 `--episodes N` 覆盖所有组合的回合数，`--standard-episodes`、`--expanded-episodes` 和
 `--bonus-episodes` 分别覆盖各组；`--standard-profile basic|medium|advanced` 只运行该
 标准档位，`--max-steps` 覆盖每项的控制步上限。这些选项可用于自定义测试；
 报告中的 `is_standard_assessment` 标明其计划是否仍为完整的默认方案。可用 `--help`
 查看全部参数。
+
+也可直接调用底层入口；底层入口会覆盖指定的已有输出文件：
+
+```bash
+MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
+  --policy expert --seed-start 13000 --output outputs/course_benchmark/course_13000.json
+```
 
 单个课程任务可通过统一 benchmark 入口运行，例如：
 
