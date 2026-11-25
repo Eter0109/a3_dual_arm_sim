@@ -17,6 +17,10 @@ ACT模型：[`Eter0109/a3-cookie-2x5-act-20k`](https://huggingface.co/Eter0109/a
 
 单任务数据集：[`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)
 
+课程 Benchmark 场景说明与运行指南：[`docs/course_visual_guide/course_benchmark_18_scenes.pdf`](docs/course_visual_guide/course_benchmark_18_scenes.pdf)
+
+课程 Benchmark PPT：[`docs/course_visual_guide/sildes-course-project-benchmark.pdf`](docs/course_visual_guide/sildes-course-project-benchmark.pdf)
+
 ---
 
 
@@ -66,7 +70,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 [项目文档中心](docs/README.md) 按课程评测、数据与训练、开发参考组织全部使用手册。
 
 - [课程 Benchmark](docs/course_benchmark.md)：任务、统一指令、评分和完整评测。
-- [18 个课程场景图鉴](docs/course_visual_guide/README.md)：场景截图、PDF 和逐项命令。
+- [18 个课程场景说明](docs/course_visual_guide/README.md)：场景截图、[说明 PDF](docs/course_visual_guide/course_benchmark_18_scenes.pdf)、[课程 PPT](docs/course_visual_guide/sildes-course-project-benchmark.pdf) 和逐项命令。
 - [采集、训练、评测与自定义策略](docs/workflow_guide.md)：从数据准备到闭环评估。
 - [开发与接口参考](docs/README.md#开发与接口)：架构、动作数据契约和入口索引。
 
@@ -93,12 +97,12 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 MUJOCO_GL=egl python -m a3_dual_arm_sim.examples.course_benchmark
 ```
 
-下面分别是 500 步单项调试和 legacy 网格示例：
+下面分别是 course-v1 单项示例和 legacy 网格示例：
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --protocol course-v1 --task 2x10 --policy expert --profile basic --source-column 1 \
-  --episodes 1 --seed-start 13000 --max-steps 500 --workers 1
+  --protocol course-v1 --task 2x10 --policy expert \
+  --episodes 1 --seed-start 13000 --workers 1
 
 # 替换成已有完整检查点；输出目录需保持唯一。
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \

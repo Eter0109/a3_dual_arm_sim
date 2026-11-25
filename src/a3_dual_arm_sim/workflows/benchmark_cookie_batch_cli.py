@@ -291,7 +291,7 @@ def main() -> int:
         "--prompt-style",
         choices=("course", "training", "task", "short", "pi05_aligned"),
         default=None,
-        help="Default: training for 2x5/2x10; task for the scenario benchmarks",
+        help="Default: course for course-v1; under --protocol legacy, training for 2x5/2x10 and task for scenario benchmarks",
     )
     parser.add_argument("--num-steps", type=int, default=None, help="SmolVLA or pi05 flow inference steps")
     args = parser.parse_args()

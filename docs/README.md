@@ -8,7 +8,7 @@
 | 我想做什么 | 文档 |
 | --- | --- |
 | 了解 18 个课程任务、统一提示词、评分及 140 回合评测计划 | [课程 Benchmark 说明](course_benchmark.md) |
-| 看各场景图片、任务说明和单项命令 | [18 个场景图鉴](course_visual_guide/README.md)（[PDF](course_visual_guide/course_benchmark_18_scenes.pdf) / [HTML](course_visual_guide/report.html)） |
+| 看各场景图片、任务说明和单项命令 | [18 个场景图鉴](course_visual_guide/README.md)（[说明 PDF](course_visual_guide/course_benchmark_18_scenes.pdf) / [课程 PPT](course_visual_guide/sildes-course-project-benchmark.pdf) / [HTML](course_visual_guide/report.html)） |
 | 查看旧扩展场景、原提示词及来源配额规则 | [历史扩展场景与 legacy 协议](cookie_benchmark_scenarios.md) |
 
 `course-v1` 的 18 个任务统一使用 `Fill the target box.`，以完整成功为主要指标。

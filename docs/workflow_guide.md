@@ -17,7 +17,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 | `2x5` | 源 80 块搬出 10 块，目标 2 列各 5 块 | `same_column` | `configs/randomization.yaml` | 1600 |
 | `2x10` | 源 80 块搬出 20 块，目标 2 列各 10 块 | `variable_grasp` | `configs/randomization_2x10.yaml` | 3200 |
 
-统一评测中 `--policy expert` 自动选择对应专家。`cross_column` 仅适用于 2×5。两种任务的成功规则分别实现，不应只换几何 YAML 而保留另一任务的计分器。
+统一评测中 `--policy expert` 自动选择对应专家。旧版 `--policy cross_column` 仅适用于 2×5，2×10 跨列场景请使用 `--task 2x10-cross-column --policy expert`。两种任务的成功规则分别实现，不应只换几何 YAML 而保留另一任务的计分器。
 
 配置字段 `profile: basic|medium|advanced` 控制扰动强度，`source_column: 1|2|3|4|random` 控制来源列。2×10 还包含 `first_grasp: 0..9|random`，生成 `[n,10-n,n,10-n]` 抓取计划。三者独立；列号按源布局 X 从小到大排序。随机化具体范围见 [随机化说明](randomization.md)。
 
