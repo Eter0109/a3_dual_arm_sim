@@ -1,6 +1,6 @@
 # SmolVLA 训练与测试全流程
 
-统一任务入口、500 步数量评分、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](limitations.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
+课程与历史评测入口、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](limitations.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
 
 本流程以 A3 MuJoCo 左臂装盒为示例。示例数据为
 [`Eter0109/a3-front-close-left-100`](https://huggingface.co/datasets/Eter0109/a3-front-close-left-100)，
@@ -163,21 +163,21 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --policy "smolvla:$CHECKPOINT" \
+  --protocol course-v1 --policy "smolvla:$CHECKPOINT" \
   --device cuda \
   --episodes 20 --seed-start 1000 --max-steps 500 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --output outputs/smolvla_20k/dev20.json
 # 单 回合 动作与三路视频追踪；diagnostic-dir 必须为新目录
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --policy "smolvla:$CHECKPOINT" \
+  --protocol course-v1 --policy "smolvla:$CHECKPOINT" \
   --episodes 1 --seed-start 1000 --max-steps 500 --workers 1 \
   --n-action-steps 8 --inference-seed 1000 \
   --diagnostic-dir outputs/smolvla_20k/trace_seed1000 \
   --output outputs/smolvla_20k/trace_result.json
 ```
 
-正式验收用单独随机种子区间（例如 3000–3019），开发调参不要提前使用。对照专家时保持随机种子、随机化、场景和最大步数一致。主要报告最终平均入盒数、总入盒数和逐回合数量；完整成功标志保留作诊断，同时记录失败原因、控制/物理频率、预测与执行动作时域、检查点类型、权重 SHA256、数据版本与推理随机种子。默认扰动盒和饼干；固定布局需要两个 `--no-randomize-*` 开关。
+上例使用课程协议和 500 步调试预算；正式课程任务组的默认上限及回合计划见 [课程 Benchmark 说明](course_benchmark.md)。课程评测报告完整成功及完成回合数，最终入盒数量作为诊断。正式验收使用独立随机种子，比较时对齐场景、随机化和最大步数，并记录失败原因、控制/物理频率、预测与执行动作时域、检查点类型、权重 SHA256、数据版本和推理随机种子。默认扰动盒和饼干；固定布局需要两个 `--no-randomize-*` 开关。
 
 诊断区分 `raw_action`、`processed_action`、`applied_action`：分别是反归一化预测、策略后处理结果与环境应用动作。部署默认不启用夹爪锐化、右臂规则锚定、动作平滑或几何修正；左臂模型的右臂保持仍是必要接口行为。高级对照工具见 [入口索引](experiments.md)。
 

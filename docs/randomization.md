@@ -58,7 +58,7 @@ MUJOCO_GL=egl python examples/collect_cookie_benchmark.py \
 图像、状态和实际应用的绝对关节动作沿用原有数据格式。
 
 采集质量应按档位和来源列分别检查。计算采集成功比例时，失败尝试必须保留在分母中；
-该比例只用于采集质量诊断，策略评测仍以最终放入数量计分。
+该比例只用于采集质量诊断；历史 legacy 数量评测统计最终放入数量，课程协议以完整成功为主要指标。
 成功数据中的颜色比例不保证均衡，训练前应检查回合元数据。
 训练与测试使用互不重叠的随机种子，小规模流程测试不能证明稳定的任务表现。
 
@@ -69,6 +69,7 @@ from a3_dual_arm_sim.workflows.benchmark import make_cookie_benchmark
 
 benchmark = make_cookie_benchmark(
     task="2x5",
+    protocol="legacy",
     randomization_config="configs/randomization.yaml",
     profile="basic",
     source_column=1,
@@ -82,4 +83,4 @@ result = benchmark.evaluate("same_column", num_episodes=20, seed_start=10000, wo
 
 ## 统一评测
 
-两任务的模型/专家评测、500 步数量统计及六项网格使用统一入口，命令见 [完整流程指南](workflow_guide.md#4-统一仿真评测)。以最终放入数量为主指标；采集仍按完整成功条件保存演示。
+两任务的模型/专家评测及六项网格使用统一入口，命令见 [完整流程指南](workflow_guide.md#4-统一仿真评测)。legacy 可统计最终放入数量；课程评测以完整成功为主要指标。采集仍按其完整成功条件保存演示。

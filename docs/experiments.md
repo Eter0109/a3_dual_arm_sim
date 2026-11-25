@@ -14,7 +14,8 @@
 | `run_cookie_transfer.py` | `workflows.run_cookie_transfer_cli` | 单块/协作搬运专家 |
 | `evaluate_cookie_transfer.py` | `workflows.evaluate_cookie_transfer_cli` | 单块任务评估 |
 | `benchmark_cookie_batch.py` | `workflows.benchmark_cookie_batch_cli` | 统一 2×5/2×10，支持 --task、--policy、数量评分及可视化 |
-| 模块运行 | `workflows.evaluate_smolvla_grid_cli` | 两任务×三档 SmolVLA 网格，默认 500 步，支持 --resume |
+| 模块运行 | `workflows.course_benchmark_cli` | 完整课程任务组，默认 140 回合，可指定报告路径 |
+| 模块运行 | `workflows.evaluate_smolvla_grid_cli` | 两任务×三档 SmolVLA 网格；课程默认 6000 / 12000 步，legacy 默认 500 / 3200 步，支持 --resume |
 | `collect_cookie_2x10.py` | `data.collect_cookie_2x10_cli` | 二十块专家采集、首夹计划与续采 |
 | `run_cookie_2x10.py` | `workflows.run_cookie_2x10_cli` | 兼容的 2×10 专家演示入口 |
 | `preview_cameras.py` | `workflows.preview_cameras_cli` | 三相机预览 |

@@ -63,17 +63,12 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ## 文档导航
 
-从采集到部署优先阅读 [完整流程指南](docs/workflow_guide.md)，覆盖已有策略采集、SmolVLA/ACT 训练、统一评测、六项网格测试及自定义策略。使用范围与兼容性边界见 [已知限制](docs/limitations.md)。
+[项目文档中心](docs/README.md) 按课程评测、数据与训练、开发参考组织全部使用手册。
 
-- [项目架构](docs/architecture.md)：模块、数据流、资源打包与策略扩展。
-- [2×5 分级随机化与专家采集](docs/randomization.md)：两批各五个，配置强度、来源列和外观，采集与续采。
-- [2×10 专家演示与数据采集](docs/cookie_2x10.md)：配置首夹数量，运行四次抓取、图形演示与采集。
-- [饼干扩展场景 benchmark](docs/cookie_benchmark_scenarios.md)：缺列、缺口、跨列、倾倒、预填充和双盒评测。
-- [动作与数据契约](docs/contracts.md)：维度、时序、统计量与成功判定。
-- [SmolVLA 训练与测试全流程](docs/smolvla.md)：下载、审计、训练、部署、评估和故障排查。
-- [ACT 训练与评估](docs/act.md)：安装、短训练、部署、离线误差与闭环评估。
-- [入口与实验管理](docs/experiments.md)：正式入口、实验工具和结果追踪。
-- [使用范围与已知限制](docs/limitations.md)：环境兼容性、任务边界及数据注意事项。
+- [课程 Benchmark](docs/course_benchmark.md)：任务、统一指令、评分和完整评测。
+- [18 个课程场景图鉴](docs/course_visual_guide/README.md)：场景截图、PDF 和逐项命令。
+- [采集、训练、评测与自定义策略](docs/workflow_guide.md)：从数据准备到闭环评估。
+- [开发与接口参考](docs/README.md#开发与接口)：架构、动作数据契约和入口索引。
 
 ## 常用训练与测试
 
@@ -81,33 +76,42 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 # 自动生成本地数据标识，默认输出 outputs/cookie_2x5_trial_smolvla
 python -m a3_dual_arm_sim.cli train-smolvla --root datasets/cookie_2x5_trial
 
-# 测试上面训练的输出；自动选择最新检查点
+# 用旧短提示词做 2×5 模型到 2×10 的 legacy 迁移测试；自动选择最新检查点
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --policy smolvla:outputs/cookie_2x5_trial_smolvla --task 2x10 --prompt-style short
+  --policy smolvla:outputs/cookie_2x5_trial_smolvla --task 2x10 --protocol legacy --prompt-style short
 ```
 
 训练默认值与自定义 JSON 配置、旧检查点补齐方法见 [简化入口说明](docs/smolvla.md#简化入口与旧检查点)。
 
 ## 统一评测与网格测试
 
-课程版包含 14 种基础任务和 4 种 Bonus 任务，统一提示词为 `Fill the target box.`。标准化评估将两个标准布局各按三个档位运行 10 次，其余 12 个基础扩展任务和 4 个 Bonus 任务各运行 5 次，共 140 回合。通过 `examples/benchmark_cookie_batch.py --task` 运行单项，或使用课程任务组入口执行全部任务；新 2×10 场景、目标盒评分、随机化和专家使用方法见 [课程 Benchmark 说明](src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。两个旧来源配额任务保留原有提示词和评分，见 [历史扩展场景](docs/cookie_benchmark_scenarios.md)。
+课程版包含 14 种基础任务和 4 种 Bonus 任务，统一提示词为 `Fill the target box.`。标准化评估将两个标准布局各按三个档位运行 10 次，其余 12 个基础扩展任务和 4 个 Bonus 任务各运行 5 次，共 140 回合。通过 `examples/benchmark_cookie_batch.py --task` 运行单项，或使用课程任务组入口执行全部任务；新 2×10 场景、目标盒评分、随机化和专家使用方法见 [课程 Benchmark 说明](docs/course_benchmark.md)。两个旧来源配额任务保留原有提示词和评分，见 [历史扩展场景](docs/cookie_benchmark_scenarios.md)。
+
+直接启动完整课程任务组（默认规则专家，结果写入指定的 JSON）：
+
+```bash
+MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
+  --policy expert --seed-start 0 --output outputs/course_benchmark/expert_seed0.json
+```
+
+下面分别是 500 步单项调试和 legacy 网格示例：
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --task 2x10 --policy expert --profile basic --source-column 1 \
+  --protocol course-v1 --task 2x10 --policy expert --profile basic --source-column 1 \
   --episodes 1 --seed-start 13000 --max-steps 500 --workers 1
 
 # 替换成已有完整检查点；输出目录需保持唯一。
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --checkpoint outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-  --max-steps 500 --episodes 20 --seed-start 13000 \
-  --prompt-style-2x5 training --prompt-style-2x10 short \
+  --max-steps 500 --max-steps-2x10 500 --episodes 20 --seed-start 13000 \
+  --protocol legacy --prompt-style-2x5 training --prompt-style-2x10 short \
   --output outputs/smolvla_grid_short_500
 ```
 
-上例网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列。上例显式指定 2×5 使用训练原指令、2×10 使用 `transfer 20 cookies into target box`；短指令数量 baseline 不验证随机四次抓取计划。显式传入旧提示词参数时使用 legacy 协议；省略提示词参数时两个任务都使用课程统一提示词。网格可加 `--profiles basic` 只测 basic。
+上例网格按两个任务×三个档位执行，共 120 次，默认来源第 1 列。上例显式指定 2×5 使用训练原指令、2×10 使用 `transfer 20 cookies into target box`；短指令数量 baseline 不验证随机四次抓取计划。未指定协议时，显式传入旧提示词会选择 legacy；同时省略协议和旧提示词参数时使用课程统一提示词。网格可加 `--profiles basic` 只测 basic。
 结果保存到 `summary.md`、`summary.json` 和 `episodes.jsonl`；原命令加 `--resume` 可续跑。
-500 步为控制预算，不保证专家或模型完成四次抓取。完整参数、可视化、录制与自定义策略示例见 [完整流程指南](docs/workflow_guide.md)。
+上面两个示例均使用 500 步预算，不保证专家或模型完成四次抓取；完整课程任务组默认分别为 6000 / 12000 步。完整参数、可视化、录制与自定义策略示例见 [完整流程指南](docs/workflow_guide.md)。
 
 ## 资源与许可
 

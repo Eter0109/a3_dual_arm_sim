@@ -1,6 +1,6 @@
 # ACT 训练、部署与评估
 
-统一任务入口、500 步数量评分、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](limitations.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
+课程与历史评测入口、六项网格和自采数据训练流程见 [完整流程指南](workflow_guide.md)。训练前请核对 [当前依赖环境检查](limitations.md)：项目声明 LeRobot 0.5.1，本机开发版 0.5.2 的训练 API 存在差异。
 
 ACT 与 SmolVLA 共用 A3 数据和仿真接口，推理实现彼此独立。ACT 使用三路图像和关节状态，不使用任务文本。本项目采用公开 LeRobot 0.5.1 的 ACT；新建 ACT 策略，视觉骨干默认下载 torchvision 的 ImageNet ResNet18 权重。它不加载 `lerobot/smolvla_base`。
 

@@ -18,14 +18,28 @@ export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 
 `--render` 使用 MuJoCo/GLFW 图形窗口，需可用的图形桌面和 `DISPLAY`；纯 SSH 或无桌面环境可先运行无窗口测试，或配置可用的图形显示。`MUJOCO_GL=egl` 可用于离屏渲染，但本身不能替代可显示的窗口。演示统一设置 `--workers 1`，可以用鼠标调整窗口视角。截图是静态初态；演示会真实执行专家动作。
 
-标准布局的完整评估还需将对应命令中的 `--profile advanced` 分别改为 `basic` 和 `medium`，各运行 10 回合，并为不同档位指定不同的 `--output` 路径。也可直接运行[课程任务组](../COURSE_BENCHMARK.md)，自动执行 140 回合。
+标准布局的完整评估还需将对应命令中的 `--profile advanced` 分别改为 `basic` 和 `medium`，各运行 10 回合，并为不同档位指定不同的 `--output` 路径。也可直接执行[课程任务组](../course_benchmark.md)的 140 回合并保存结果：
+
+```bash
+MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli \
+  --policy expert --seed-start 0 --output outputs/course_benchmark/expert_seed0.json
+```
 
 下列测试命令默认评测 `expert`。若要测自己训练的策略，可将 `--policy expert` 替换为例如 `--policy smolvla:/绝对路径/pretrained_model` 或 `--policy act:/绝对路径/pretrained_model`，并按项目说明提供对应依赖和数据配置；路径需要替换为真实检查点。
 
-截图的实际初态、档位和源码指纹记录在 [截图清单](screenshots_manifest.json)。如需重新生成截图，可在仓库根目录运行：
+截图的实际初态、档位和源码指纹记录在 [截图清单](screenshots_manifest.json)。如需用仓库已有生成器重新生成到本图鉴目录，可在仓库根目录运行：
 
 ```bash
-MUJOCO_GL=egl python src/a3_dual_arm_sim/course_visual_guide/generate_screenshots.py
+MUJOCO_GL=egl python - <<'PYCODE'
+from pathlib import Path
+from runpy import run_path
+
+scope = run_path("src/a3_dual_arm_sim/course_visual_guide/generate_screenshots.py")
+main = scope["main"]
+main.__globals__["ROOT"] = Path("docs/course_visual_guide")
+main.__globals__["IMAGES"] = Path("docs/course_visual_guide/images")
+main()
+PYCODE
 ```
 
 ## 01. 标准搬运 2×5（2x5）

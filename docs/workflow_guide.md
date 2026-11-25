@@ -55,7 +55,7 @@ MUJOCO_GL=egl python examples/collect_cookie_2x10.py \
 
 Ctrl+C 会请求完成当前回合后退出；用原命令加 `--resume` 续采。必须保留配置、repo-id、随机种子起点和目标目录的一致性；配置变化使用新目录。续采时 `--episodes` 和 `--max-attempts` 是数据集累计目标/上限。
 
-采集的成功筛选仍用完整任务规则；评测按放入数量计分，不会自动放宽训练数据的筛选规则。
+采集的成功筛选沿用采集任务规则；课程评测以完整成功为主要指标，历史 legacy 数量评测另行统计入盒数量。评测协议不会自动放宽训练数据的筛选规则。
 
 ### 2.2 审计与可选左臂转换
 
@@ -154,14 +154,18 @@ a3-sim train-act \
 
 ## 4. 统一仿真评测
 
-统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。课程版包含 14 种基础任务与 4 种 Bonus 任务，支持专家、SmolVLA、ACT、`module:factory` 插件；标准化任务组按 6 个标准布局与档位组合各 10 次、12 个基础扩展任务各 5 次和 4 个 Bonus 任务各 5 次运行，共 140 回合；课程任务组和六个新 2×10 场景见[课程 Benchmark 说明](../src/a3_dual_arm_sim/COURSE_BENCHMARK.md)。
+统一入口是 `examples/benchmark_cookie_batch.py`，或模块 `python -m a3_dual_arm_sim.workflows.benchmark_cookie_batch_cli`。课程版包含 14 种基础任务与 4 种 Bonus 任务，支持专家、SmolVLA、ACT、`module:factory` 插件；标准化任务组按 6 个标准布局与档位组合各 10 次、12 个基础扩展任务各 5 次和 4 个 Bonus 任务各 5 次运行，共 140 回合；课程任务组和六个新 2×10 场景见[课程 Benchmark 说明](course_benchmark.md)。
 
-### 4.1 专家与模型数量评测
+完整课程任务组可运行 `MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.course_benchmark_cli --policy expert --output outputs/course_benchmark/expert_seed0.json`；加 `--dry-run` 查看计划。输出路径应为本次运行的新文件，见[课程 Benchmark 说明](course_benchmark.md)。
+
+### 4.1 专家与模型单项评测
+
+下面的课程协议单项命令显式使用 500 步，是调试预算，不是完整课程任务组的默认上限。
 
 ```bash
 # 2×10 专家；换成 --task 2x5 即可评测十块专家。
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --task 2x10 --policy expert --profile basic --source-column 1 \
+  --protocol course-v1 --task 2x10 --policy expert --profile basic --source-column 1 \
   --first-grasp random --episodes 20 --seed-start 13000 \
   --max-steps 500 --workers 1 --output outputs/expert_2x10_basic_500.json
 ```
@@ -170,7 +174,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ```bash
 MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
-  --task 2x10 \
+  --protocol course-v1 --task 2x10 \
   --policy smolvla:outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
   --device cuda \
   --profile basic --source-column 1 --first-grasp random \
@@ -189,7 +193,7 @@ MUJOCO_GL=egl python examples/benchmark_cookie_batch.py \
 
 ```bash
 env -u MUJOCO_GL python examples/benchmark_cookie_batch.py \
-  --task 2x10 --policy expert --profile basic --source-column 1 \
+  --protocol course-v1 --task 2x10 --policy expert --profile basic --source-column 1 \
   --first-grasp 3 --episodes 1 --seed-start 13000 \
   --max-steps 500 --workers 1 --render
 ```
@@ -198,14 +202,16 @@ env -u MUJOCO_GL python examples/benchmark_cookie_batch.py \
 
 ### 4.3 如何读成绩
 
-主要成绩取 **回合结束时** `cookies_in_target`，不取中途最大值：
+课程版以完整任务 `success` 为主要指标，目标盒计数是进度诊断；物体需要位于目标盒内、直立、释放并稳定。
+
+历史 `legacy` 数量评测取**回合结束时** `cookies_in_target`，不取中途最大值：
 
 - 2×5：每次 0–10 块；均值 `mean_score`，总数 `total_score / (10N)`。
 - 2×10：每次 0–20 块；均值 `mean_score`，总数 `total_score / (20N)`。
 
-JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录。课程版以完整任务 `success` 为主要指标，目标盒计数是进度诊断；物体需要位于目标盒内、直立、释放并稳定，肉眼看见接触目标盒不一定立即计入。旧数量评测使用 legacy 协议，不能与课程版混排。
+JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录；肉眼看见接触目标盒不一定立即计入。legacy 评测不能与课程版混排。
 
-500 是控制步上限；20 Hz 下为最多 25 秒仿真时间，推理和渲染会使实际耗时更长。2×10 的四次抓取可能被预算截断，必须与同为 500 步的结果比较。更改步数、指令、来源列、权重、后处理或统计量后，使用新的结果文件，避免混合协议。
+上面的单项示例以 500 为控制步上限；20 Hz 下为最多 25 秒仿真时间，推理和渲染会使实际耗时更长。2×10 的四次抓取可能被预算截断，必须与同为 500 步的结果比较。更改步数、指令、来源列、权重、后处理或统计量后，使用新的结果文件，避免混合协议。
 
 ## 5. 六项 SmolVLA 网格测试
 
@@ -214,13 +220,13 @@ JSON 的 `summary` 和 `episodes` 保存汇总与逐次记录。课程版以完�
 ```bash
 MUJOCO_GL=egl python -m a3_dual_arm_sim.workflows.evaluate_smolvla_grid_cli \
   --checkpoint outputs/smolvla_front_close_left_40k/model/checkpoints/040000/pretrained_model \
-  --prompt-style-2x5 training --prompt-style-2x10 short \
-  --max-steps 500 --episodes 20 --seed-start 13000 \
+  --protocol legacy --prompt-style-2x5 training --prompt-style-2x10 short \
+  --max-steps 500 --max-steps-2x10 500 --episodes 20 --seed-start 13000 \
   --n-action-steps 8 --num-steps 25 --device cuda \
   --output outputs/smolvla_grid_short_500
 ```
 
-网格覆盖 `2x5/2x10 × basic/medium/advanced`；课程协议默认每项 5 次，共 30 次。上例显式设置每项 20 次并指定旧提示词，故执行 120 次 legacy 评测。省略提示词参数时，两个任务均使用课程统一提示词。可用 `--profiles basic` 只测一个档位；不同任务共用一个检查点，因此只在 2×5 训练的模型，其 2×10 成绩应标为迁移测试。
+网格覆盖 `2x5/2x10 × basic/medium/advanced`；课程协议默认每项 5 次，共 30 次。上例显式设置每项 20 次并指定旧提示词，故执行 120 次 legacy 评测。未指定协议和旧提示词参数时，两个任务均使用课程统一提示词。可用 `--profiles basic` 只测一个档位；不同任务共用一个检查点，因此只在 2×5 训练的模型，其 2×10 成绩应标为迁移测试。
 
 首次运行输出目录必须不存在。先加 `--dry-run` 可打印配置、不加载策略；中断后用**完全相同的命令加 `--resume`**，跳过已写入的完整回合。Ctrl+C/SIGTERM 会标记停止；正在执行但未写完的回合不计入成绩，续跑会重做。配置、检查点、脚本或共享执行代码哈希变化会拒绝续跑，应换新目录。
 

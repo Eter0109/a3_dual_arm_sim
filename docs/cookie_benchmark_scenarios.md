@@ -1,6 +1,6 @@
 # 饼干扩展场景 benchmark
 
-> 课程版 `course-v1` 的当前任务、统一提示词、目标盒评分和专家入口以 [课程 Benchmark 说明](../src/a3_dual_arm_sim/COURSE_BENCHMARK.md) 为准。下文保留历史 legacy 协议说明和来源配额任务；如需按下文的旧提示词和成功条件运行单项，请显式使用 `--protocol legacy`。
+> 课程版 `course-v1` 的当前任务、统一提示词、目标盒评分和专家入口以 [课程 Benchmark 说明](course_benchmark.md) 为准。下文保留历史 legacy 协议说明和来源配额任务；如需按下文的旧提示词和成功条件运行单项，请显式使用 `--protocol legacy`。
 
 以下六种初始场景使用既有 `benchmark_cookie_batch` 入口、相机、动作接口和 JSON 报告。
 它们是独立的 2×5 扩展任务，不改变 `2x5` 或 `2x10` 的评分协议。
