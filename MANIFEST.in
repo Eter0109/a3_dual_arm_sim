@@ -1,6 +1,7 @@
 recursive-include assets *.STL *.stl *.urdf *.md *.txt
 recursive-include configs *.yaml
-recursive-include docs *.md
+recursive-include docs *.md *.html *.pdf *.png
+include docs/course_visual_guide/screenshots_manifest.json
 include setup.py
 recursive-include examples *.py
 recursive-include tests *.py
